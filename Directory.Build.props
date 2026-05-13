@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <AllowMissingPrunePackageData>true</AllowMissingPrunePackageData>
+    <NuGetAudit>false</NuGetAudit>
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);NU1900</WarningsNotAsErrors>
+  </PropertyGroup>
+</Project>

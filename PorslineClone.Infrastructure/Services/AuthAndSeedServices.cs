@@ -1,0 +1,602 @@
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Cryptography;
+using System.Security.Claims;
+using System.Text;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
+using PorslineClone.Application.Abstractions;
+using PorslineClone.Application.Contracts;
+using PorslineClone.Domain.Entities;
+using PorslineClone.Infrastructure.Auth;
+using PorslineClone.Infrastructure.Persistence;
+
+namespace PorslineClone.Infrastructure.Services;
+
+public class AuthService(UserManager<AppUser> userManager, RoleManager<AppRole> roleManager, AppDbContext db, ISmsSender smsSender, IOptions<JwtOptions> jwtOptions) : IAuthService
+{
+    public async Task<OtpSendResultDto> SendOtpAsync(string mobileNumber, string ipAddress, CancellationToken cancellationToken = default)
+    {
+        var settings = await GetSecuritySettingsAsync(cancellationToken);
+        if (await IsRateLimitedAsync(ipAddress, "otp_send", settings, cancellationToken))
+        {
+            await AddLoginAttemptAsync(mobileNumber, ipAddress, "otp_send", false, cancellationToken);
+            return new OtpSendResultDto(false, null);
+        }
+
+        var user = await userManager.Users.FirstOrDefaultAsync(x => x.PhoneNumber == mobileNumber && !x.IsSoftDeleted && x.IsActive, cancellationToken);
+        if (user is null)
+        {
+            await AddLoginAttemptAsync(mobileNumber, ipAddress, "otp_send", false, cancellationToken);
+            return new OtpSendResultDto(false, null);
+        }
+
+        var code = Random.Shared.Next(100000, 999999).ToString();
+        db.OtpCodes.Add(new OtpCode { Id = Guid.NewGuid(), MobileNumber = mobileNumber, Code = code, ExpiresAtUtc = DateTime.UtcNow.AddMinutes(2) });
+
+        bool isDev = string.Equals(
+            Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT"),
+            "Development", StringComparison.OrdinalIgnoreCase);
+
+        bool isSent;
+        if (isDev)
+        {
+            // در محیط Development پیامک OTP ارسال نمی‌شود — کد به صفحه confirm برمی‌گردد
+            isSent = true;
+        }
+        else
+        {
+            isSent = await smsSender.SendSmsAsync(new SmsRequest(mobileNumber, $"کد ورود شما: {code}"), cancellationToken);
+        }
+
+        await AddLoginAttemptAsync(mobileNumber, ipAddress, "otp_send", isSent, cancellationToken);
+        return new OtpSendResultDto(isSent, isDev ? code : null);
+    }
+
+    public async Task<AuthResponseDto?> VerifyOtpAsync(string mobileNumber, string code, string ipAddress, CancellationToken cancellationToken = default)
+    {
+        var settings = await GetSecuritySettingsAsync(cancellationToken);
+        if (await IsRateLimitedAsync(ipAddress, "otp_verify", settings, cancellationToken))
+        {
+            await AddLoginAttemptAsync(mobileNumber, ipAddress, "otp_verify", false, cancellationToken);
+            return null;
+        }
+
+        if (await IsLockedOutAsync(mobileNumber, settings, cancellationToken))
+        {
+            await AddLoginAttemptAsync(mobileNumber, ipAddress, "otp_verify", false, cancellationToken);
+            return null;
+        }
+
+        var otp = await db.OtpCodes.Where(x => x.MobileNumber == mobileNumber && !x.IsUsed && x.ExpiresAtUtc > DateTime.UtcNow)
+            .OrderByDescending(x => x.CreatedAtUtc).FirstOrDefaultAsync(cancellationToken);
+        if (otp is null || otp.Code != code)
+        {
+            await AddLoginAttemptAsync(mobileNumber, ipAddress, "otp_verify", false, cancellationToken);
+            return null;
+        }
+
+        var user = await userManager.Users.FirstOrDefaultAsync(x => x.PhoneNumber == mobileNumber && !x.IsSoftDeleted && x.IsActive, cancellationToken);
+        if (user is null)
+        {
+            await AddLoginAttemptAsync(mobileNumber, ipAddress, "otp_verify", false, cancellationToken);
+            return null;
+        }
+
+        otp.IsUsed = true;
+        await AddLoginAttemptAsync(mobileNumber, ipAddress, "otp_verify", true, cancellationToken);
+        await db.SaveChangesAsync(cancellationToken);
+        return await BuildAuthResponseAsync(user, cancellationToken);
+    }
+
+    public async Task<AuthResponseDto?> LoginWithPasswordAsync(string mobileNumber, string password, string ipAddress, CancellationToken cancellationToken = default)
+    {
+        var settings = await GetSecuritySettingsAsync(cancellationToken);
+        if (await IsRateLimitedAsync(ipAddress, "pwd_login", settings, cancellationToken))
+        {
+            await AddLoginAttemptAsync(mobileNumber, ipAddress, "pwd_login", false, cancellationToken);
+            return null;
+        }
+
+        if (await IsLockedOutAsync(mobileNumber, settings, cancellationToken))
+        {
+            await AddLoginAttemptAsync(mobileNumber, ipAddress, "pwd_login", false, cancellationToken);
+            return null;
+        }
+
+        var user = await userManager.Users.FirstOrDefaultAsync(x => x.PhoneNumber == mobileNumber && !x.IsSoftDeleted && x.IsActive, cancellationToken);
+        if (user is null)
+        {
+            await AddLoginAttemptAsync(mobileNumber, ipAddress, "pwd_login", false, cancellationToken);
+            return null;
+        }
+
+        var valid = await userManager.CheckPasswordAsync(user, password);
+        if (!valid)
+        {
+            await AddLoginAttemptAsync(mobileNumber, ipAddress, "pwd_login", false, cancellationToken);
+            return null;
+        }
+
+        await AddLoginAttemptAsync(mobileNumber, ipAddress, "pwd_login", true, cancellationToken);
+        return await BuildAuthResponseAsync(user, cancellationToken);
+    }
+
+    public async Task<AuthResponseDto?> RefreshTokenAsync(string refreshToken, CancellationToken cancellationToken = default)
+    {
+        var now = DateTime.UtcNow;
+        var tokenHash = HashToken(refreshToken);
+        var stored = await db.RefreshTokens
+            .Where(x => x.TokenHash == tokenHash)
+            .OrderByDescending(x => x.CreatedAtUtc)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (stored is null || stored.RevokedAtUtc is not null || stored.ExpiresAtUtc <= now)
+            return null;
+
+        var user = await userManager.Users.FirstOrDefaultAsync(x => x.Id == stored.UserId && !x.IsSoftDeleted && x.IsActive, cancellationToken);
+        if (user is null) return null;
+
+        stored.RevokedAtUtc = now;
+        var nextRawToken = GenerateSecureToken();
+        stored.ReplacedByTokenHash = HashToken(nextRawToken);
+
+        db.RefreshTokens.Add(new RefreshToken
+        {
+            Id = Guid.NewGuid(),
+            UserId = user.Id,
+            TokenHash = stored.ReplacedByTokenHash,
+            CreatedAtUtc = now,
+            ExpiresAtUtc = now.AddDays(7)
+        });
+
+        await db.SaveChangesAsync(cancellationToken);
+        return await BuildAuthResponseAsync(user, cancellationToken, nextRawToken);
+    }
+
+    public async Task<bool> RevokeRefreshTokenAsync(string refreshToken, CancellationToken cancellationToken = default)
+    {
+        var tokenHash = HashToken(refreshToken);
+        var stored = await db.RefreshTokens
+            .Where(x => x.TokenHash == tokenHash)
+            .OrderByDescending(x => x.CreatedAtUtc)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (stored is null || stored.RevokedAtUtc is not null) return false;
+        stored.RevokedAtUtc = DateTime.UtcNow;
+        await db.SaveChangesAsync(cancellationToken);
+        return true;
+    }
+
+    private async Task<AuthResponseDto> BuildAuthResponseAsync(AppUser user, CancellationToken cancellationToken, string? rawRefreshToken = null)
+    {
+        var roleNames = await userManager.GetRolesAsync(user);
+        var roleName = roleNames.FirstOrDefault() ?? "User";
+
+        // جمع‌آوری permissions از تمام role‌های کاربر
+        var roleIds = await roleManager.Roles
+            .Where(x => roleNames.Contains(x.Name!))
+            .Select(x => x.Id)
+            .ToListAsync(cancellationToken);
+
+        var perms = await db.RolePermissions
+            .Where(x => roleIds.Contains(x.RoleId))
+            .Select(x => x.Permission!.Name)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+
+        var jwt = jwtOptions.Value;
+        var claims = new List<Claim>
+        {
+            new(ClaimTypes.NameIdentifier, user.Id.ToString()),
+            new(ClaimTypes.Name, $"{user.FirstName} {user.LastName}"),
+            new(ClaimTypes.Role, roleName)
+        };
+        foreach (var rn in roleNames) claims.Add(new Claim(ClaimTypes.Role, rn));
+        claims.AddRange(perms.Select(x => new Claim("permission", x)));
+
+        var token = new JwtSecurityToken(
+            jwt.Issuer,
+            jwt.Audience,
+            claims,
+            expires: DateTime.UtcNow.AddMinutes(jwt.ExpMinutes),
+            signingCredentials: new SigningCredentials(new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt.Key)), SecurityAlgorithms.HmacSha256));
+
+        var refreshTokenValue = rawRefreshToken ?? GenerateSecureToken();
+        var refreshExpire = DateTime.UtcNow.AddDays(7);
+
+        if (rawRefreshToken is null)
+        {
+            db.RefreshTokens.Add(new RefreshToken
+            {
+                Id = Guid.NewGuid(),
+                UserId = user.Id,
+                TokenHash = HashToken(refreshTokenValue),
+                CreatedAtUtc = DateTime.UtcNow,
+                ExpiresAtUtc = refreshExpire
+            });
+            await db.SaveChangesAsync(cancellationToken);
+        }
+
+        return new AuthResponseDto(
+            new JwtSecurityTokenHandler().WriteToken(token),
+            refreshTokenValue,
+            token.ValidTo,
+            refreshExpire,
+            $"{user.FirstName} {user.LastName}".Trim(),
+            roleName);
+    }
+
+    private static string GenerateSecureToken()
+    {
+        var bytes = RandomNumberGenerator.GetBytes(64);
+        return Convert.ToBase64String(bytes);
+    }
+
+    private static string HashToken(string token)
+    {
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(token));
+        return Convert.ToHexString(hash);
+    }
+
+    private async Task<SecuritySettings> GetSecuritySettingsAsync(CancellationToken cancellationToken)
+    {
+        var settings = await db.SecuritySettings.FirstOrDefaultAsync(cancellationToken);
+        if (settings is not null) return settings;
+
+        settings = new SecuritySettings();
+        db.SecuritySettings.Add(settings);
+        await db.SaveChangesAsync(cancellationToken);
+        return settings;
+    }
+
+    private async Task<bool> IsRateLimitedAsync(string ipAddress, string attemptType, SecuritySettings settings, CancellationToken cancellationToken)
+    {
+        if (!settings.EnableRateLimiting) return false;
+
+        var since = DateTime.UtcNow.AddMinutes(-1);
+        var count = await db.LoginAttempts
+            .Where(x => x.IpAddress == ipAddress && x.AttemptType == attemptType && x.CreatedAtUtc >= since)
+            .CountAsync(cancellationToken);
+
+        return count >= settings.MaxRequestsPerMinutePerIp;
+    }
+
+    private async Task<bool> IsLockedOutAsync(string mobileNumber, SecuritySettings settings, CancellationToken cancellationToken)
+    {
+        var since = DateTime.UtcNow.AddMinutes(-settings.LockoutMinutes);
+        var failedCount = await db.LoginAttempts
+            .Where(x => x.MobileNumber == mobileNumber && x.AttemptType == "otp_verify" && !x.IsSuccess && x.CreatedAtUtc >= since)
+            .CountAsync(cancellationToken);
+
+        return failedCount >= settings.MaxFailedOtpAttempts;
+    }
+
+    private async Task AddLoginAttemptAsync(string mobileNumber, string ipAddress, string attemptType, bool isSuccess, CancellationToken cancellationToken)
+    {
+        db.LoginAttempts.Add(new LoginAttempt
+        {
+            Id = Guid.NewGuid(),
+            MobileNumber = mobileNumber,
+            IpAddress = string.IsNullOrWhiteSpace(ipAddress) ? "unknown" : ipAddress,
+            AttemptType = attemptType,
+            IsSuccess = isSuccess,
+            CreatedAtUtc = DateTime.UtcNow
+        });
+
+        await db.SaveChangesAsync(cancellationToken);
+    }
+}
+
+public static class DbSeeder
+{
+    public static async Task EnsureReferenceDataAsync(AppDbContext db, RoleManager<AppRole> roleManager, CancellationToken cancellationToken = default)
+    {
+        // Roles
+        var requiredRoles = new[]
+        {
+            new AppRole { Name = "Admin", DisplayName = "مدیر سیستم" },
+            new AppRole { Name = "Expert", DisplayName = "کارشناس" }
+        };
+        foreach (var rr in requiredRoles)
+        {
+            var role = await roleManager.FindByNameAsync(rr.Name!);
+            if (role is null)
+            {
+                await roleManager.CreateAsync(new AppRole
+                {
+                    Id = Guid.NewGuid(),
+                    Name = rr.Name,
+                    NormalizedName = rr.Name!.ToUpperInvariant(),
+                    DisplayName = rr.DisplayName
+                });
+            }
+            else if (role.DisplayName != rr.DisplayName)
+            {
+                role.DisplayName = rr.DisplayName;
+                await roleManager.UpdateAsync(role);
+            }
+        }
+
+        // Permissions (granular)
+        var permissionNames = new[]
+        {
+            "users.read","users.read.all","users.add","users.update","users.delete",
+            "settings.read","settings.update",
+            "roles.read","roles.update",
+            "menus.view","profile.update","messages.read",
+            "forms.read","forms.read.all","forms.add","forms.update","forms.delete",
+            "forms.rules.read","forms.rules.update",
+            "forms.access.read","forms.access.read.all","forms.access.update",
+            "approvals.read","approvals.update",
+            "responders.read","responders.read.all","responders.add","responders.update","responders.send",
+            "usergroups.read","usergroups.read.all","usergroups.add","usergroups.update"
+        }
+        .Select(x => x.Trim())
+        .Where(x => !string.IsNullOrWhiteSpace(x))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+        foreach (var name in permissionNames)
+        {
+            if (!await db.Permissions.AnyAsync(x => x.Name == name, cancellationToken))
+                db.Permissions.Add(new Permission { Id = Guid.NewGuid(), Name = name });
+        }
+        await db.SaveChangesAsync(cancellationToken);
+
+        // Menus
+        var formsMenu = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "forms", cancellationToken);
+        if (formsMenu is null)
+        {
+            formsMenu = new MenuItem { Id = Guid.NewGuid(), Key = "forms", Title = "فرم ساز", Icon = "LayoutTemplate", IconColor = "#10B981", Route = null, Order = 0 };
+            db.MenuItems.Add(formsMenu);
+        }
+        else
+        {
+            formsMenu.Route = null;
+            formsMenu.Icon = "LayoutTemplate";
+            formsMenu.IconColor = "#10B981";
+        }
+
+        var usersMenu = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "users", cancellationToken);
+        if (usersMenu is null)
+        {
+            usersMenu = new MenuItem { Id = Guid.NewGuid(), Key = "users", Title = "مدیریت کاربران", Icon = "Users", IconColor = "#0EA5E9", Route = null, Order = 1 };
+            db.MenuItems.Add(usersMenu);
+        }
+        else
+        {
+            usersMenu.Route = null;
+            usersMenu.Icon = "Users";
+            usersMenu.IconColor = "#0EA5E9";
+        }
+
+        var settingsMenu = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "settings", cancellationToken);
+        if (settingsMenu is null)
+        {
+            settingsMenu = new MenuItem { Id = Guid.NewGuid(), Key = "settings", Title = "تنظیمات سایت", Icon = "Settings", IconColor = "#F59E0B", Order = 2 };
+            db.MenuItems.Add(settingsMenu);
+        }
+        await db.SaveChangesAsync(cancellationToken);
+
+        settingsMenu = await db.MenuItems.FirstAsync(x => x.Key == "settings", cancellationToken);
+        var requiredMenus = new[]
+        {
+            new MenuItem { Key = "settings.site", Title = "دامنه و لینک پیامک", Icon = "Settings", IconColor = "#059669", Route = "/admin/settings/site", Order = 1, ParentId = settingsMenu.Id },
+            new MenuItem { Key = "settings.sms", Title = "تنظیمات پیامک", Icon = "MessageSquare", IconColor = "#8B5CF6", Route = "/admin/settings/sms", Order = 2, ParentId = settingsMenu.Id },
+            new MenuItem { Key = "settings.security", Title = "تنظیمات امنیتی", Icon = "ShieldCheck", IconColor = "#EF4444", Route = "/admin/settings/security", Order = 3, ParentId = settingsMenu.Id },
+            new MenuItem { Key = "settings.access", Title = "سطح دسترسی", Icon = "Shield", IconColor = "#2563EB", Route = "/admin/access-level", Order = 4, ParentId = settingsMenu.Id },
+            new MenuItem { Key = "settings.responders", Title = "تنظیمات پاسخگو", Icon = "Phone", IconColor = "#0EA5E9", Route = "/admin/settings/responders", Order = 5, ParentId = settingsMenu.Id }
+        };
+        foreach (var rm in requiredMenus)
+        {
+            if (!await db.MenuItems.AnyAsync(x => x.Key == rm.Key, cancellationToken))
+                db.MenuItems.Add(new MenuItem { Id = Guid.NewGuid(), Key = rm.Key, Title = rm.Title, Icon = rm.Icon, IconColor = rm.IconColor, Route = rm.Route, Order = rm.Order, ParentId = rm.ParentId });
+        }
+        var usersMenuForChild = await db.MenuItems.FirstAsync(x => x.Key == "users", cancellationToken);
+        var respondersMenu = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "responders", cancellationToken);
+        if (respondersMenu is null)
+        {
+            respondersMenu = new MenuItem { Id = Guid.NewGuid(), Key = "responders", Title = "مدیریت پاسخگو", Icon = "Phone", IconColor = "#0EA5E9", Route = null, Order = 3 };
+            db.MenuItems.Add(respondersMenu);
+        }
+        else
+        {
+            respondersMenu.Route = null;
+            respondersMenu.Icon = "Phone";
+            respondersMenu.IconColor = "#0EA5E9";
+        }
+        var extraMenus = new[]
+        {
+            new MenuItem { Key = "forms.list", Title = "لیست فرم‌ها", Icon = "LayoutTemplate", IconColor = "#10B981", Route = "/admin/forms", Order = 1, ParentId = formsMenu.Id },
+            new MenuItem { Key = "forms.rules", Title = "شرط فرم", Icon = "GitBranch", IconColor = "#2563EB", Route = "/admin/forms/rules", Order = 2, ParentId = formsMenu.Id },
+            new MenuItem { Key = "forms.access", Title = "ارجاع فرم", Icon = "FileText", IconColor = "#0EA5E9", Route = "/admin/forms/access", Order = 3, ParentId = formsMenu.Id },
+            new MenuItem { Key = "users.list", Title = "لیست کاربران", Icon = "Users", IconColor = "#0EA5E9", Route = "/admin/users", Order = 1, ParentId = usersMenuForChild.Id },
+            new MenuItem { Key = "users.create", Title = "ایجاد کاربر", Icon = "User", IconColor = "#10B981", Route = "/admin/users/create", Order = 2, ParentId = usersMenuForChild.Id },
+            new MenuItem { Key = "responders.list", Title = "لیست پاسخگو", Icon = "Phone", IconColor = "#0EA5E9", Route = "/admin/responders", Order = 1, ParentId = respondersMenu.Id },
+            new MenuItem { Key = "responders.create", Title = "ایجاد پاسخگو", Icon = "User", IconColor = "#10B981", Route = "/admin/responders/create", Order = 2, ParentId = respondersMenu.Id },
+            new MenuItem { Key = "responders.groups", Title = "گروه‌بندی", Icon = "Phone", IconColor = "#2563EB", Route = "/admin/responders/groups", Order = 3, ParentId = respondersMenu.Id },
+            new MenuItem { Key = "responders.send", Title = "ارسال فرم", Icon = "Send", IconColor = "#4F46E5", Route = "/admin/responders/send", Order = 4, ParentId = respondersMenu.Id },
+            new MenuItem { Key = "responders.userforms", Title = "فرم کاربران", Icon = "FileText", IconColor = "#0EA5E9", Route = "/admin/responders/user-forms", Order = 5, ParentId = respondersMenu.Id },
+            new MenuItem { Key = "users.groups", Title = "گروه‌بندی", Icon = "Users", IconColor = "#2563EB", Route = "/admin/users/groups", Order = 3, ParentId = usersMenuForChild.Id },
+            new MenuItem { Key = "approvals", Title = "تأییدیه‌ها", Icon = "CheckCircle2", IconColor = "#10B981", Route = "/admin/approvals", Order = 4, ParentId = null },
+            new MenuItem { Key = "profile", Title = "پروفایل", Icon = "User", IconColor = "#0EA5E9", Route = "/admin/profile", Order = 5, ParentId = null },
+            new MenuItem { Key = "messages", Title = "صندوق پیام", Icon = "Mail", IconColor = "#A855F7", Route = "/admin/messages", Order = 6, ParentId = null },
+        };
+        foreach (var rm in extraMenus)
+        {
+            if (!await db.MenuItems.AnyAsync(x => x.Key == rm.Key, cancellationToken))
+                db.MenuItems.Add(new MenuItem { Id = Guid.NewGuid(), Key = rm.Key, Title = rm.Title, Icon = rm.Icon, IconColor = rm.IconColor, Route = rm.Route, Order = rm.Order, ParentId = rm.ParentId });
+        }
+
+        if (!await db.SecuritySettings.AnyAsync(cancellationToken))
+            db.SecuritySettings.Add(new SecuritySettings());
+        if (!await db.SmsSettings.AnyAsync(cancellationToken))
+            db.SmsSettings.Add(new SmsSettings { UserCreateSmsEnabled = true });
+        else
+        {
+            var sms = await db.SmsSettings.FirstAsync(cancellationToken);
+            // ensure new field populated for old rows
+            if (!sms.UserCreateSmsEnabled) { /* keep admin choice if false */ }
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+
+        // RolePermissions/RoleMenus
+        var admin = await roleManager.FindByNameAsync("Admin");
+        var expert = await roleManager.FindByNameAsync("Expert");
+        if (admin is null || expert is null) return;
+
+        var perms = await db.Permissions.ToDictionaryAsync(x => x.Name, x => x.Id, cancellationToken);
+        var menus = await db.MenuItems.ToDictionaryAsync(x => x.Key, x => x.Id, cancellationToken);
+
+        var adminPerms = permissionNames;
+        var expertPerms = new[] { "menus.view", "profile.update", "messages.read", "forms.read", "forms.add", "forms.update", "approvals.read", "approvals.update", "responders.send" };
+        foreach (var p in adminPerms)
+            if (perms.TryGetValue(p, out var pid) && !await db.RolePermissions.AnyAsync(x => x.RoleId == admin.Id && x.PermissionId == pid, cancellationToken))
+                db.RolePermissions.Add(new RolePermission { RoleId = admin.Id, PermissionId = pid });
+        foreach (var p in expertPerms)
+            if (perms.TryGetValue(p, out var pid) && !await db.RolePermissions.AnyAsync(x => x.RoleId == expert.Id && x.PermissionId == pid, cancellationToken))
+                db.RolePermissions.Add(new RolePermission { RoleId = expert.Id, PermissionId = pid });
+
+        var adminMenuKeys = new[] { "forms", "forms.list", "forms.rules", "forms.access", "users", "users.list", "users.create", "users.groups", "responders", "responders.list", "responders.create", "responders.groups", "responders.send", "responders.userforms", "approvals", "settings", "settings.site", "settings.sms", "settings.security", "settings.access", "settings.responders", "profile", "messages" };
+        var expertMenuKeys = new[] { "forms", "forms.list", "forms.rules", "users", "users.list", "responders", "responders.list", "responders.send", "responders.userforms", "approvals", "profile", "messages" };
+        foreach (var k in adminMenuKeys)
+            if (menus.TryGetValue(k, out var mid) && !await db.RoleMenus.AnyAsync(x => x.RoleId == admin.Id && x.MenuId == mid, cancellationToken))
+                db.RoleMenus.Add(new RoleMenu { RoleId = admin.Id, MenuId = mid });
+        foreach (var k in expertMenuKeys)
+            if (menus.TryGetValue(k, out var mid) && !await db.RoleMenus.AnyAsync(x => x.RoleId == expert.Id && x.MenuId == mid, cancellationToken))
+                db.RoleMenus.Add(new RoleMenu { RoleId = expert.Id, MenuId = mid });
+
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// کاربر Admin و چند کاربر Expert پیش‌فرض را به‌صورت idempotent ایجاد/به‌روزرسانی می‌کند.
+    /// </summary>
+    public static async Task SeedAdminUserAsync(AppDbContext db, UserManager<AppUser> userManager)
+    {
+        var seededUserIds = new HashSet<Guid>();
+        var admin = await userManager.Users.FirstOrDefaultAsync(x =>
+            x.PhoneNumber == "09120000000" || x.NationalCode == "0012345678");
+
+        if (admin is null)
+        {
+            admin = new AppUser
+            {
+                Id = Guid.NewGuid(),
+                UserName = "09120000000",
+                PhoneNumber = "09132251359",
+                FirstName = "مدیر",
+                LastName = "سیستم",
+                NationalCode = "0012345678",
+                IsActive = true,
+                PhoneNumberConfirmed = true
+            };
+
+            var create = await userManager.CreateAsync(admin, "Admin@123456");
+            if (!create.Succeeded) return;
+        }
+        else
+        {
+            admin.UserName = "09120000000";
+            admin.PhoneNumber = "09132251359";
+            admin.FirstName = string.IsNullOrWhiteSpace(admin.FirstName) ? "مدیر" : admin.FirstName;
+            admin.LastName = string.IsNullOrWhiteSpace(admin.LastName) ? "سیستم" : admin.LastName;
+            admin.NationalCode = "0012345678";
+            admin.IsActive = true;
+            admin.PhoneNumberConfirmed = true;
+            await userManager.UpdateAsync(admin);
+        }
+
+        var roles = await userManager.GetRolesAsync(admin);
+        if (!roles.Contains("Admin"))
+            await userManager.AddToRoleAsync(admin, "Admin");
+        seededUserIds.Add(admin.Id);
+
+        if (!await db.InboxMessages.AnyAsync(x => x.UserId == admin.Id))
+        {
+            db.InboxMessages.Add(new InboxMessage
+            {
+                Id = Guid.NewGuid(),
+                UserId = admin.Id,
+                Title = "خوش آمدید",
+                Body = "پنل مدیریت شما آماده استفاده است.",
+                IsRead = false
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var expertSeeds = new[]
+        {
+            new { UserName = "09121000001", Phone = "09121000001", NationalCode = "0010000001", FirstName = "کارشناس", LastName = "اول" },
+            new { UserName = "09121000002", Phone = "09121000002", NationalCode = "0010000002", FirstName = "کارشناس", LastName = "دوم" },
+            new { UserName = "09121000003", Phone = "09121000003", NationalCode = "0010000003", FirstName = "کارشناس", LastName = "سوم" },
+            new { UserName = "09121000004", Phone = "09121000004", NationalCode = "0010000004", FirstName = "کارشناس", LastName = "چهارم" },
+        };
+
+        foreach (var s in expertSeeds)
+        {
+            var expert = await userManager.Users.FirstOrDefaultAsync(x =>
+                x.PhoneNumber == s.Phone || x.NationalCode == s.NationalCode);
+
+            if (expert is null)
+            {
+                expert = new AppUser
+                {
+                    Id = Guid.NewGuid(),
+                    UserName = s.UserName,
+                    PhoneNumber = s.Phone,
+                    FirstName = s.FirstName,
+                    LastName = s.LastName,
+                    NationalCode = s.NationalCode,
+                    IsActive = true,
+                    PhoneNumberConfirmed = true
+                };
+
+                var create = await userManager.CreateAsync(expert, "Expert@123456");
+                if (!create.Succeeded) continue;
+            }
+            else
+            {
+                expert.UserName = s.UserName;
+                expert.PhoneNumber = s.Phone;
+                expert.FirstName = string.IsNullOrWhiteSpace(expert.FirstName) ? s.FirstName : expert.FirstName;
+                expert.LastName = string.IsNullOrWhiteSpace(expert.LastName) ? s.LastName : expert.LastName;
+                expert.NationalCode = s.NationalCode;
+                expert.IsActive = true;
+                expert.PhoneNumberConfirmed = true;
+                await userManager.UpdateAsync(expert);
+            }
+
+            var expertRoles = await userManager.GetRolesAsync(expert);
+            if (!expertRoles.Contains("Expert"))
+                await userManager.AddToRoleAsync(expert, "Expert");
+
+            seededUserIds.Add(expert.Id);
+        }
+
+        const string seededUsersGroupName = "کاربران سید";
+        var seededUsersGroup = await db.UserGroups.FirstOrDefaultAsync(x => x.Name == seededUsersGroupName);
+        if (seededUsersGroup is null)
+        {
+            seededUsersGroup = new UserGroup
+            {
+                Id = Guid.NewGuid(),
+                Name = seededUsersGroupName,
+                CreatedAtUtc = DateTime.UtcNow
+            };
+            db.UserGroups.Add(seededUsersGroup);
+            await db.SaveChangesAsync();
+        }
+
+        foreach (var userId in seededUserIds)
+        {
+            var isMember = await db.UserGroupMembers.AnyAsync(x => x.UserId == userId && x.GroupId == seededUsersGroup.Id);
+            if (!isMember)
+                db.UserGroupMembers.Add(new UserGroupMember { UserId = userId, GroupId = seededUsersGroup.Id });
+        }
+
+        await db.SaveChangesAsync();
+    }
+}
