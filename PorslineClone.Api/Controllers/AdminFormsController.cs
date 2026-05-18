@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Text.RegularExpressions;
 using PorslineClone.Application.Abstractions;
+using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
 using PorslineClone.Api.RuleEngine;
@@ -551,9 +552,6 @@ public class SaveRuleActionPayload
 }
 
 public record ConditionRuleDto(Guid Id, Guid SourceFieldId, string Operator, string Value, string Action);
-public record WorkflowStepDto(string Id, int Order, Guid UserId, string? Note, string OnReject = "stop");
-public record SaveWorkflowRequest(bool Enabled, List<WorkflowStepDto> Steps);
-public record WorkflowSettingsDto(bool Enabled, List<WorkflowStepDto> Steps);
 public record SaveFieldRulesRequest(List<RuleDefinition> Rules);
 public record UpdateFormStatusRequest(bool IsActive);
 public class SubmitFormRequest

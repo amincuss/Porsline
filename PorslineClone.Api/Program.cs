@@ -47,8 +47,14 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddOpenApi();
 builder.Services.AddSwaggerGen(options =>
 {
-    // جلوگیری از تداخل schema وقتی دو نوع هم‌نام در Api و Application وجود دارد (مثلاً WorkflowStepDto)
-    options.CustomSchemaIds(type => type.FullName?.Replace("+", ".") ?? type.Name);
+    // جلوگیری از تداخل schema برای انواع هم‌نام در لایه‌های مختلف
+    options.CustomSchemaIds(type =>
+    {
+        var id = type.FullName?.Replace("+", ".");
+        if (!string.IsNullOrEmpty(id))
+            return id;
+        return $"{type.Namespace}.{type.Name}";
+    });
 });
 builder.Services.AddInfrastructure(builder.Configuration);
 builder.Services.AddScoped<IRuleEvaluationService, RuleEvaluationService>();

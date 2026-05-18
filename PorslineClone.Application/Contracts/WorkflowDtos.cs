@@ -2,6 +2,10 @@ namespace PorslineClone.Application.Contracts;
 
 public record WorkflowStepDto(string Id, int Order, Guid UserId, string? Note, string OnReject = "stop");
 
+public record SaveWorkflowRequest(bool Enabled, List<WorkflowStepDto> Steps);
+
+public record WorkflowSettingsDto(bool Enabled, List<WorkflowStepDto> Steps);
+
 public record SaveWorkflowTemplateRequest(string Name, List<WorkflowStepDto> Steps);
 
 public record ContractWorkflowTemplateListItemDto(
