@@ -33,8 +33,8 @@ public class ContractSettings
     public int Id { get; set; }
     public bool ApprovalEnabled { get; set; }
     public string? ApprovalWorkflowJson { get; set; }
-    /// <summary>پیشوند شماره سند، مثلاً CNT</summary>
-    public string DocumentNumberPrefix { get; set; } = "CNT";
+    /// <summary>پیشوند شماره سند (ثابت EN در سرویس تولید شماره)</summary>
+    public string DocumentNumberPrefix { get; set; } = "EN";
     /// <summary>دوره شماره‌گذاری (yyyyMM) برای ریست سریال ماهانه</summary>
     public int DocumentSequencePeriod { get; set; }
     public int LastDocumentSequence { get; set; }

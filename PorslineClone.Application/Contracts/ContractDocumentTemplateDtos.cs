@@ -28,7 +28,8 @@ public record ContractDocumentTemplateVersionDto(
     IReadOnlyList<string> DetectedPlaceholders,
     string? ChangeNote,
     DateTime CreatedAtUtc,
-    bool IsActive);
+    bool IsActive,
+    IReadOnlyList<ContractTemplateFieldDto> Fields);
 
 public record ContractTemplateFieldDto(
     Guid Id,
@@ -57,7 +58,16 @@ public record GenerateContractFromTemplateRequest(
     IReadOnlyDictionary<string, string> FieldValues,
     bool ExportPdf = false);
 
+public record ContractDocumentTemplateVersionPickDto(
+    Guid Id,
+    int VersionNumber,
+    string FileName,
+    bool IsActive,
+    IReadOnlyList<ContractTemplateFieldDto> Fields);
+
 public record ContractDocumentTemplateActiveOptionDto(
     Guid Id,
     string Name,
-    IReadOnlyList<ContractTemplateFieldDto> Fields);
+    IReadOnlyList<ContractDocumentTemplateVersionPickDto> Versions);
+
+public record InsertTemplatePlaceholderRequest(string Key, int ParagraphIndex);

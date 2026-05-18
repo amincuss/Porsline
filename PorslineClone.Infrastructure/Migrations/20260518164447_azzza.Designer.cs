@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using PorslineClone.Infrastructure.Persistence;
 
@@ -11,9 +12,11 @@ using PorslineClone.Infrastructure.Persistence;
 namespace PorslineClone.Infrastructure.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260518164447_azzza")]
+    partial class azzza
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -557,17 +560,12 @@ namespace PorslineClone.Infrastructure.Migrations
                     b.Property<Guid>("TemplateId")
                         .HasColumnType("uniqueidentifier");
 
-                    b.Property<Guid>("VersionId")
-                        .HasColumnType("uniqueidentifier");
-
                     b.HasKey("Id");
 
-                    b.HasIndex("TemplateId");
-
-                    b.HasIndex("VersionId", "Key")
+                    b.HasIndex("TemplateId", "Key")
                         .IsUnique();
 
-                    b.HasIndex("VersionId", "SortOrder");
+                    b.HasIndex("TemplateId", "SortOrder");
 
                     b.ToTable("ContractDocumentTemplateFields");
                 });
@@ -637,7 +635,7 @@ namespace PorslineClone.Infrastructure.Migrations
                         .ValueGeneratedOnAdd()
                         .HasMaxLength(20)
                         .HasColumnType("nvarchar(20)")
-                        .HasDefaultValue("EN");
+                        .HasDefaultValue("CNT");
 
                     b.Property<int>("DocumentSequencePeriod")
                         .HasColumnType("int");
@@ -654,7 +652,7 @@ namespace PorslineClone.Infrastructure.Migrations
                         {
                             Id = 1,
                             ApprovalEnabled = false,
-                            DocumentNumberPrefix = "EN",
+                            DocumentNumberPrefix = "CNT",
                             DocumentSequencePeriod = 0,
                             LastDocumentSequence = 0
                         });
@@ -1991,18 +1989,10 @@ namespace PorslineClone.Infrastructure.Migrations
                     b.HasOne("PorslineClone.Domain.Entities.ContractDocumentTemplate", "Template")
                         .WithMany("Fields")
                         .HasForeignKey("TemplateId")
-                        .OnDelete(DeleteBehavior.NoAction)
-                        .IsRequired();
-
-                    b.HasOne("PorslineClone.Domain.Entities.ContractDocumentTemplateVersion", "Version")
-                        .WithMany("Fields")
-                        .HasForeignKey("VersionId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
                     b.Navigation("Template");
-
-                    b.Navigation("Version");
                 });
 
             modelBuilder.Entity("PorslineClone.Domain.Entities.ContractDocumentTemplateVersion", b =>
@@ -2165,11 +2155,6 @@ namespace PorslineClone.Infrastructure.Migrations
                     b.Navigation("Fields");
 
                     b.Navigation("Versions");
-                });
-
-            modelBuilder.Entity("PorslineClone.Domain.Entities.ContractDocumentTemplateVersion", b =>
-                {
-                    b.Navigation("Fields");
                 });
 
             modelBuilder.Entity("PorslineClone.Domain.Entities.Form", b =>

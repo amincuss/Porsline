@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using PorslineClone.Application.Abstractions;
+using PorslineClone.Application.ContractTemplates;
 using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
@@ -30,7 +31,9 @@ public class ContractDocumentTemplateService(
                 x.CreatedAtUtc,
                 x.UpdatedAtUtc,
                 x.ActiveVersionId,
-                FieldCount = x.Fields.Count,
+                FieldCount = x.ActiveVersionId != null
+                    ? x.Fields.Count(f => f.VersionId == x.ActiveVersionId)
+                    : 0,
                 ActiveVersionNumber = x.ActiveVersion != null ? (int?)x.ActiveVersion.VersionNumber : null
             })
             .ToListAsync(ct);
@@ -50,23 +53,32 @@ public class ContractDocumentTemplateService(
     {
         var templates = await db.ContractDocumentTemplates
             .AsNoTracking()
-            .Where(x => x.IsActive && x.ActiveVersionId != null)
-            .Include(x => x.Fields.OrderBy(f => f.SortOrder))
+            .Where(x => x.IsActive)
+            .Include(x => x.Versions.OrderByDescending(v => v.VersionNumber))
+                .ThenInclude(v => v.Fields.OrderBy(f => f.SortOrder))
             .OrderBy(x => x.Name)
             .ToListAsync(ct);
 
-        return templates.Select(t => new ContractDocumentTemplateActiveOptionDto(
-            t.Id,
-            t.Name,
-            t.Fields.Select(MapField).ToList())).ToList();
+        return templates
+            .Where(t => t.Versions.Count > 0)
+            .Select(t => new ContractDocumentTemplateActiveOptionDto(
+                t.Id,
+                t.Name,
+                t.Versions.Select(v => new ContractDocumentTemplateVersionPickDto(
+                    v.Id,
+                    v.VersionNumber,
+                    v.FileName,
+                    v.Id == t.ActiveVersionId,
+                    v.Fields.OrderBy(f => f.SortOrder).Select(MapField).ToList())).ToList()))
+            .ToList();
     }
 
     public async Task<ContractDocumentTemplateDetailDto?> GetAsync(Guid id, CancellationToken ct)
     {
         var t = await db.ContractDocumentTemplates
             .AsNoTracking()
-            .Include(x => x.Fields.OrderBy(f => f.SortOrder))
             .Include(x => x.Versions.OrderByDescending(v => v.VersionNumber))
+                .ThenInclude(v => v.Fields.OrderBy(f => f.SortOrder))
             .Include(x => x.ActiveVersion)
             .FirstOrDefaultAsync(x => x.Id == id, ct);
 
@@ -78,6 +90,14 @@ public class ContractDocumentTemplateService(
             ? DeserializePlaceholders(activeVersion.DetectedPlaceholdersJson)
             : [];
 
+        var activeFields = activeVersion is null
+            ? []
+            : t.Versions
+                .Where(v => v.Id == activeVersion.Id)
+                .SelectMany(v => v.Fields.OrderBy(f => f.SortOrder))
+                .Select(MapField)
+                .ToList();
+
         return new ContractDocumentTemplateDetailDto(
             t.Id,
             t.Name,
@@ -86,15 +106,8 @@ public class ContractDocumentTemplateService(
             t.ActiveVersionId,
             activeVersion?.VersionNumber,
             placeholders,
-            t.Fields.Select(MapField).ToList(),
-            t.Versions.Select(v => new ContractDocumentTemplateVersionDto(
-                v.Id,
-                v.VersionNumber,
-                v.FileName,
-                DeserializePlaceholders(v.DetectedPlaceholdersJson),
-                v.ChangeNote,
-                v.CreatedAtUtc,
-                v.Id == t.ActiveVersionId)).ToList());
+            activeFields,
+            t.Versions.Select(v => MapVersionDto(v, t.ActiveVersionId)).ToList());
     }
 
     public async Task<ContractDocumentTemplateDetailDto> CreateAsync(
@@ -186,7 +199,7 @@ public class ContractDocumentTemplateService(
         template.UpdatedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
 
-        await SyncFieldsFromPlaceholdersAsync(templateId, placeholders, ct);
+        await SyncFieldsFromPlaceholdersAsync(templateId, version.Id, placeholders, removeMissing: false, ct);
         return await GetAsync(templateId, ct);
     }
 
@@ -213,33 +226,60 @@ public class ContractDocumentTemplateService(
         CancellationToken ct)
     {
         var template = await db.ContractDocumentTemplates
-            .Include(x => x.Fields)
+            .AsNoTracking()
             .FirstOrDefaultAsync(x => x.Id == templateId, ct);
         if (template is null)
             return null;
+        if (template.ActiveVersionId is null)
+            throw new InvalidOperationException("نسخه پیش‌فرض تعریف نشده است");
 
-        db.ContractDocumentTemplateFields.RemoveRange(template.Fields);
+        return await SaveVersionFieldsAsync(templateId, template.ActiveVersionId.Value, req, ct);
+    }
+
+    public async Task<ContractDocumentTemplateDetailDto?> SaveVersionFieldsAsync(
+        Guid templateId,
+        Guid versionId,
+        SaveContractTemplateFieldsRequest req,
+        CancellationToken ct)
+    {
+        var version = await db.ContractDocumentTemplateVersions
+            .Include(v => v.Fields)
+            .FirstOrDefaultAsync(x => x.Id == versionId && x.TemplateId == templateId, ct);
+        if (version is null)
+            return null;
+
+        var placeholders = DeserializePlaceholders(version.DetectedPlaceholdersJson)
+            .Select(NormalizeKey)
+            .Where(k => !string.IsNullOrWhiteSpace(k))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        db.ContractDocumentTemplateFields.RemoveRange(version.Fields);
         var order = 0;
         foreach (var f in req.Fields.OrderBy(x => x.SortOrder))
         {
             var key = NormalizeKey(f.Key);
             if (string.IsNullOrWhiteSpace(key))
                 continue;
+            if (placeholders.Count > 0 && !placeholders.Contains(key))
+                throw new InvalidOperationException($"فیلد «{key}» در placeholderهای این نسخه Word وجود ندارد");
 
+            var fieldType = ParseFieldType(f.FieldType);
             db.ContractDocumentTemplateFields.Add(new ContractDocumentTemplateField
             {
                 Id = Guid.NewGuid(),
                 TemplateId = templateId,
+                VersionId = versionId,
                 Key = key,
                 Label = string.IsNullOrWhiteSpace(f.Label) ? key : f.Label.Trim(),
-                FieldType = ParseFieldType(f.FieldType),
-                IsRequired = f.IsRequired,
+                FieldType = fieldType,
+                IsRequired = ContractTemplateSystemFields.IsSystemFieldType(fieldType) ? false : f.IsRequired,
                 SortOrder = order++,
                 DefaultValue = string.IsNullOrWhiteSpace(f.DefaultValue) ? null : f.DefaultValue.Trim(),
                 OptionsJson = string.IsNullOrWhiteSpace(f.OptionsJson) ? null : f.OptionsJson.Trim()
             });
         }
 
+        var template = await db.ContractDocumentTemplates.FirstAsync(x => x.Id == templateId, ct);
         template.UpdatedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         return await GetAsync(templateId, ct);
@@ -252,7 +292,7 @@ public class ContractDocumentTemplateService(
         CancellationToken ct)
     {
         var (fullPath, fileName) = await ResolveActiveDocxAsync(templateId, ct);
-        var tempDocx = await generator.GenerateDocxAsync(fullPath, fieldValues, ct);
+        var tempDocx = await generator.GenerateDocxAsync(fullPath, NormalizeFieldValues(fieldValues), ct);
 
         if (exportPdf)
         {
@@ -275,24 +315,42 @@ public class ContractDocumentTemplateService(
 
     public async Task<(string tempDocxPath, string fileName, Guid versionId)> GenerateForContractAsync(
         Guid templateId,
+        Guid? versionId,
         IReadOnlyDictionary<string, string> fieldValues,
-        CancellationToken ct)
+        string? contractNumber = null,
+        CancellationToken ct = default)
     {
         var template = await db.ContractDocumentTemplates
             .AsNoTracking()
-            .Include(x => x.Fields)
             .Include(x => x.ActiveVersion)
+            .Include(x => x.Versions)
             .FirstOrDefaultAsync(x => x.Id == templateId && x.IsActive, ct)
             ?? throw new InvalidOperationException("قالب فعال یافت نشد");
 
-        if (template.ActiveVersion is null)
-            throw new InvalidOperationException("نسخه فعال قالب تعریف نشده است");
+        ContractDocumentTemplateVersion? version;
+        if (versionId is { } vid && vid != Guid.Empty)
+        {
+            version = template.Versions.FirstOrDefault(x => x.Id == vid)
+                ?? throw new InvalidOperationException("نسخه انتخاب‌شده برای این قالب یافت نشد");
+        }
+        else
+        {
+            version = template.ActiveVersion
+                ?? throw new InvalidOperationException("نسخه قالب را انتخاب کنید");
+        }
 
-        ValidateRequiredFields(template.Fields, fieldValues);
+        var versionFields = await db.ContractDocumentTemplateFields
+            .AsNoTracking()
+            .Where(f => f.VersionId == version.Id)
+            .OrderBy(f => f.SortOrder)
+            .ToListAsync(ct);
 
-        var fullPath = templateFiles.ResolveFullPath(template.ActiveVersion.FilePath);
-        var tempPath = await generator.GenerateDocxAsync(fullPath, fieldValues, ct);
-        return (tempPath, template.ActiveVersion.FileName, template.ActiveVersion.Id);
+        var normalizedValues = ContractTemplateSystemFields.MergeContractNumber(versionFields, fieldValues, contractNumber ?? "");
+        ValidateRequiredFields(versionFields, normalizedValues);
+
+        var fullPath = templateFiles.ResolveFullPath(version.FilePath);
+        var tempPath = await generator.GenerateDocxAsync(fullPath, normalizedValues, ct);
+        return (tempPath, version.FileName, version.Id);
     }
 
     private async Task<(string fullPath, string fileName)> ResolveActiveDocxAsync(Guid templateId, CancellationToken ct)
@@ -309,29 +367,55 @@ public class ContractDocumentTemplateService(
         return (templateFiles.ResolveFullPath(template.ActiveVersion.FilePath), template.ActiveVersion.FileName);
     }
 
-    private async Task SyncFieldsFromPlaceholdersAsync(Guid templateId, IReadOnlyList<string> placeholders, CancellationToken ct)
+    private async Task SyncFieldsFromPlaceholdersAsync(
+        Guid templateId,
+        Guid versionId,
+        IReadOnlyList<string> placeholders,
+        bool removeMissing,
+        CancellationToken ct)
     {
+        var placeholderKeySet = placeholders
+            .Select(NormalizeKey)
+            .Where(k => !string.IsNullOrWhiteSpace(k))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
         var existing = await db.ContractDocumentTemplateFields
-            .Where(x => x.TemplateId == templateId)
+            .Where(x => x.VersionId == versionId)
             .ToListAsync(ct);
+
+        if (removeMissing)
+        {
+            var toRemove = existing
+                .Where(f => !placeholderKeySet.Contains(NormalizeKey(f.Key)))
+                .ToList();
+            if (toRemove.Count > 0)
+                db.ContractDocumentTemplateFields.RemoveRange(toRemove);
+            existing = existing.Except(toRemove).ToList();
+        }
 
         var existingKeys = existing.Select(x => x.Key).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var order = existing.Count > 0 ? existing.Max(x => x.SortOrder) + 1 : 0;
 
-        foreach (var ph in placeholders)
+        foreach (var key in placeholderKeySet)
         {
-            var key = NormalizeKey(ph);
-            if (string.IsNullOrWhiteSpace(key) || existingKeys.Contains(key))
+            if (existingKeys.Contains(key))
                 continue;
 
+            var isContractNumber = ContractTemplateSystemFields.IsContractNumberKey(key);
+            var isImage = ContractTemplateSystemFields.IsImageKey(key);
             db.ContractDocumentTemplateFields.Add(new ContractDocumentTemplateField
             {
                 Id = Guid.NewGuid(),
                 TemplateId = templateId,
+                VersionId = versionId,
                 Key = key,
-                Label = key.Replace('_', ' '),
-                FieldType = ContractTemplateFieldType.Text,
-                IsRequired = true,
+                Label = isContractNumber ? "شماره قرارداد" : isImage ? "تصویر" : key.Replace('_', ' '),
+                FieldType = isContractNumber
+                    ? ContractTemplateFieldType.ContractNumber
+                    : isImage
+                        ? ContractTemplateFieldType.Image
+                        : ContractTemplateFieldType.Text,
+                IsRequired = !isContractNumber && !isImage,
                 SortOrder = order++
             });
             existingKeys.Add(key);
@@ -340,13 +424,52 @@ public class ContractDocumentTemplateService(
         await db.SaveChangesAsync(ct);
     }
 
+    private static ContractDocumentTemplateVersionDto MapVersionDto(
+        ContractDocumentTemplateVersion v,
+        Guid? activeVersionId) =>
+        new(
+            v.Id,
+            v.VersionNumber,
+            v.FileName,
+            DeserializePlaceholders(v.DetectedPlaceholdersJson),
+            v.ChangeNote,
+            v.CreatedAtUtc,
+            v.Id == activeVersionId,
+            v.Fields.OrderBy(f => f.SortOrder).Select(MapField).ToList());
+
+    private static Dictionary<string, string> NormalizeFieldValues(IReadOnlyDictionary<string, string> fieldValues)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kv in fieldValues)
+        {
+            var norm = NormalizeKey(kv.Key);
+            if (string.IsNullOrWhiteSpace(norm))
+                continue;
+            result[norm] = ContractDocumentGeneratorService.UnwrapStoredFieldValue(kv.Value);
+        }
+
+        return result;
+    }
+
     private static void ValidateRequiredFields(
         IEnumerable<ContractDocumentTemplateField> fields,
         IReadOnlyDictionary<string, string> values)
     {
-        foreach (var f in fields.Where(x => x.IsRequired))
+        foreach (var f in fields.Where(x => x.IsRequired && !ContractTemplateSystemFields.IsSystemFieldType(x.FieldType)))
         {
-            if (!values.TryGetValue(f.Key, out var v) || string.IsNullOrWhiteSpace(v))
+            var key = NormalizeKey(f.Key);
+            if (string.IsNullOrWhiteSpace(key) ||
+                !values.TryGetValue(key, out var v))
+                throw new InvalidOperationException($"فیلد «{f.Label}» الزامی است");
+
+            if (f.FieldType == ContractTemplateFieldType.Image)
+            {
+                if (!ContractTemplateImageValue.HasImageContent(v))
+                    throw new InvalidOperationException($"تصویر «{f.Label}» الزامی است");
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(v))
                 throw new InvalidOperationException($"فیلد «{f.Label}» الزامی است");
         }
     }
@@ -372,6 +495,9 @@ public class ContractDocumentTemplateService(
         "date" => ContractTemplateFieldType.Date,
         "phone" => ContractTemplateFieldType.Phone,
         "nationalid" => ContractTemplateFieldType.NationalId,
+        "signature" => ContractTemplateFieldType.Signature,
+        "contractnumber" => ContractTemplateFieldType.ContractNumber,
+        "image" => ContractTemplateFieldType.Image,
         _ => ContractTemplateFieldType.Text
     };
 
@@ -384,6 +510,71 @@ public class ContractDocumentTemplateService(
         f.SortOrder,
         f.DefaultValue,
         f.OptionsJson);
+
+    public async Task<ContractDocumentTemplateDetailDto?> ReplaceVersionFileAsync(
+        Guid templateId,
+        Guid versionId,
+        IFormFile file,
+        CancellationToken ct)
+    {
+        var version = await db.ContractDocumentTemplateVersions
+            .FirstOrDefaultAsync(x => x.Id == versionId && x.TemplateId == templateId, ct);
+        if (version is null)
+            return null;
+
+        ValidateDocx(file);
+
+        var fullPath = templateFiles.ResolveFullPath(version.FilePath);
+        await using (var stream = File.Create(fullPath))
+            await file.CopyToAsync(stream, ct);
+
+        IReadOnlyList<string> placeholders;
+        try
+        {
+            placeholders = generator.ScanPlaceholders(fullPath);
+        }
+        catch (Exception)
+        {
+            throw new InvalidOperationException("فایل Word ذخیره‌شده نامعتبر است. دوباره از فایل اصلی Word آپلود کنید.");
+        }
+        version.DetectedPlaceholdersJson = JsonSerializer.Serialize(placeholders, JsonOpts);
+        var template = await db.ContractDocumentTemplates.FirstAsync(x => x.Id == templateId, ct);
+        template.UpdatedAtUtc = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+        await SyncFieldsFromPlaceholdersAsync(templateId, versionId, placeholders, removeMissing: true, ct);
+        return await GetAsync(templateId, ct);
+    }
+
+    public async Task<ContractDocumentTemplateDetailDto?> InsertPlaceholderAsync(
+        Guid templateId,
+        Guid versionId,
+        string key,
+        int paragraphIndex,
+        CancellationToken ct)
+    {
+        var version = await db.ContractDocumentTemplateVersions
+            .FirstOrDefaultAsync(x => x.Id == versionId && x.TemplateId == templateId, ct);
+        if (version is null)
+            return null;
+
+        var fullPath = templateFiles.ResolveFullPath(version.FilePath);
+        try
+        {
+            generator.InsertPlaceholder(fullPath, key, paragraphIndex);
+        }
+        catch (ArgumentException ex)
+        {
+            throw new InvalidOperationException(ex.Message);
+        }
+
+        var placeholders = generator.ScanPlaceholders(fullPath);
+        version.DetectedPlaceholdersJson = JsonSerializer.Serialize(placeholders, JsonOpts);
+        version.Template = await db.ContractDocumentTemplates.FirstAsync(x => x.Id == templateId, ct);
+        version.Template.UpdatedAtUtc = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+        await SyncFieldsFromPlaceholdersAsync(templateId, versionId, placeholders, removeMissing: true, ct);
+        return await GetAsync(templateId, ct);
+    }
 
     public async Task<(string fullPath, string fileName)?> GetVersionFileAsync(
         Guid templateId,
@@ -403,7 +594,87 @@ public class ContractDocumentTemplateService(
         return (fullPath, version.FileName);
     }
 
+    public async Task<ContractDocumentTemplateVersion?> GetVersionEntityAsync(
+        Guid templateId,
+        Guid versionId,
+        CancellationToken ct)
+        => await db.ContractDocumentTemplateVersions
+            .AsNoTracking()
+            .FirstOrDefaultAsync(x => x.Id == versionId && x.TemplateId == templateId, ct);
+
+    public async Task RefreshVersionAfterExternalEditAsync(Guid templateId, Guid versionId, CancellationToken ct)
+    {
+        var version = await db.ContractDocumentTemplateVersions
+            .FirstOrDefaultAsync(x => x.Id == versionId && x.TemplateId == templateId, ct);
+        if (version is null)
+            return;
+
+        var fullPath = templateFiles.ResolveFullPath(version.FilePath);
+        var placeholders = generator.ScanPlaceholders(fullPath);
+        version.DetectedPlaceholdersJson = JsonSerializer.Serialize(placeholders, JsonOpts);
+        var template = await db.ContractDocumentTemplates.FirstAsync(x => x.Id == templateId, ct);
+        template.UpdatedAtUtc = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+        await SyncFieldsFromPlaceholdersAsync(templateId, versionId, placeholders, removeMissing: true, ct);
+    }
+
     public bool IsPdfConversionAvailable => pdfConverter.IsAvailable;
+
+    public async Task<bool> DeleteVersionAsync(Guid templateId, Guid versionId, CancellationToken ct)
+    {
+        var template = await db.ContractDocumentTemplates
+            .Include(t => t.Versions)
+            .FirstOrDefaultAsync(x => x.Id == templateId, ct);
+        if (template is null)
+            return false;
+
+        var version = template.Versions.FirstOrDefault(v => v.Id == versionId);
+        if (version is null)
+            return false;
+
+        var usedByContracts = await db.Contracts
+            .AnyAsync(c => c.ContractDocumentTemplateVersionId == versionId, ct);
+        if (usedByContracts)
+            throw new InvalidOperationException("این نسخه در قراردادهای صادرشده استفاده شده و قابل حذف نیست.");
+
+        if (template.ActiveVersionId == versionId)
+        {
+            var replacement = template.Versions
+                .Where(v => v.Id != versionId)
+                .OrderByDescending(v => v.VersionNumber)
+                .FirstOrDefault();
+            template.ActiveVersionId = replacement?.Id;
+        }
+
+        TryDeleteFile(templateFiles.ResolveFullPath(version.FilePath));
+        db.ContractDocumentTemplateVersions.Remove(version);
+        template.UpdatedAtUtc = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+        return true;
+    }
+
+    public async Task<bool> DeleteTemplateAsync(Guid id, CancellationToken ct)
+    {
+        var template = await db.ContractDocumentTemplates
+            .Include(t => t.Versions)
+            .FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (template is null)
+            return false;
+
+        var usedCount = await db.Contracts.CountAsync(c => c.ContractDocumentTemplateId == id, ct);
+        if (usedCount > 0)
+            throw new InvalidOperationException(
+                $"این قالب در {usedCount} قرارداد استفاده شده و قابل حذف نیست.");
+
+        foreach (var v in template.Versions)
+            TryDeleteFile(templateFiles.ResolveFullPath(v.FilePath));
+
+        template.ActiveVersionId = null;
+        db.ContractDocumentTemplates.Remove(template);
+        await db.SaveChangesAsync(ct);
+        templateFiles.TryDeleteTemplateStorage(id);
+        return true;
+    }
 
     private static void TryDeleteFile(string path)
     {

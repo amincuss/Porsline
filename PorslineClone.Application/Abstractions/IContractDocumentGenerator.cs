@@ -9,4 +9,7 @@ public interface IContractDocumentGenerator
         CancellationToken ct = default);
 
     IReadOnlyList<string> ScanPlaceholders(string docxFullPath);
+
+    /// <summary>درج {{key}} در پاراگراف مشخص (یا انتهای سند)</summary>
+    void InsertPlaceholder(string docxFullPath, string key, int paragraphIndex);
 }

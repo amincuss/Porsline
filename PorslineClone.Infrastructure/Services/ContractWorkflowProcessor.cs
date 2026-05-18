@@ -143,6 +143,17 @@ public class ContractWorkflowProcessor(
         if (steps.Count == 0)
             return (false, "مرحله‌ای برای گردش وجود ندارد");
 
+        var signatureCount = await ContractWorkflowSignatureValidator.CountSignatureFieldsAsync(
+            db,
+            contract.ContractDocumentTemplateId,
+            contract.ContractDocumentTemplateVersionId,
+            ct);
+        var signatureError = ContractWorkflowSignatureValidator.ValidateCounts(
+            signatureCount,
+            steps.Count(s => s.UserId != Guid.Empty));
+        if (signatureError is not null)
+            return (false, signatureError);
+
         var first = steps.OrderBy(s => s.Order).First();
         first.Status = "pending";
         contract.CurrentStepOrder = first.Order;

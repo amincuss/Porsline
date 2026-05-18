@@ -169,6 +169,15 @@ public static class DatabaseSchemaPatcher
 
         await db.Database.ExecuteSqlRawAsync(
             """
+            IF EXISTS (
+                SELECT 1 FROM sys.foreign_keys
+                WHERE name = N'FK_ContractDocumentTemplates_ContractDocumentTemplateVersions_ActiveVersionId'
+            )
+                ALTER TABLE [dbo].[ContractDocumentTemplates] DROP CONSTRAINT [FK_ContractDocumentTemplates_ContractDocumentTemplateVersions_ActiveVersionId];
+            """, ct);
+
+        await db.Database.ExecuteSqlRawAsync(
+            """
             IF NOT EXISTS (
                 SELECT 1 FROM sys.foreign_keys
                 WHERE name = N'FK_ContractDocumentTemplates_ContractDocumentTemplateVersions_ActiveVersionId'
@@ -177,7 +186,7 @@ public static class DatabaseSchemaPatcher
             AND OBJECT_ID(N'[dbo].[ContractDocumentTemplates]', N'U') IS NOT NULL
             BEGIN
                 ALTER TABLE [dbo].[ContractDocumentTemplates] WITH CHECK ADD CONSTRAINT [FK_ContractDocumentTemplates_ContractDocumentTemplateVersions_ActiveVersionId]
-                    FOREIGN KEY([ActiveVersionId]) REFERENCES [dbo].[ContractDocumentTemplateVersions]([Id]) ON DELETE SET NULL;
+                    FOREIGN KEY([ActiveVersionId]) REFERENCES [dbo].[ContractDocumentTemplateVersions]([Id]) ON DELETE NO ACTION;
             END
             """, ct);
 
@@ -210,6 +219,79 @@ public static class DatabaseSchemaPatcher
             BEGIN
                 ALTER TABLE [dbo].[Contracts] WITH CHECK ADD CONSTRAINT [FK_Contracts_ContractDocumentTemplates_ContractDocumentTemplateId]
                     FOREIGN KEY([ContractDocumentTemplateId]) REFERENCES [dbo].[ContractDocumentTemplates]([Id]) ON DELETE SET NULL;
+            END
+            """, ct);
+
+        await db.Database.ExecuteSqlRawAsync(
+            """
+            IF COL_LENGTH('dbo.ContractDocumentTemplateFields', 'VersionId') IS NULL
+            BEGIN
+                ALTER TABLE [dbo].[ContractDocumentTemplateFields] ADD [VersionId] uniqueidentifier NULL;
+            END
+            ELSE IF EXISTS (
+                SELECT 1 FROM sys.columns c
+                INNER JOIN sys.tables t ON c.object_id = t.object_id
+                WHERE t.name = N'ContractDocumentTemplateFields'
+                  AND c.name = N'VersionId'
+                  AND c.is_nullable = 0)
+            BEGIN
+                ALTER TABLE [dbo].[ContractDocumentTemplateFields] ALTER COLUMN [VersionId] uniqueidentifier NULL;
+            END
+            """, ct);
+
+        await db.Database.ExecuteSqlRawAsync(
+            """
+            UPDATE f
+            SET f.[VersionId] = COALESCE(
+                t.[ActiveVersionId],
+                (SELECT TOP 1 v.[Id] FROM [dbo].[ContractDocumentTemplateVersions] v
+                 WHERE v.[TemplateId] = f.[TemplateId]
+                 ORDER BY v.[VersionNumber] DESC))
+            FROM [dbo].[ContractDocumentTemplateFields] f
+            INNER JOIN [dbo].[ContractDocumentTemplates] t ON t.[Id] = f.[TemplateId]
+            WHERE f.[VersionId] IS NULL
+               OR f.[VersionId] = '00000000-0000-0000-0000-000000000000';
+            """, ct);
+
+        await db.Database.ExecuteSqlRawAsync(
+            """
+            DELETE FROM [dbo].[ContractDocumentTemplateFields]
+            WHERE [VersionId] IS NULL
+               OR [VersionId] = '00000000-0000-0000-0000-000000000000';
+
+            IF COL_LENGTH('dbo.ContractDocumentTemplateFields', 'VersionId') IS NOT NULL
+               AND (SELECT is_nullable FROM sys.columns c
+                    JOIN sys.tables t ON c.object_id = t.object_id
+                    WHERE t.name = N'ContractDocumentTemplateFields' AND c.name = N'VersionId') = 1
+            BEGIN
+                ALTER TABLE [dbo].[ContractDocumentTemplateFields] ALTER COLUMN [VersionId] uniqueidentifier NOT NULL;
+            END
+            """, ct);
+
+        await db.Database.ExecuteSqlRawAsync(
+            """
+            IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_ContractDocumentTemplateFields_TemplateId_Key'
+                       AND object_id = OBJECT_ID(N'[dbo].[ContractDocumentTemplateFields]'))
+                DROP INDEX [IX_ContractDocumentTemplateFields_TemplateId_Key] ON [dbo].[ContractDocumentTemplateFields];
+
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_ContractDocumentTemplateFields_VersionId_Key'
+                           AND object_id = OBJECT_ID(N'[dbo].[ContractDocumentTemplateFields]'))
+                CREATE UNIQUE INDEX [IX_ContractDocumentTemplateFields_VersionId_Key]
+                    ON [dbo].[ContractDocumentTemplateFields]([VersionId], [Key]);
+
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_ContractDocumentTemplateFields_VersionId_SortOrder'
+                           AND object_id = OBJECT_ID(N'[dbo].[ContractDocumentTemplateFields]'))
+                CREATE INDEX [IX_ContractDocumentTemplateFields_VersionId_SortOrder]
+                    ON [dbo].[ContractDocumentTemplateFields]([VersionId], [SortOrder]);
+
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.foreign_keys
+                WHERE name = N'FK_ContractDocumentTemplateFields_ContractDocumentTemplateVersions_VersionId')
+            AND OBJECT_ID(N'[dbo].[ContractDocumentTemplateVersions]', N'U') IS NOT NULL
+            BEGIN
+                ALTER TABLE [dbo].[ContractDocumentTemplateFields] WITH CHECK ADD
+                    CONSTRAINT [FK_ContractDocumentTemplateFields_ContractDocumentTemplateVersions_VersionId]
+                    FOREIGN KEY([VersionId]) REFERENCES [dbo].[ContractDocumentTemplateVersions]([Id]) ON DELETE CASCADE;
             END
             """, ct);
 

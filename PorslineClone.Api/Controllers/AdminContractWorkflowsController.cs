@@ -34,11 +34,16 @@ public class AdminContractWorkflowsController(AppDbContext db) : ControllerBase
     [Authorize(Policy = "contracts.read")]
     public async Task<IActionResult> Active(CancellationToken ct)
     {
-        var items = await db.ContractWorkflowTemplates
+        var rows = await db.ContractWorkflowTemplates
             .Where(x => x.IsActive)
             .OrderBy(x => x.Name)
-            .Select(x => new { x.Id, x.Name })
             .ToListAsync(ct);
+        var items = rows.Select(x => new
+        {
+            x.Id,
+            x.Name,
+            approverCount = DeserializeSteps(x.StepsJson).Count,
+        }).ToList();
         return Ok(items);
     }
 

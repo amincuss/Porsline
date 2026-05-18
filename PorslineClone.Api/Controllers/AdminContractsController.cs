@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.EntityFrameworkCore;
 using PorslineClone.Application.Abstractions;
+using PorslineClone.Application.ContractTemplates;
 using PorslineClone.Application.Contracts;
 using AppApprovalStepDto = PorslineClone.Application.Contracts.ApprovalStepDto;
 using PorslineClone.Domain.Entities;
@@ -133,6 +134,8 @@ public class AdminContractsController(
                 x.WorkflowScheduledStartAtUtc,
                 CanStartWorkflow(x),
                 CanAssignWorkflow(x),
+                x.ContractDocumentTemplateId,
+                x.ContractDocumentTemplateVersionId,
                 steps);
         });
 
@@ -198,6 +201,8 @@ public class AdminContractsController(
             x.WorkflowScheduledStartAtUtc,
             CanStartWorkflow(x),
             CanAssignWorkflow(x),
+            x.ContractDocumentTemplateId,
+            x.ContractDocumentTemplateVersionId,
             steps));
     }
 
@@ -277,27 +282,53 @@ public class AdminContractsController(
         Guid? documentTemplateId = null;
         Guid? documentTemplateVersionId = null;
         string? templateFieldValuesJson = null;
+        string? allocatedContractNumber = null;
 
         if (creationMode == "template")
         {
             if (!Guid.TryParse(req.ContractDocumentTemplateId, out var templateId))
                 return BadRequest(new { message = "قالب قرارداد انتخاب نشده است" });
 
+            Guid? documentTemplateVersionIdParsed = null;
+            if (!string.IsNullOrWhiteSpace(req.ContractDocumentTemplateVersionId))
+            {
+                if (!Guid.TryParse(req.ContractDocumentTemplateVersionId, out var parsedVersionId))
+                    return BadRequest(new { message = "نسخه قالب نامعتبر است" });
+                documentTemplateVersionIdParsed = parsedVersionId;
+            }
+
             Dictionary<string, string> fieldValues;
             try
             {
-                fieldValues = JsonSerializer.Deserialize<Dictionary<string, string>>(req.FieldValuesJson ?? "{}")
-                    ?? new Dictionary<string, string>();
+                fieldValues = ContractTemplateFieldValuesParser.Parse(req.FieldValuesJson);
             }
-            catch
+            catch (JsonException)
             {
                 return BadRequest(new { message = "مقادیر فیلد قالب نامعتبر است" });
             }
 
             try
             {
+                allocatedContractNumber = await ContractDocumentNumberService.AllocateNextAsync(db, ct);
+            }
+            catch (DbUpdateException ex)
+            {
+                return StatusCode(500, new
+                {
+                    message = "خطا در تولید شماره قرارداد. مایگریشن دیتابیس اعمال نشده است؛ API را ری‌استارت کنید.",
+                    detail = ex.InnerException?.Message
+                });
+            }
+
+            try
+            {
                 var (tempPath, generatedName, versionId) =
-                    await documentTemplates.GenerateForContractAsync(templateId, fieldValues, ct);
+                    await documentTemplates.GenerateForContractAsync(
+                        templateId,
+                        documentTemplateVersionIdParsed,
+                        fieldValues,
+                        allocatedContractNumber,
+                        ct);
                 try
                 {
                     await using var fs = new FileStream(tempPath, FileMode.Open, FileAccess.Read, FileShare.Read);
@@ -346,21 +377,40 @@ public class AdminContractsController(
                 .FirstOrDefaultAsync(x => x.Id == workflowTemplateId && x.IsActive, ct);
             if (workflowTemplate is null)
                 return BadRequest(new { message = "گردش انتخاب‌شده یافت نشد یا غیرفعال است" });
+
+            if (creationMode == "template" && documentTemplateId is not null)
+            {
+                var signatureError = await ContractWorkflowSignatureValidator.ValidateAsync(
+                    db,
+                    documentTemplateId,
+                    documentTemplateVersionId,
+                    workflowTemplate.StepsJson,
+                    ct);
+                if (signatureError is not null)
+                    return BadRequest(new { message = signatureError });
+            }
         }
 
         var contractId = Guid.NewGuid();
         string contractNumber;
-        try
+        if (creationMode == "template" && allocatedContractNumber is not null)
         {
-            contractNumber = await ContractDocumentNumberService.AllocateNextAsync(db, ct);
+            contractNumber = allocatedContractNumber;
         }
-        catch (DbUpdateException ex)
+        else
         {
-            return StatusCode(500, new
+            try
             {
-                message = "خطا در تولید شماره سند. مایگریشن دیتابیس اعمال نشده است؛ API را ری‌استارت کنید.",
-                detail = ex.InnerException?.Message
-            });
+                contractNumber = await ContractDocumentNumberService.AllocateNextAsync(db, ct);
+            }
+            catch (DbUpdateException ex)
+            {
+                return StatusCode(500, new
+                {
+                    message = "خطا در تولید شماره سند. مایگریشن دیتابیس اعمال نشده است؛ API را ری‌استارت کنید.",
+                    detail = ex.InnerException?.Message
+                });
+            }
         }
 
         const int versionNumber = 1;
@@ -476,6 +526,15 @@ public class AdminContractsController(
             .FirstOrDefaultAsync(x => x.Id == templateId && x.IsActive, ct);
         if (template is null)
             return BadRequest(new { message = "گردش یافت نشد یا غیرفعال است" });
+
+        var signatureError = await ContractWorkflowSignatureValidator.ValidateAsync(
+            db,
+            contract.ContractDocumentTemplateId,
+            contract.ContractDocumentTemplateVersionId,
+            template.StepsJson,
+            ct);
+        if (signatureError is not null)
+            return BadRequest(new { message = signatureError });
 
         var mode = (req.StartMode ?? "manual").Trim().ToLowerInvariant();
         DateTime? scheduledUtc = null;
@@ -670,36 +729,48 @@ public class AdminContractsController(
 
         var wantPdf = string.Equals(format, "pdf", StringComparison.OrdinalIgnoreCase);
 
-        string? relative;
-        string? downloadName;
+        ContractVersion? versionEntity = null;
+        string? sourceRelative;
+        string? storedPdfRelative;
+        string? displayName;
+
         if (versionId is not null)
         {
-            var version = await db.ContractVersions
+            versionEntity = await db.ContractVersions
                 .FirstOrDefaultAsync(x => x.Id == versionId && x.ContractId == id, ct);
-            if (version is null) return NotFound(new { message = "نسخه یافت نشد" });
-            relative = wantPdf && !string.IsNullOrWhiteSpace(version.PdfFilePath)
-                ? version.PdfFilePath
-                : version.FilePath;
-            downloadName = wantPdf && relative == version.PdfFilePath
-                ? Path.ChangeExtension(version.FileName, ".pdf")
-                : version.FileName;
+            if (versionEntity is null) return NotFound(new { message = "نسخه یافت نشد" });
+            sourceRelative = versionEntity.FilePath;
+            storedPdfRelative = versionEntity.PdfFilePath;
+            displayName = versionEntity.FileName;
         }
         else
         {
-            if (string.IsNullOrWhiteSpace(contract.FilePath))
-                return NotFound(new { message = "فایل یافت نشد" });
-            relative = wantPdf && !string.IsNullOrWhiteSpace(contract.PdfFilePath)
-                ? contract.PdfFilePath
-                : contract.FilePath;
-            downloadName = wantPdf && relative == contract.PdfFilePath
-                ? Path.ChangeExtension(contract.FileName ?? "contract", ".pdf")
-                : contract.FileName;
+            sourceRelative = contract.FilePath;
+            storedPdfRelative = contract.PdfFilePath;
+            displayName = contract.FileName;
         }
 
-        if (wantPdf && (relative is null || !relative.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)))
-            return NotFound(new { message = "نسخه PDF برای این قرارداد موجود نیست" });
+        if (string.IsNullOrWhiteSpace(sourceRelative))
+            return NotFound(new { message = "فایل یافت نشد" });
 
-        var relativePath = relative!.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
+        string relative;
+        string? downloadName;
+        if (wantPdf)
+        {
+            var pdfResolved = await ResolveOrCreatePdfAsync(
+                contract, versionEntity, sourceRelative, storedPdfRelative, displayName, ct);
+            if (pdfResolved.Error is not null)
+                return pdfResolved.Error;
+            relative = pdfResolved.RelativePath!;
+            downloadName = pdfResolved.DownloadName;
+        }
+        else
+        {
+            relative = sourceRelative;
+            downloadName = displayName;
+        }
+
+        var relativePath = relative.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
         var filePath = Path.Combine(env.ContentRootPath, relativePath);
         if (!System.IO.File.Exists(filePath))
             return NotFound(new { message = "فایل در سرور موجود نیست" });
@@ -713,6 +784,86 @@ public class AdminContractsController(
             return PhysicalFile(filePath, contentType);
 
         return PhysicalFile(filePath, contentType, downloadName, enableRangeProcessing: true);
+    }
+
+    private async Task<(string? RelativePath, string? DownloadName, IActionResult? Error)> ResolveOrCreatePdfAsync(
+        Contract contract,
+        ContractVersion? version,
+        string sourceRelative,
+        string? storedPdfRelative,
+        string? displayName,
+        CancellationToken ct)
+    {
+        if (!string.IsNullOrWhiteSpace(storedPdfRelative))
+        {
+            var storedFull = contractFiles.ResolveFullPath(storedPdfRelative);
+            if (System.IO.File.Exists(storedFull))
+            {
+                return (
+                    storedPdfRelative,
+                    Path.ChangeExtension(displayName ?? "contract", ".pdf"),
+                    null);
+            }
+        }
+
+        var sourceFull = contractFiles.ResolveFullPath(sourceRelative);
+        if (sourceFull.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+            return (sourceRelative, displayName, null);
+
+        if (!sourceFull.EndsWith(".docx", StringComparison.OrdinalIgnoreCase))
+        {
+            return (
+                null,
+                null,
+                NotFound(new { message = "نسخه PDF برای این قرارداد موجود نیست" }));
+        }
+
+        if (!pdfConverter.IsAvailable)
+        {
+            return (
+                null,
+                null,
+                NotFound(new
+                {
+                    message = "تبدیل Word به PDF فعال نیست. LibreOffice را روی سرور API نصب و سرویس را ری‌استارت کنید.",
+                }));
+        }
+
+        var generatedPdfFull = pdfConverter.TryConvert(sourceFull);
+        if (generatedPdfFull is null)
+        {
+            return (
+                null,
+                null,
+                NotFound(new { message = "تبدیل فایل Word به PDF ناموفق بود." }));
+        }
+
+        var versionNumber = version?.VersionNumber ?? contract.CurrentVersionNumber;
+        var pdfRelative = await contractFiles.SavePdfCompanionAsync(
+            contract.NationalId,
+            versionNumber,
+            contract.ContractNumber,
+            generatedPdfFull,
+            ct);
+
+        if (string.IsNullOrWhiteSpace(pdfRelative))
+        {
+            return (
+                null,
+                null,
+                NotFound(new { message = "ذخیره نسخه PDF ناموفق بود." }));
+        }
+
+        if (version is not null)
+            version.PdfFilePath = pdfRelative;
+        else
+            contract.PdfFilePath = pdfRelative;
+        await db.SaveChangesAsync(ct);
+
+        return (
+            pdfRelative,
+            Path.ChangeExtension(displayName ?? "contract", ".pdf"),
+            null);
     }
 
     private async Task<IActionResult> ProcessActionAsync(Guid id, bool approve, string? comment, CancellationToken ct)
@@ -870,6 +1021,7 @@ public class CreateContractFormRequest
     /// <summary>upload | template</summary>
     public string? CreationMode { get; set; }
     public string? ContractDocumentTemplateId { get; set; }
+    public string? ContractDocumentTemplateVersionId { get; set; }
     public string? FieldValuesJson { get; set; }
     public string? Title { get; set; }
     public string? FirstName { get; set; }
@@ -929,6 +1081,8 @@ public record ContractListItemDto(
     DateTime? WorkflowScheduledStartAtUtc,
     bool CanStartWorkflow,
     bool CanAssignWorkflow,
+    Guid? ContractDocumentTemplateId,
+    Guid? ContractDocumentTemplateVersionId,
     List<PorslineClone.Application.Contracts.ApprovalStepDto> Steps);
 
 public record ContractDetailDto(
@@ -962,4 +1116,6 @@ public record ContractDetailDto(
     DateTime? WorkflowScheduledStartAtUtc,
     bool CanStartWorkflow,
     bool CanAssignWorkflow,
+    Guid? ContractDocumentTemplateId,
+    Guid? ContractDocumentTemplateVersionId,
     List<PorslineClone.Application.Contracts.ApprovalStepDto> Steps);

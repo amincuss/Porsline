@@ -331,12 +331,12 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         {
             entity.HasKey(x => x.Id);
             entity.Property(x => x.ApprovalWorkflowJson).HasMaxLength(20000);
-            entity.Property(x => x.DocumentNumberPrefix).HasMaxLength(20).HasDefaultValue("CNT");
+            entity.Property(x => x.DocumentNumberPrefix).HasMaxLength(20).HasDefaultValue("EN");
             entity.HasData(new ContractSettings
             {
                 Id = 1,
                 ApprovalEnabled = false,
-                DocumentNumberPrefix = "CNT",
+                DocumentNumberPrefix = "EN",
                 DocumentSequencePeriod = 0,
                 LastDocumentSequence = 0
             });
@@ -374,10 +374,11 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.Description).HasMaxLength(1000);
             entity.HasIndex(x => x.Name).IsUnique();
             entity.HasIndex(x => new { x.IsActive, x.CreatedAtUtc });
+            // NO ACTION: جلوگیری از multiple cascade paths در SQL Server (Template→Versions=CASCADE)
             entity.HasOne(x => x.ActiveVersion)
                 .WithMany()
                 .HasForeignKey(x => x.ActiveVersionId)
-                .OnDelete(DeleteBehavior.SetNull);
+                .OnDelete(DeleteBehavior.NoAction);
         });
 
         builder.Entity<ContractDocumentTemplateVersion>(entity =>
@@ -404,9 +405,13 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasOne(x => x.Template)
                 .WithMany(t => t.Fields)
                 .HasForeignKey(x => x.TemplateId)
+                .OnDelete(DeleteBehavior.NoAction);
+            entity.HasOne(x => x.Version)
+                .WithMany(v => v.Fields)
+                .HasForeignKey(x => x.VersionId)
                 .OnDelete(DeleteBehavior.Cascade);
-            entity.HasIndex(x => new { x.TemplateId, x.Key }).IsUnique();
-            entity.HasIndex(x => new { x.TemplateId, x.SortOrder });
+            entity.HasIndex(x => new { x.VersionId, x.Key }).IsUnique();
+            entity.HasIndex(x => new { x.VersionId, x.SortOrder });
         });
 
         builder.Entity<Contract>(entity =>

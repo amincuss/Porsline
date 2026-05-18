@@ -8,7 +8,13 @@ public enum ContractTemplateFieldType
     Number = 3,
     Date = 4,
     Phone = 5,
-    NationalId = 6
+    NationalId = 6,
+    /// <summary>جایگاه امضای تأییدکننده در Word — هنگام تأیید پر می‌شود</summary>
+    Signature = 7,
+    /// <summary>شماره قرارداد — هنگام ثبت به‌صورت خودکار (مثلاً EN-1404-0042)</summary>
+    ContractNumber = 8,
+    /// <summary>تصویر آپلودی کاربر — در Word جایگزین می‌شود</summary>
+    Image = 9
 }
 
 /// <summary>قالب سند Word برای تولید قرارداد (جایگزین {{placeholder}})</summary>
@@ -41,14 +47,17 @@ public class ContractDocumentTemplateVersion
     public string? ChangeNote { get; set; }
     public Guid CreatedByUserId { get; set; }
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+    public ICollection<ContractDocumentTemplateField> Fields { get; set; } = [];
 }
 
-/// <summary>تعریف فیلد فرم مرتبط با placeholder</summary>
+/// <summary>تعریف فیلد فرم مرتبط با placeholder (هر نسخه Word فیلدهای خودش را دارد)</summary>
 public class ContractDocumentTemplateField
 {
     public Guid Id { get; set; }
     public Guid TemplateId { get; set; }
     public ContractDocumentTemplate Template { get; set; } = null!;
+    public Guid VersionId { get; set; }
+    public ContractDocumentTemplateVersion Version { get; set; } = null!;
     /// <summary>کلید placeholder بدون آکولاد، مثلاً first_name</summary>
     public string Key { get; set; } = "";
     public string Label { get; set; } = "";

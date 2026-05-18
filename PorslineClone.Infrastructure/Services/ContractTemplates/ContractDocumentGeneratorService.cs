@@ -1,8 +1,10 @@
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using DocumentFormat.OpenXml;
 using DocumentFormat.OpenXml.Packaging;
 using DocumentFormat.OpenXml.Wordprocessing;
 using PorslineClone.Application.Abstractions;
+using PorslineClone.Application.ContractTemplates;
 
 namespace PorslineClone.Infrastructure.Services.ContractTemplates;
 
@@ -21,16 +23,15 @@ public partial class ContractDocumentGeneratorService : IContractDocumentGenerat
         if (part?.Document?.Body is null)
             return [];
 
-        foreach (var text in part.Document.Body.Descendants<Text>())
-            ExtractFromText(text.Text, found);
+        ScanInContainer(part.Document.Body, found);
 
         foreach (var headerPart in part.HeaderParts)
-            foreach (var text in headerPart.Header?.Descendants<Text>() ?? [])
-                ExtractFromText(text.Text, found);
+            if (headerPart.Header is not null)
+                ScanInContainer(headerPart.Header, found);
 
         foreach (var footerPart in part.FooterParts)
-            foreach (var text in footerPart.Footer?.Descendants<Text>() ?? [])
-                ExtractFromText(text.Text, found);
+            if (footerPart.Footer is not null)
+                ScanInContainer(footerPart.Footer, found);
 
         return found.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
     }
@@ -46,71 +47,263 @@ public partial class ContractDocumentGeneratorService : IContractDocumentGenerat
         var tempPath = Path.Combine(Path.GetTempPath(), $"contract-gen-{Guid.NewGuid():N}.docx");
         File.Copy(sourceDocxFullPath, tempPath, overwrite: true);
 
-        await Task.Run(() => ReplaceInDocument(tempPath, fieldValues), ct);
+        var lookup = BuildValueLookup(fieldValues);
+        await Task.Run(() => ReplaceInDocument(tempPath, lookup), ct);
         return tempPath;
+    }
+
+    private static void ScanInContainer(OpenXmlElement container, HashSet<string> found)
+    {
+        foreach (var paragraph in container.Descendants<Paragraph>())
+        {
+            var combined = PlaceholderParagraphHelper.GetParagraphText(paragraph);
+            ExtractFromText(combined, found);
+        }
     }
 
     private static void ReplaceInDocument(string docxPath, IReadOnlyDictionary<string, string> fieldValues)
     {
+        WordOpenXmlImageHelper.ResetDrawingIds();
         using var doc = WordprocessingDocument.Open(docxPath, true);
         var part = doc.MainDocumentPart;
         if (part?.Document?.Body is null)
             return;
 
-        ReplaceInContainer(part.Document.Body, fieldValues);
+        ReplaceInContainer(part, part.Document.Body, fieldValues);
 
         foreach (var headerPart in part.HeaderParts)
             if (headerPart.Header is not null)
-                ReplaceInContainer(headerPart.Header, fieldValues);
+                ReplaceInContainer(part, headerPart.Header, fieldValues);
 
         foreach (var footerPart in part.FooterParts)
             if (footerPart.Footer is not null)
-                ReplaceInContainer(footerPart.Footer, fieldValues);
+                ReplaceInContainer(part, footerPart.Footer, fieldValues);
 
         part.Document.Save();
     }
 
-    private static void ReplaceInContainer(OpenXmlElement container, IReadOnlyDictionary<string, string> fieldValues)
+    private static void ReplaceInContainer(
+        MainDocumentPart mainPart,
+        OpenXmlElement container,
+        IReadOnlyDictionary<string, string> fieldValues)
     {
-        foreach (var paragraph in container.Descendants<Paragraph>())
-            ReplaceInParagraph(paragraph, fieldValues);
+        foreach (var paragraph in container.Descendants<Paragraph>().ToList())
+            ReplaceInParagraph(mainPart, paragraph, fieldValues);
     }
 
-    private static void ReplaceInParagraph(Paragraph paragraph, IReadOnlyDictionary<string, string> fieldValues)
+    private static void ReplaceInParagraph(
+        MainDocumentPart mainPart,
+        Paragraph paragraph,
+        IReadOnlyDictionary<string, string> fieldValues)
     {
-        var texts = paragraph.Descendants<Text>().ToList();
-        if (texts.Count == 0)
+        PlaceholderParagraphHelper.CollapseParagraphText(paragraph);
+
+        var combined = PlaceholderParagraphHelper.NormalizeForPlaceholderMatch(
+            PlaceholderParagraphHelper.GetParagraphText(paragraph));
+
+        if (string.IsNullOrEmpty(combined))
             return;
 
-        var combined = string.Concat(texts.Select(t => t.Text));
-        var updated = combined;
-        foreach (var kv in fieldValues)
+        if (TryReplaceSingleImagePlaceholder(mainPart, paragraph, combined, fieldValues))
+            return;
+
+        var updated = PlaceholderRegex.Replace(combined, match =>
         {
-            var token = $"{{{{{kv.Key}}}}}";
-            if (updated.Contains(token, StringComparison.Ordinal))
-                updated = updated.Replace(token, kv.Value ?? "", StringComparison.Ordinal);
-        }
+            var rawKey = match.Groups[1].Value.Trim();
+            if (!TryResolveValue(rawKey, fieldValues, out var value))
+                return match.Value;
+
+            if (ContractTemplateImageValue.TryParse(value, out _))
+                return "";
+
+            return value ?? "";
+        });
 
         if (updated == combined)
             return;
 
-        texts[0].Text = updated;
+        ApplyTextToParagraph(paragraph, updated);
+    }
+
+    private static bool TryReplaceSingleImagePlaceholder(
+        MainDocumentPart mainPart,
+        Paragraph paragraph,
+        string normalizedParagraphText,
+        IReadOnlyDictionary<string, string> fieldValues)
+    {
+        var match = PlaceholderRegex.Match(normalizedParagraphText);
+        if (!match.Success)
+            return false;
+
+        if (match.Index > 0 || match.Index + match.Length < normalizedParagraphText.Length)
+            return false;
+
+        var rawKey = match.Groups[1].Value.Trim();
+        if (!TryResolveValue(rawKey, fieldValues, out var rawValue))
+            return false;
+
+        if (!ContractTemplateImageValue.TryParse(UnwrapStoredFieldValue(rawValue), out var imagePayload) ||
+            imagePayload is null)
+            return false;
+
+        try
+        {
+            var (bytes, ext) = ContractTemplateImageValue.DecodeDataUrl(imagePayload.DataUrl);
+            if (ext.Equals(".webp", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("WebP in Word unsupported");
+
+            WordOpenXmlImageHelper.ReplaceParagraphWithImage(
+                mainPart,
+                paragraph,
+                bytes,
+                ext,
+                imagePayload.WidthPx,
+                rawKey);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void ApplyTextToParagraph(Paragraph paragraph, string text)
+    {
+        var texts = paragraph.Descendants<Text>().ToList();
+        if (texts.Count == 0)
+        {
+            paragraph.AppendChild(new Run(new Text(text) { Space = SpaceProcessingModeValues.Preserve }));
+            return;
+        }
+
+        texts[0].Text = text;
+        texts[0].Space = SpaceProcessingModeValues.Preserve;
         for (var i = 1; i < texts.Count; i++)
             texts[i].Text = "";
+    }
+
+    /// <summary>مقدار ذخیره‌شده ممکن است JSON رشته‌ای دوباره escape شده یا آبجکت خام باشد.</summary>
+    internal static string UnwrapStoredFieldValue(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return "";
+
+        var v = value.Trim();
+        if (v.StartsWith('{') || v.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase))
+            return v;
+
+        if (v.StartsWith('"') && v.EndsWith('"'))
+        {
+            try
+            {
+                var inner = JsonSerializer.Deserialize<string>(v);
+                if (!string.IsNullOrWhiteSpace(inner))
+                    return inner.Trim();
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        return v;
+    }
+
+    public void InsertPlaceholder(string docxFullPath, string key, int paragraphIndex)
+    {
+        if (!File.Exists(docxFullPath))
+            throw new FileNotFoundException("فایل قالب یافت نشد", docxFullPath);
+
+        var normalizedKey = NormalizePlaceholderKey(key);
+        if (string.IsNullOrWhiteSpace(normalizedKey))
+            throw new ArgumentException("کلید فیلد نامعتبر است", nameof(key));
+
+        var token = "{{" + normalizedKey + "}}";
+
+        using var doc = WordprocessingDocument.Open(docxFullPath, true);
+        var body = doc.MainDocumentPart?.Document?.Body
+            ?? throw new InvalidOperationException("بدنه سند Word یافت نشد");
+
+        var paragraphs = body.Descendants<Paragraph>().ToList();
+        if (paragraphs.Count == 0)
+        {
+            body.AppendChild(new Paragraph(new Run(new Text(token) { Space = SpaceProcessingModeValues.Preserve })));
+        }
+        else
+        {
+            var idx = Math.Clamp(paragraphIndex, 0, paragraphs.Count - 1);
+            var target = paragraphs[idx];
+            var existing = PlaceholderParagraphHelper.GetParagraphText(target);
+            var prefix = string.IsNullOrEmpty(existing) || existing.EndsWith(' ') || existing.EndsWith('\t')
+                ? ""
+                : " ";
+            var run = target.Descendants<Run>().LastOrDefault();
+            if (run is not null)
+                run.AppendChild(new Text(prefix + token) { Space = SpaceProcessingModeValues.Preserve });
+            else
+                target.AppendChild(new Run(new Text(prefix + token) { Space = SpaceProcessingModeValues.Preserve }));
+        }
+
+        doc.MainDocumentPart!.Document!.Save();
     }
 
     private static void ExtractFromText(string? text, HashSet<string> found)
     {
         if (string.IsNullOrEmpty(text))
             return;
-        foreach (Match m in PlaceholderRegex.Matches(text))
+
+        var normalized = PlaceholderParagraphHelper.NormalizeForPlaceholderMatch(text);
+        foreach (Match m in PlaceholderRegex.Matches(normalized))
         {
-            var key = m.Groups[1].Value.Trim();
+            var key = NormalizePlaceholderKey(m.Groups[1].Value);
             if (!string.IsNullOrWhiteSpace(key))
                 found.Add(key);
         }
     }
 
-    [GeneratedRegex(@"\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}", RegexOptions.Compiled)]
+    private static Dictionary<string, string> BuildValueLookup(IReadOnlyDictionary<string, string> fieldValues)
+    {
+        var lookup = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kv in fieldValues)
+        {
+            var value = UnwrapStoredFieldValue(kv.Value);
+            if (!string.IsNullOrWhiteSpace(kv.Key))
+                lookup[kv.Key.Trim()] = value;
+
+            var norm = NormalizePlaceholderKey(kv.Key);
+            if (!string.IsNullOrWhiteSpace(norm))
+                lookup[norm] = value;
+        }
+
+        return lookup;
+    }
+
+    private static bool TryResolveValue(
+        string rawPlaceholderKey,
+        IReadOnlyDictionary<string, string> fieldValues,
+        out string value)
+    {
+        value = "";
+        if (fieldValues.TryGetValue(rawPlaceholderKey, out var direct) && direct is not null)
+        {
+            value = direct;
+            return true;
+        }
+
+        var norm = NormalizePlaceholderKey(rawPlaceholderKey);
+        if (!string.IsNullOrWhiteSpace(norm) && fieldValues.TryGetValue(norm, out var byNorm) && byNorm is not null)
+        {
+            value = byNorm;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static string NormalizePlaceholderKey(string key)
+        => new string((key ?? "").Trim().Where(static ch => char.IsLetterOrDigit(ch) || ch == '_').ToArray())
+            .ToLowerInvariant();
+
+    [GeneratedRegex(@"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}", RegexOptions.Compiled)]
     private static partial Regex PlaceholderPattern();
 }

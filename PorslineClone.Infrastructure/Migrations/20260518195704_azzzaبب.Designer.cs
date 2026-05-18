@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using PorslineClone.Infrastructure.Persistence;
 
@@ -11,9 +12,11 @@ using PorslineClone.Infrastructure.Persistence;
 namespace PorslineClone.Infrastructure.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260518195704_azzzaبب")]
+    partial class azzzaبب
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -637,7 +640,7 @@ namespace PorslineClone.Infrastructure.Migrations
                         .ValueGeneratedOnAdd()
                         .HasMaxLength(20)
                         .HasColumnType("nvarchar(20)")
-                        .HasDefaultValue("EN");
+                        .HasDefaultValue("CNT");
 
                     b.Property<int>("DocumentSequencePeriod")
                         .HasColumnType("int");
@@ -654,7 +657,7 @@ namespace PorslineClone.Infrastructure.Migrations
                         {
                             Id = 1,
                             ApprovalEnabled = false,
-                            DocumentNumberPrefix = "EN",
+                            DocumentNumberPrefix = "CNT",
                             DocumentSequencePeriod = 0,
                             LastDocumentSequence = 0
                         });

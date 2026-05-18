@@ -38,4 +38,21 @@ public class ContractTemplateFileStorageService(IHostEnvironment env)
         var trimmed = (relativePath ?? "").TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
         return Path.Combine(env.ContentRootPath ?? Directory.GetCurrentDirectory(), trimmed);
     }
+
+    public void TryDeleteTemplateStorage(Guid templateId)
+    {
+        var dir = Path.Combine(
+            env.ContentRootPath ?? Directory.GetCurrentDirectory(),
+            RootFolderName,
+            templateId.ToString("N"));
+        try
+        {
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, recursive: true);
+        }
+        catch
+        {
+            /* ignore */
+        }
+    }
 }
