@@ -45,7 +45,11 @@ builder.Services.Configure<ApiBehaviorOptions>(options =>
 });
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddOpenApi();
-builder.Services.AddSwaggerGen();
+builder.Services.AddSwaggerGen(options =>
+{
+    // جلوگیری از تداخل schema وقتی دو نوع هم‌نام در Api و Application وجود دارد (مثلاً WorkflowStepDto)
+    options.CustomSchemaIds(type => type.FullName?.Replace("+", ".") ?? type.Name);
+});
 builder.Services.AddInfrastructure(builder.Configuration);
 builder.Services.AddScoped<IRuleEvaluationService, RuleEvaluationService>();
 
@@ -107,6 +111,12 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("usergroups.read", p => p.RequireClaim("permission", "usergroups.read"));
     options.AddPolicy("usergroups.add", p => p.RequireClaim("permission", "usergroups.add"));
     options.AddPolicy("usergroups.update", p => p.RequireClaim("permission", "usergroups.update"));
+    options.AddPolicy("contracts.read", p => p.RequireClaim("permission", "contracts.read"));
+    options.AddPolicy("contracts.add", p => p.RequireClaim("permission", "contracts.add"));
+    options.AddPolicy("contracts.update", p => p.RequireClaim("permission", "contracts.update"));
+    options.AddPolicy("contracts.settings.read", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "contracts.settings.read") || ctx.User.HasClaim("permission", "contracts.settings.update")));
+    options.AddPolicy("contracts.settings.update", p => p.RequireClaim("permission", "contracts.settings.update"));
 });
 
 var app = builder.Build();
@@ -142,20 +152,79 @@ app.UseAuthentication();
 app.UseAuthorization();
 app.MapControllers();
 
-using (var scope = app.Services.CreateScope())
+var dbStartup = app.Configuration.GetSection(PorslineClone.Infrastructure.Options.DatabaseStartupOptions.SectionName)
+    .Get<PorslineClone.Infrastructure.Options.DatabaseStartupOptions>()
+    ?? new PorslineClone.Infrastructure.Options.DatabaseStartupOptions();
+
+if (dbStartup.RunMigrations || dbStartup.RunSeed || dbStartup.ApplySchemaPatch)
 {
-    var db          = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    using var scope = app.Services.CreateScope();
+    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     var userManager = scope.ServiceProvider.GetRequiredService<UserManager<AppUser>>();
     var roleManager = scope.ServiceProvider.GetRequiredService<RoleManager<AppRole>>();
+    var logger = scope.ServiceProvider.GetRequiredService<ILoggerFactory>().CreateLogger("DatabaseStartup");
 
-    // اعمال تمام migration ها (شامل HasData seed داده‌های ایستا)
-    await db.Database.MigrateAsync();
+    if (dbStartup.RunMigrations)
+    {
+        try
+        {
+            logger.LogInformation("Applying EF Core migrations...");
+            await db.Database.MigrateAsync();
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "EF migration failed.");
+            if (!dbStartup.ContinueOnMigrationError)
+                throw;
+        }
+    }
+    else
+    {
+        logger.LogInformation("RunMigrations is disabled. Apply migrations manually (dotnet ef database update).");
+    }
 
-    // Upsert امن داده‌های مرجع: موارد موجود را نگه می‌دارد، موارد جدید را اضافه می‌کند.
-    await DbSeeder.EnsureReferenceDataAsync(db, roleManager);
+    if (dbStartup.ApplySchemaPatch)
+    {
+        try
+        {
+            await DatabaseSchemaPatcher.ApplyAsync(db, logger);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Database schema patch failed.");
+            if (!dbStartup.ContinueOnMigrationError)
+                throw;
+        }
+    }
+    else
+    {
+        logger.LogInformation("ApplySchemaPatch is disabled. Apply schema changes manually.");
+    }
 
-    // ایجاد کاربر admin فقط یک بار، در صورت عدم وجود
-    await DbSeeder.SeedAdminUserAsync(db, userManager);
+    if (dbStartup.RunSeed)
+    {
+        try
+        {
+            logger.LogInformation("Running database seed...");
+            await DbSeeder.EnsureReferenceDataAsync(db, roleManager);
+            await DbSeeder.SeedAdminUserAsync(db, userManager);
+            logger.LogInformation("Database seed completed.");
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Database seed failed.");
+            if (!dbStartup.ContinueOnMigrationError)
+                throw;
+        }
+    }
 }
+
+var userSignaturesRoot = Path.Combine(app.Environment.ContentRootPath, "UserSignatures");
+Directory.CreateDirectory(userSignaturesRoot);
+app.UseStaticFiles(new StaticFileOptions
+{
+    FileProvider = new PhysicalFileProvider(userSignaturesRoot),
+    RequestPath = "/UserSignatures"
+});
 
 app.Run();

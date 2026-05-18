@@ -1,3 +1,4 @@
+using System.Data;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Cryptography;
 using System.Security.Claims;
@@ -331,7 +332,8 @@ public static class DbSeeder
             "forms.access.read","forms.access.read.all","forms.access.update",
             "approvals.read","approvals.update",
             "responders.read","responders.read.all","responders.add","responders.update","responders.send",
-            "usergroups.read","usergroups.read.all","usergroups.add","usergroups.update"
+            "usergroups.read","usergroups.read.all","usergroups.add","usergroups.update",
+            "contracts.read","contracts.add","contracts.update","contracts.settings.read","contracts.settings.update"
         }
         .Select(x => x.Trim())
         .Where(x => !string.IsNullOrWhiteSpace(x))
@@ -386,7 +388,8 @@ public static class DbSeeder
             new MenuItem { Key = "settings.sms", Title = "تنظیمات پیامک", Icon = "MessageSquare", IconColor = "#8B5CF6", Route = "/admin/settings/sms", Order = 2, ParentId = settingsMenu.Id },
             new MenuItem { Key = "settings.security", Title = "تنظیمات امنیتی", Icon = "ShieldCheck", IconColor = "#EF4444", Route = "/admin/settings/security", Order = 3, ParentId = settingsMenu.Id },
             new MenuItem { Key = "settings.access", Title = "سطح دسترسی", Icon = "Shield", IconColor = "#2563EB", Route = "/admin/access-level", Order = 4, ParentId = settingsMenu.Id },
-            new MenuItem { Key = "settings.responders", Title = "تنظیمات پاسخگو", Icon = "Phone", IconColor = "#0EA5E9", Route = "/admin/settings/responders", Order = 5, ParentId = settingsMenu.Id }
+            new MenuItem { Key = "settings.responders", Title = "تنظیمات پاسخگو", Icon = "Phone", IconColor = "#0EA5E9", Route = "/admin/settings/responders", Order = 5, ParentId = settingsMenu.Id },
+            new MenuItem { Key = "settings.users", Title = "تنظیمات کاربران", Icon = "Users", IconColor = "#0EA5E9", Route = "/admin/settings/users", Order = 6, ParentId = settingsMenu.Id }
         };
         foreach (var rm in requiredMenus)
         {
@@ -429,6 +432,62 @@ public static class DbSeeder
                 db.MenuItems.Add(new MenuItem { Id = Guid.NewGuid(), Key = rm.Key, Title = rm.Title, Icon = rm.Icon, IconColor = rm.IconColor, Route = rm.Route, Order = rm.Order, ParentId = rm.ParentId });
         }
 
+        var contractsMenu = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "contracts", cancellationToken);
+        if (contractsMenu is null)
+        {
+            contractsMenu = new MenuItem { Id = Guid.NewGuid(), Key = "contracts", Title = "گردش قرارداد", Icon = "FileText", IconColor = "#4F46E5", Route = null, Order = 3 };
+            db.MenuItems.Add(contractsMenu);
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        else
+        {
+            contractsMenu.Title = "گردش قرارداد";
+            contractsMenu.Icon = "FileText";
+            contractsMenu.IconColor = "#4F46E5";
+            contractsMenu.Route = null;
+            contractsMenu.Order = 3;
+        }
+        contractsMenu = await db.MenuItems.FirstAsync(x => x.Key == "contracts", cancellationToken);
+        var contractChildMenus = new[]
+        {
+            new MenuItem { Key = "contracts.list", Title = "لیست قراردادها", Icon = "FileText", IconColor = "#4F46E5", Route = "/admin/contracts", Order = 1, ParentId = contractsMenu.Id },
+            new MenuItem { Key = "contracts.workflows.list", Title = "گردش‌های ذخیره‌شده", Icon = "GitBranch", IconColor = "#7C3AED", Route = "/admin/contracts/workflows/list", Order = 2, ParentId = contractsMenu.Id },
+            new MenuItem { Key = "contracts.workflows", Title = "ایجاد گردش", Icon = "GitBranch", IconColor = "#8B5CF6", Route = "/admin/contracts/workflows", Order = 3, ParentId = contractsMenu.Id },
+            new MenuItem { Key = "contracts.templates", Title = "قالب‌های قرارداد", Icon = "FileType", IconColor = "#0D9488", Route = "/admin/contracts/templates", Order = 4, ParentId = contractsMenu.Id },
+            new MenuItem { Key = "contracts.settings", Title = "تنظیمات قرارداد", Icon = "Settings2", IconColor = "#6366F1", Route = "/admin/contracts/settings", Order = 5, ParentId = contractsMenu.Id },
+        };
+        foreach (var cm in contractChildMenus)
+        {
+            var existing = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == cm.Key, cancellationToken);
+            if (existing is null)
+                db.MenuItems.Add(new MenuItem { Id = Guid.NewGuid(), Key = cm.Key, Title = cm.Title, Icon = cm.Icon, IconColor = cm.IconColor, Route = cm.Route, Order = cm.Order, ParentId = cm.ParentId });
+            else
+            {
+                existing.Title = cm.Title;
+                existing.Route = cm.Route;
+                existing.Order = cm.Order;
+                existing.Icon = cm.Icon;
+                existing.IconColor = cm.IconColor;
+                existing.ParentId = cm.ParentId;
+            }
+        }
+
+        // ذخیره منوها قبل از جداول قرارداد — اگر migration هنوز اعمال نشده باشد، منو همچنان ثبت می‌شود
+        await db.SaveChangesAsync(cancellationToken);
+
+        if (await TableExistsAsync(db, "ContractSettings", cancellationToken))
+        {
+            if (!await db.ContractSettings.AnyAsync(cancellationToken))
+                db.ContractSettings.Add(new ContractSettings { Id = 1, ApprovalEnabled = false });
+        }
+
+        if (await TableExistsAsync(db, "ContractTypes", cancellationToken)
+            && !await db.ContractTypes.AnyAsync(cancellationToken))
+        {
+            db.ContractTypes.Add(new ContractType { Id = Guid.NewGuid(), Name = "قرارداد دائم", SortOrder = 1, IsActive = true });
+            db.ContractTypes.Add(new ContractType { Id = Guid.NewGuid(), Name = "قرارداد موقت", SortOrder = 2, IsActive = true });
+        }
+
         if (!await db.SecuritySettings.AnyAsync(cancellationToken))
             db.SecuritySettings.Add(new SecuritySettings());
         if (!await db.SmsSettings.AnyAsync(cancellationToken))
@@ -451,7 +510,7 @@ public static class DbSeeder
         var menus = await db.MenuItems.ToDictionaryAsync(x => x.Key, x => x.Id, cancellationToken);
 
         var adminPerms = permissionNames;
-        var expertPerms = new[] { "menus.view", "profile.update", "messages.read", "forms.read", "forms.add", "forms.update", "approvals.read", "approvals.update", "responders.send" };
+        var expertPerms = new[] { "menus.view", "profile.update", "messages.read", "forms.read", "forms.add", "forms.update", "approvals.read", "approvals.update", "responders.send", "contracts.read", "contracts.add", "contracts.update" };
         foreach (var p in adminPerms)
             if (perms.TryGetValue(p, out var pid) && !await db.RolePermissions.AnyAsync(x => x.RoleId == admin.Id && x.PermissionId == pid, cancellationToken))
                 db.RolePermissions.Add(new RolePermission { RoleId = admin.Id, PermissionId = pid });
@@ -459,8 +518,8 @@ public static class DbSeeder
             if (perms.TryGetValue(p, out var pid) && !await db.RolePermissions.AnyAsync(x => x.RoleId == expert.Id && x.PermissionId == pid, cancellationToken))
                 db.RolePermissions.Add(new RolePermission { RoleId = expert.Id, PermissionId = pid });
 
-        var adminMenuKeys = new[] { "forms", "forms.list", "forms.rules", "forms.access", "users", "users.list", "users.create", "users.groups", "responders", "responders.list", "responders.create", "responders.groups", "responders.send", "responders.userforms", "approvals", "settings", "settings.site", "settings.sms", "settings.security", "settings.access", "settings.responders", "profile", "messages" };
-        var expertMenuKeys = new[] { "forms", "forms.list", "forms.rules", "users", "users.list", "responders", "responders.list", "responders.send", "responders.userforms", "approvals", "profile", "messages" };
+        var adminMenuKeys = new[] { "forms", "forms.list", "forms.rules", "forms.access", "contracts", "contracts.list", "contracts.workflows.list", "contracts.workflows", "contracts.templates", "contracts.settings", "users", "users.list", "users.create", "users.groups", "responders", "responders.list", "responders.create", "responders.groups", "responders.send", "responders.userforms", "approvals", "settings", "settings.site", "settings.sms", "settings.security", "settings.access", "settings.responders", "settings.users", "profile", "messages" };
+        var expertMenuKeys = new[] { "forms", "forms.list", "forms.rules", "contracts", "contracts.list", "users", "users.list", "responders", "responders.list", "responders.send", "responders.userforms", "approvals", "profile", "messages" };
         foreach (var k in adminMenuKeys)
             if (menus.TryGetValue(k, out var mid) && !await db.RoleMenus.AnyAsync(x => x.RoleId == admin.Id && x.MenuId == mid, cancellationToken))
                 db.RoleMenus.Add(new RoleMenu { RoleId = admin.Id, MenuId = mid });
@@ -468,7 +527,97 @@ public static class DbSeeder
             if (menus.TryGetValue(k, out var mid) && !await db.RoleMenus.AnyAsync(x => x.RoleId == expert.Id && x.MenuId == mid, cancellationToken))
                 db.RoleMenus.Add(new RoleMenu { RoleId = expert.Id, MenuId = mid });
 
+        await SyncContractMenusForRolesWithPermissionAsync(db, cancellationToken);
+
         await db.SaveChangesAsync(cancellationToken);
+    }
+
+    static async Task<bool> TableExistsAsync(AppDbContext db, string tableName, CancellationToken cancellationToken)
+    {
+        var connection = db.Database.GetDbConnection();
+        if (connection.State != ConnectionState.Open)
+            await connection.OpenAsync(cancellationToken);
+
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText =
+            "SELECT CASE WHEN EXISTS (" +
+            "SELECT 1 FROM INFORMATION_SCHEMA.TABLES " +
+            "WHERE TABLE_SCHEMA = SCHEMA_NAME() AND TABLE_NAME = @table) THEN 1 ELSE 0 END";
+        var p = cmd.CreateParameter();
+        p.ParameterName = "@table";
+        p.Value = tableName;
+        cmd.Parameters.Add(p);
+        var scalar = await cmd.ExecuteScalarAsync(cancellationToken);
+        return scalar is int i && i == 1;
+    }
+
+    /// <summary>
+    /// منوی «گردش قرارداد» را به هر نقشی که پرمیژن contracts.read یا contracts.settings.read دارد وصل می‌کند.
+    /// </summary>
+    public static async Task SyncContractMenusForRolesWithPermissionAsync(AppDbContext db, CancellationToken cancellationToken = default)
+    {
+        var menus = await db.MenuItems.ToDictionaryAsync(x => x.Key, x => x.Id, cancellationToken);
+        if (!menus.ContainsKey("contracts") || !menus.ContainsKey("contracts.list")) return;
+
+        var contractPermNames = new[] { "contracts.read", "contracts.settings.read", "contracts.settings.update" };
+        var contractPermIds = await db.Permissions
+            .Where(p => contractPermNames.Contains(p.Name))
+            .Select(p => new { p.Id, p.Name })
+            .ToListAsync(cancellationToken);
+
+        if (contractPermIds.Count == 0) return;
+
+        var readPermId = contractPermIds.FirstOrDefault(p => p.Name == "contracts.read")?.Id;
+        var settingsPermIds = contractPermIds
+            .Where(p => p.Name is "contracts.settings.read" or "contracts.settings.update")
+            .Select(p => p.Id)
+            .ToHashSet();
+
+        var roleIdsWithRead = readPermId is null
+            ? []
+            : await db.RolePermissions.Where(rp => rp.PermissionId == readPermId).Select(rp => rp.RoleId).Distinct().ToListAsync(cancellationToken);
+
+        var roleIdsWithSettings = settingsPermIds.Count == 0
+            ? []
+            : await db.RolePermissions.Where(rp => settingsPermIds.Contains(rp.PermissionId)).Select(rp => rp.RoleId).Distinct().ToListAsync(cancellationToken);
+
+        var targetRoleIds = roleIdsWithRead.Union(roleIdsWithSettings).Distinct().ToList();
+        if (targetRoleIds.Count == 0) return;
+
+        var linked = (await db.RoleMenus
+                .AsNoTracking()
+                .Where(rm => targetRoleIds.Contains(rm.RoleId))
+                .Select(rm => new { rm.RoleId, rm.MenuId })
+                .ToListAsync(cancellationToken))
+            .Select(x => (x.RoleId, x.MenuId))
+            .ToHashSet();
+
+        foreach (var entry in db.ChangeTracker.Entries<RoleMenu>())
+        {
+            if (entry.State is EntityState.Added or EntityState.Unchanged or EntityState.Modified)
+                linked.Add((entry.Entity.RoleId, entry.Entity.MenuId));
+        }
+
+        foreach (var roleId in targetRoleIds)
+        {
+            var keys = new List<string> { "contracts", "contracts.list" };
+            if (roleIdsWithSettings.Contains(roleId) && menus.ContainsKey("contracts.workflows.list"))
+                keys.Add("contracts.workflows.list");
+            if (roleIdsWithSettings.Contains(roleId) && menus.ContainsKey("contracts.workflows"))
+                keys.Add("contracts.workflows");
+            if (roleIdsWithSettings.Contains(roleId) && menus.ContainsKey("contracts.templates"))
+                keys.Add("contracts.templates");
+            if (roleIdsWithSettings.Contains(roleId) && menus.ContainsKey("contracts.settings"))
+                keys.Add("contracts.settings");
+
+            foreach (var key in keys)
+            {
+                if (!menus.TryGetValue(key, out var menuId)) continue;
+                if (linked.Contains((roleId, menuId))) continue;
+                db.RoleMenus.Add(new RoleMenu { RoleId = roleId, MenuId = menuId });
+                linked.Add((roleId, menuId));
+            }
+        }
     }
 
     /// <summary>

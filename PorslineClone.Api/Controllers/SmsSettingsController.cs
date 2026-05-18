@@ -16,7 +16,13 @@ public class AdminSmsSettingsController(AppDbContext db) : ControllerBase
     public async Task<IActionResult> GetSms(CancellationToken cancellationToken)
     {
         var settings = await db.SmsSettings.FirstOrDefaultAsync(cancellationToken) ?? new SmsSettings();
-        return Ok(new SmsSettingsDto(settings.OtpEnabled, settings.SurveySendEnabled, settings.SurveyCompletedNotificationEnabled, settings.UserCreateSmsEnabled, settings.ApprovalReferralSmsEnabled));
+        return Ok(new SmsSettingsDto(
+            settings.OtpEnabled,
+            settings.SurveySendEnabled,
+            settings.SurveyCompletedNotificationEnabled,
+            settings.UserCreateSmsEnabled,
+            settings.ApprovalReferralSmsEnabled,
+            settings.ContractCreatorApprovalNotifySmsEnabled));
     }
 
     [HttpPut("sms")]
@@ -35,6 +41,7 @@ public class AdminSmsSettingsController(AppDbContext db) : ControllerBase
         settings.SurveyCompletedNotificationEnabled = dto.SurveyCompletedNotificationEnabled;
         settings.UserCreateSmsEnabled = dto.UserCreateSmsEnabled;
         settings.ApprovalReferralSmsEnabled = dto.ApprovalReferralSmsEnabled;
+        settings.ContractCreatorApprovalNotifySmsEnabled = dto.ContractCreatorApprovalNotifySmsEnabled;
 
         await db.SaveChangesAsync(cancellationToken);
         return Ok(new { message = "تنظیمات پیامک ذخیره شد" });

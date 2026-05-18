@@ -23,11 +23,21 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<ResponderGroupMember> ResponderGroupMembers => Set<ResponderGroupMember>();
     public DbSet<UserGroup> UserGroups => Set<UserGroup>();
     public DbSet<UserGroupMember> UserGroupMembers => Set<UserGroupMember>();
+    public DbSet<UserPosition> UserPositions => Set<UserPosition>();
     public DbSet<Form> Forms => Set<Form>();
     public DbSet<FormField> FormFields => Set<FormField>();
     public DbSet<FormSubmission> FormSubmissions => Set<FormSubmission>();
     public DbSet<FormDispatchLink> FormDispatchLinks => Set<FormDispatchLink>();
     public DbSet<FormUserAccess> FormUserAccesses => Set<FormUserAccess>();
+    public DbSet<ContractType> ContractTypes => Set<ContractType>();
+    public DbSet<ContractSettings> ContractSettings => Set<ContractSettings>();
+    public DbSet<ContractWorkflowTemplate> ContractWorkflowTemplates => Set<ContractWorkflowTemplate>();
+    public DbSet<Contract> Contracts => Set<Contract>();
+    public DbSet<ContractVersion> ContractVersions => Set<ContractVersion>();
+    public DbSet<ContractApprovalLink> ContractApprovalLinks => Set<ContractApprovalLink>();
+    public DbSet<ContractDocumentTemplate> ContractDocumentTemplates => Set<ContractDocumentTemplate>();
+    public DbSet<ContractDocumentTemplateVersion> ContractDocumentTemplateVersions => Set<ContractDocumentTemplateVersion>();
+    public DbSet<ContractDocumentTemplateField> ContractDocumentTemplateFields => Set<ContractDocumentTemplateField>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -43,9 +53,21 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.PhoneNumber).HasMaxLength(11);
             entity.Property(x => x.AvatarUrl).HasMaxLength(500);
             entity.Property(x => x.AboutMe).HasMaxLength(1000);
+            entity.Property(x => x.SignatureImagePath).HasMaxLength(500);
             entity.HasIndex(x => x.CreatedByUserId);
             entity.HasIndex(x => x.NationalCode).IsUnique();
             entity.HasIndex(x => x.PhoneNumber).IsUnique();
+            entity.HasOne(x => x.UserPosition)
+                .WithMany()
+                .HasForeignKey(x => x.UserPositionId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        builder.Entity<UserPosition>(entity =>
+        {
+            entity.Property(x => x.Name).HasMaxLength(150).IsRequired();
+            entity.HasIndex(x => x.Name).IsUnique();
+            entity.HasIndex(x => new { x.IsActive, x.SortOrder });
         });
 
         builder.Entity<MenuItem>(entity =>
@@ -290,6 +312,143 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasIndex(x => x.UserId);
         });
 
+        builder.Entity<ContractType>(entity =>
+        {
+            entity.Property(x => x.Name).HasMaxLength(200).IsRequired();
+            entity.HasIndex(x => x.Name).IsUnique();
+            entity.HasIndex(x => new { x.IsActive, x.SortOrder });
+        });
+
+        builder.Entity<ContractWorkflowTemplate>(entity =>
+        {
+            entity.Property(x => x.Name).HasMaxLength(200).IsRequired();
+            entity.Property(x => x.StepsJson).HasMaxLength(20000);
+            entity.HasIndex(x => x.Name).IsUnique();
+            entity.HasIndex(x => new { x.IsActive, x.CreatedAtUtc });
+        });
+
+        builder.Entity<ContractSettings>(entity =>
+        {
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.ApprovalWorkflowJson).HasMaxLength(20000);
+            entity.Property(x => x.DocumentNumberPrefix).HasMaxLength(20).HasDefaultValue("CNT");
+            entity.HasData(new ContractSettings
+            {
+                Id = 1,
+                ApprovalEnabled = false,
+                DocumentNumberPrefix = "CNT",
+                DocumentSequencePeriod = 0,
+                LastDocumentSequence = 0
+            });
+        });
+
+        builder.Entity<ContractApprovalLink>(entity =>
+        {
+            entity.Property(x => x.Code).HasMaxLength(32).IsRequired();
+            entity.HasIndex(x => x.Code).IsUnique();
+            entity.HasIndex(x => new { x.ContractId, x.AssigneeUserId, x.IsActive });
+            entity.HasOne(x => x.Contract)
+                .WithMany()
+                .HasForeignKey(x => x.ContractId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ContractVersion>(entity =>
+        {
+            entity.Property(x => x.FilePath).HasMaxLength(500).IsRequired();
+            entity.Property(x => x.FileName).HasMaxLength(260).IsRequired();
+            entity.Property(x => x.PdfFilePath).HasMaxLength(500);
+            entity.Property(x => x.CreatedByName).HasMaxLength(200);
+            entity.Property(x => x.ChangeNote).HasMaxLength(500);
+            entity.HasOne(x => x.Contract)
+                .WithMany(c => c.Versions)
+                .HasForeignKey(x => x.ContractId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(x => new { x.ContractId, x.VersionNumber }).IsUnique();
+            entity.HasIndex(x => x.CreatedAtUtc);
+        });
+
+        builder.Entity<ContractDocumentTemplate>(entity =>
+        {
+            entity.Property(x => x.Name).HasMaxLength(200).IsRequired();
+            entity.Property(x => x.Description).HasMaxLength(1000);
+            entity.HasIndex(x => x.Name).IsUnique();
+            entity.HasIndex(x => new { x.IsActive, x.CreatedAtUtc });
+            entity.HasOne(x => x.ActiveVersion)
+                .WithMany()
+                .HasForeignKey(x => x.ActiveVersionId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        builder.Entity<ContractDocumentTemplateVersion>(entity =>
+        {
+            entity.Property(x => x.FilePath).HasMaxLength(500).IsRequired();
+            entity.Property(x => x.FileName).HasMaxLength(260).IsRequired();
+            entity.Property(x => x.DetectedPlaceholdersJson).HasMaxLength(8000);
+            entity.Property(x => x.ChangeNote).HasMaxLength(500);
+            entity.HasOne(x => x.Template)
+                .WithMany(t => t.Versions)
+                .HasForeignKey(x => x.TemplateId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(x => new { x.TemplateId, x.VersionNumber }).IsUnique();
+        });
+
+        builder.Entity<ContractDocumentTemplateField>(entity =>
+        {
+            entity.Property(x => x.Key).HasMaxLength(80).IsRequired();
+            entity.Property(x => x.Label).HasMaxLength(200).IsRequired();
+            entity.Property(x => x.DesignerOrderJson).HasMaxLength(500);
+            entity.Property(x => x.DefaultValue).HasMaxLength(500);
+            entity.Property(x => x.OptionsJson).HasMaxLength(2000);
+            entity.Property(x => x.FieldType).HasConversion<int>();
+            entity.HasOne(x => x.Template)
+                .WithMany(t => t.Fields)
+                .HasForeignKey(x => x.TemplateId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(x => new { x.TemplateId, x.Key }).IsUnique();
+            entity.HasIndex(x => new { x.TemplateId, x.SortOrder });
+        });
+
+        builder.Entity<Contract>(entity =>
+        {
+            entity.Property(x => x.ContractNumber).HasMaxLength(50).IsRequired();
+            entity.Property(x => x.Title).HasMaxLength(300).IsRequired();
+            entity.Property(x => x.FirstName).HasMaxLength(100).IsRequired();
+            entity.Property(x => x.LastName).HasMaxLength(100).IsRequired();
+            entity.Property(x => x.NationalId).HasMaxLength(10).IsRequired();
+            entity.Property(x => x.Phone).HasMaxLength(11).IsRequired();
+            entity.Property(x => x.SubjectPersonName).HasMaxLength(200).IsRequired();
+            entity.Property(x => x.FilePath).HasMaxLength(500);
+            entity.Property(x => x.OriginalFilePath).HasMaxLength(500);
+            entity.Property(x => x.PdfFilePath).HasMaxLength(500);
+            entity.Property(x => x.FileName).HasMaxLength(260);
+            entity.Property(x => x.CreatedByName).HasMaxLength(200);
+            entity.Property(x => x.WorkflowName).HasMaxLength(200);
+            entity.Property(x => x.StepsJson).HasMaxLength(20000);
+            entity.Property(x => x.TemplateFieldValuesJson).HasMaxLength(20000);
+            entity.Property(x => x.Status).HasConversion<int>();
+            entity.HasIndex(x => x.CreatedByUserId);
+            entity.HasIndex(x => x.WorkflowTemplateId);
+            entity.HasIndex(x => x.ContractDocumentTemplateId);
+            entity.HasOne(x => x.ContractDocumentTemplate)
+                .WithMany()
+                .HasForeignKey(x => x.ContractDocumentTemplateId)
+                .OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(x => x.ContractType)
+                .WithMany()
+                .HasForeignKey(x => x.ContractTypeId)
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(x => x.WorkflowTemplate)
+                .WithMany()
+                .HasForeignKey(x => x.WorkflowTemplateId)
+                .OnDelete(DeleteBehavior.SetNull);
+            entity.HasIndex(x => x.ContractNumber).IsUnique();
+            entity.HasIndex(x => x.CreatedAtUtc);
+            entity.HasIndex(x => new { x.Status, x.CurrentStepOrder });
+            entity.HasIndex(x => x.IsArchived);
+            entity.HasIndex(x => x.Title);
+        });
+
         // ── Static seed data (captured in migrations via HasData) ────────────────
         var adminRoleId  = new Guid("10000000-0000-0000-0000-000000000001");
         var expertRoleId = new Guid("10000000-0000-0000-0000-000000000002");
@@ -395,7 +554,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         builder.Entity<SmsSettings>().HasData(new SmsSettings
         {
             Id = 1,
-            OtpEnabled = true, SurveySendEnabled = true, SurveyCompletedNotificationEnabled = true, UserCreateSmsEnabled = true, ApprovalReferralSmsEnabled = true, PublicFormRequireOtp = false
+            OtpEnabled = true, SurveySendEnabled = true, SurveyCompletedNotificationEnabled = true, UserCreateSmsEnabled = true, ApprovalReferralSmsEnabled = true, ContractCreatorApprovalNotifySmsEnabled = true, PublicFormRequireOtp = false
         });
     }
 }

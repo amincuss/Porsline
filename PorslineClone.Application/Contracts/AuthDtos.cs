@@ -24,7 +24,13 @@ public record LoginConfigDto(string LoginMethod);
 public record PasswordLoginDto(
     [Required, RegularExpression(@"^09\d{9}$", ErrorMessage = "شماره موبایل نامعتبر است.")] string MobileNumber,
     [Required, MinLength(6)] string Password);
-public record SmsSettingsDto(bool OtpEnabled, bool SurveySendEnabled, bool SurveyCompletedNotificationEnabled, bool UserCreateSmsEnabled, bool ApprovalReferralSmsEnabled);
+public record SmsSettingsDto(
+    bool OtpEnabled,
+    bool SurveySendEnabled,
+    bool SurveyCompletedNotificationEnabled,
+    bool UserCreateSmsEnabled,
+    bool ApprovalReferralSmsEnabled,
+    bool ContractCreatorApprovalNotifySmsEnabled);
 public record SiteSettingsDto(string? PublicBaseUrl, string? AdminPanelBaseUrl);
 public record ProfileDto(string FirstName, string LastName, string MobileNumber, string NationalCode, string? AboutMe, string? AvatarUrl);
 public record UpdateProfileDto([MaxLength(1000)] string? AboutMe);
@@ -35,14 +41,16 @@ public record CreateUserDto(
     [Required, MinLength(2), MaxLength(100)] string LastName,
     [Required, RegularExpression(@"^09\d{9}$")] string MobileNumber,
     [Required, RegularExpression(@"^\d{10}$")] string NationalCode,
-    List<Guid>? GroupIds = null);
+    List<Guid>? GroupIds = null,
+    Guid? UserPositionId = null);
 public record UpdateUserRoleDto([Required, MinLength(2), MaxLength(50)] string RoleName);
 public record UpdateUserDto(
     [Required, MinLength(2), MaxLength(100)] string FirstName,
     [Required, MinLength(2), MaxLength(100)] string LastName,
     [Required, RegularExpression(@"^09\d{9}$")] string MobileNumber,
     [Required, RegularExpression(@"^\d{10}$")] string NationalCode,
-    List<Guid>? GroupIds = null);
+    List<Guid>? GroupIds = null,
+    Guid? UserPositionId = null);
 public record SetUserRolesDto([Required] List<string> RoleNames);
 public record UpdateUserStatusDto(bool IsActive);
 public record RoleItemDto(Guid Id, string Name, string DisplayName);

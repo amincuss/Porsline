@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
+using PorslineClone.Infrastructure.Services;
 
 namespace PorslineClone.Api.Controllers;
 
@@ -99,6 +100,8 @@ public class AdminAccessLevelsController(AppDbContext db, RoleManager<AppRole> r
         {
             db.RolePermissions.Add(new RolePermission { RoleId = role.Id, PermissionId = permission.Id });
             await db.SaveChangesAsync(cancellationToken);
+            if (dto.PermissionName.StartsWith("contracts.", StringComparison.OrdinalIgnoreCase))
+                await DbSeeder.SyncContractMenusForRolesWithPermissionAsync(db, cancellationToken);
         }
         else if (!dto.Assigned && current is not null)
         {

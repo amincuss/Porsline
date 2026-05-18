@@ -8,7 +8,7 @@ using Microsoft.EntityFrameworkCore.Migrations;
 namespace PorslineClone.Infrastructure.Migrations
 {
     /// <inheritdoc />
-    public partial class kssss : Migration
+    public partial class klopss : Migration
     {
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
@@ -29,37 +29,51 @@ namespace PorslineClone.Infrastructure.Migrations
                 });
 
             migrationBuilder.CreateTable(
-                name: "AspNetUsers",
+                name: "ContractSettings",
                 columns: table => new
                 {
-                    Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
-                    FirstName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
-                    LastName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
-                    NationalCode = table.Column<string>(type: "nvarchar(10)", maxLength: 10, nullable: false),
-                    CreatedByUserId = table.Column<Guid>(type: "uniqueidentifier", nullable: true),
-                    CreatedAtUtc = table.Column<DateTime>(type: "datetime2", nullable: false, defaultValueSql: "GETUTCDATE()"),
-                    IsActive = table.Column<bool>(type: "bit", nullable: false, defaultValue: true),
-                    IsSoftDeleted = table.Column<bool>(type: "bit", nullable: false),
-                    AvatarUrl = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true),
-                    AboutMe = table.Column<string>(type: "nvarchar(1000)", maxLength: 1000, nullable: true),
-                    UserName = table.Column<string>(type: "nvarchar(256)", maxLength: 256, nullable: true),
-                    NormalizedUserName = table.Column<string>(type: "nvarchar(256)", maxLength: 256, nullable: true),
-                    Email = table.Column<string>(type: "nvarchar(256)", maxLength: 256, nullable: true),
-                    NormalizedEmail = table.Column<string>(type: "nvarchar(256)", maxLength: 256, nullable: true),
-                    EmailConfirmed = table.Column<bool>(type: "bit", nullable: false),
-                    PasswordHash = table.Column<string>(type: "nvarchar(max)", nullable: true),
-                    SecurityStamp = table.Column<string>(type: "nvarchar(max)", nullable: true),
-                    ConcurrencyStamp = table.Column<string>(type: "nvarchar(max)", nullable: true),
-                    PhoneNumber = table.Column<string>(type: "nvarchar(11)", maxLength: 11, nullable: true),
-                    PhoneNumberConfirmed = table.Column<bool>(type: "bit", nullable: false),
-                    TwoFactorEnabled = table.Column<bool>(type: "bit", nullable: false),
-                    LockoutEnd = table.Column<DateTimeOffset>(type: "datetimeoffset", nullable: true),
-                    LockoutEnabled = table.Column<bool>(type: "bit", nullable: false),
-                    AccessFailedCount = table.Column<int>(type: "int", nullable: false)
+                    Id = table.Column<int>(type: "int", nullable: false)
+                        .Annotation("SqlServer:Identity", "1, 1"),
+                    ApprovalEnabled = table.Column<bool>(type: "bit", nullable: false),
+                    ApprovalWorkflowJson = table.Column<string>(type: "nvarchar(max)", maxLength: 20000, nullable: true),
+                    DocumentNumberPrefix = table.Column<string>(type: "nvarchar(20)", maxLength: 20, nullable: false, defaultValue: "CNT"),
+                    DocumentSequencePeriod = table.Column<int>(type: "int", nullable: false),
+                    LastDocumentSequence = table.Column<int>(type: "int", nullable: false)
                 },
                 constraints: table =>
                 {
-                    table.PrimaryKey("PK_AspNetUsers", x => x.Id);
+                    table.PrimaryKey("PK_ContractSettings", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "ContractTypes",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    Name = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: false),
+                    SortOrder = table.Column<int>(type: "int", nullable: false),
+                    IsActive = table.Column<bool>(type: "bit", nullable: false),
+                    CreatedAtUtc = table.Column<DateTime>(type: "datetime2", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_ContractTypes", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "ContractWorkflowTemplates",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    Name = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: false),
+                    StepsJson = table.Column<string>(type: "nvarchar(max)", maxLength: 20000, nullable: false),
+                    IsActive = table.Column<bool>(type: "bit", nullable: false),
+                    CreatedByUserId = table.Column<Guid>(type: "uniqueidentifier", nullable: true),
+                    CreatedAtUtc = table.Column<DateTime>(type: "datetime2", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_ContractWorkflowTemplates", x => x.Id);
                 });
 
             migrationBuilder.CreateTable(
@@ -233,6 +247,19 @@ namespace PorslineClone.Infrastructure.Migrations
                 });
 
             migrationBuilder.CreateTable(
+                name: "SiteSettings",
+                columns: table => new
+                {
+                    Id = table.Column<int>(type: "int", nullable: false),
+                    PublicBaseUrl = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true),
+                    AdminPanelBaseUrl = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_SiteSettings", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
                 name: "SmsSettings",
                 columns: table => new
                 {
@@ -243,6 +270,7 @@ namespace PorslineClone.Infrastructure.Migrations
                     SurveyCompletedNotificationEnabled = table.Column<bool>(type: "bit", nullable: false, defaultValue: true),
                     UserCreateSmsEnabled = table.Column<bool>(type: "bit", nullable: false, defaultValue: true),
                     ApprovalReferralSmsEnabled = table.Column<bool>(type: "bit", nullable: false),
+                    ContractCreatorApprovalNotifySmsEnabled = table.Column<bool>(type: "bit", nullable: false),
                     PublicFormRequireOtp = table.Column<bool>(type: "bit", nullable: false, defaultValue: false)
                 },
                 constraints: table =>
@@ -268,6 +296,21 @@ namespace PorslineClone.Infrastructure.Migrations
                 });
 
             migrationBuilder.CreateTable(
+                name: "UserPositions",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    Name = table.Column<string>(type: "nvarchar(150)", maxLength: 150, nullable: false),
+                    SortOrder = table.Column<int>(type: "int", nullable: false),
+                    IsActive = table.Column<bool>(type: "bit", nullable: false),
+                    CreatedAtUtc = table.Column<DateTime>(type: "datetime2", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_UserPositions", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
                 name: "AspNetRoleClaims",
                 columns: table => new
                 {
@@ -284,6 +327,266 @@ namespace PorslineClone.Infrastructure.Migrations
                         name: "FK_AspNetRoleClaims_AspNetRoles_RoleId",
                         column: x => x.RoleId,
                         principalTable: "AspNetRoles",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Cascade);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "Contracts",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    ContractNumber = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: false),
+                    Title = table.Column<string>(type: "nvarchar(300)", maxLength: 300, nullable: false),
+                    FirstName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
+                    LastName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
+                    NationalId = table.Column<string>(type: "nvarchar(10)", maxLength: 10, nullable: false),
+                    Phone = table.Column<string>(type: "nvarchar(11)", maxLength: 11, nullable: false),
+                    ContractTypeId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    WorkflowTemplateId = table.Column<Guid>(type: "uniqueidentifier", nullable: true),
+                    WorkflowName = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
+                    WorkflowStartedAtUtc = table.Column<DateTime>(type: "datetime2", nullable: true),
+                    WorkflowScheduledStartAtUtc = table.Column<DateTime>(type: "datetime2", nullable: true),
+                    SubjectPersonName = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: false),
+                    DateFromUtc = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    DateToUtc = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    FilePath = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true),
+                    OriginalFilePath = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true),
+                    FileName = table.Column<string>(type: "nvarchar(260)", maxLength: 260, nullable: true),
+                    CurrentVersionNumber = table.Column<int>(type: "int", nullable: false),
+                    IsArchived = table.Column<bool>(type: "bit", nullable: false),
+                    CreatedByUserId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    CreatedByName = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: false),
+                    CreatedAtUtc = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    CurrentStepOrder = table.Column<int>(type: "int", nullable: false),
+                    Status = table.Column<int>(type: "int", nullable: false),
+                    StepsJson = table.Column<string>(type: "nvarchar(max)", maxLength: 20000, nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_Contracts", x => x.Id);
+                    table.ForeignKey(
+                        name: "FK_Contracts_ContractTypes_ContractTypeId",
+                        column: x => x.ContractTypeId,
+                        principalTable: "ContractTypes",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Restrict);
+                    table.ForeignKey(
+                        name: "FK_Contracts_ContractWorkflowTemplates_WorkflowTemplateId",
+                        column: x => x.WorkflowTemplateId,
+                        principalTable: "ContractWorkflowTemplates",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.SetNull);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "FormFields",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    FormId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    FieldType = table.Column<int>(type: "int", nullable: false),
+                    Label = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: false),
+                    Placeholder = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true),
+                    HelpText = table.Column<string>(type: "nvarchar(1000)", maxLength: 1000, nullable: true),
+                    IsRequired = table.Column<bool>(type: "bit", nullable: false),
+                    SortOrder = table.Column<int>(type: "int", nullable: false),
+                    ColSpan = table.Column<int>(type: "int", nullable: false),
+                    OptionsJson = table.Column<string>(type: "nvarchar(max)", maxLength: 5000, nullable: true),
+                    RowId = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: true),
+                    ColIndex = table.Column<int>(type: "int", nullable: false, defaultValue: 0),
+                    RowColCount = table.Column<int>(type: "int", nullable: false, defaultValue: 1),
+                    ConditionsJson = table.Column<string>(type: "nvarchar(max)", maxLength: 10000, nullable: true),
+                    UploadMaxSizeMb = table.Column<int>(type: "int", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_FormFields", x => x.Id);
+                    table.ForeignKey(
+                        name: "FK_FormFields_Forms_FormId",
+                        column: x => x.FormId,
+                        principalTable: "Forms",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Cascade);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "FormSubmissions",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    FormId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    SubmitterName = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
+                    SubmitterEmail = table.Column<string>(type: "nvarchar(300)", maxLength: 300, nullable: true),
+                    SubmittedAtUtc = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    CurrentStepOrder = table.Column<int>(type: "int", nullable: false),
+                    Status = table.Column<int>(type: "int", nullable: false),
+                    FieldsJson = table.Column<string>(type: "nvarchar(max)", maxLength: 20000, nullable: true),
+                    StepsJson = table.Column<string>(type: "nvarchar(max)", maxLength: 20000, nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_FormSubmissions", x => x.Id);
+                    table.ForeignKey(
+                        name: "FK_FormSubmissions_Forms_FormId",
+                        column: x => x.FormId,
+                        principalTable: "Forms",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Cascade);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "RoleMenus",
+                columns: table => new
+                {
+                    RoleId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    MenuId = table.Column<Guid>(type: "uniqueidentifier", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_RoleMenus", x => new { x.RoleId, x.MenuId });
+                    table.ForeignKey(
+                        name: "FK_RoleMenus_AspNetRoles_RoleId",
+                        column: x => x.RoleId,
+                        principalTable: "AspNetRoles",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Cascade);
+                    table.ForeignKey(
+                        name: "FK_RoleMenus_MenuItems_MenuId",
+                        column: x => x.MenuId,
+                        principalTable: "MenuItems",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Cascade);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "RolePermissions",
+                columns: table => new
+                {
+                    RoleId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    PermissionId = table.Column<Guid>(type: "uniqueidentifier", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_RolePermissions", x => new { x.RoleId, x.PermissionId });
+                    table.ForeignKey(
+                        name: "FK_RolePermissions_Permissions_PermissionId",
+                        column: x => x.PermissionId,
+                        principalTable: "Permissions",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Cascade);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "ResponderGroupMembers",
+                columns: table => new
+                {
+                    ResponderId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    GroupId = table.Column<Guid>(type: "uniqueidentifier", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_ResponderGroupMembers", x => new { x.ResponderId, x.GroupId });
+                    table.ForeignKey(
+                        name: "FK_ResponderGroupMembers_ResponderGroups_GroupId",
+                        column: x => x.GroupId,
+                        principalTable: "ResponderGroups",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Cascade);
+                    table.ForeignKey(
+                        name: "FK_ResponderGroupMembers_Responders_ResponderId",
+                        column: x => x.ResponderId,
+                        principalTable: "Responders",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Cascade);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "AspNetUsers",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    FirstName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
+                    LastName = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: false),
+                    NationalCode = table.Column<string>(type: "nvarchar(10)", maxLength: 10, nullable: false),
+                    CreatedByUserId = table.Column<Guid>(type: "uniqueidentifier", nullable: true),
+                    CreatedAtUtc = table.Column<DateTime>(type: "datetime2", nullable: false, defaultValueSql: "GETUTCDATE()"),
+                    IsActive = table.Column<bool>(type: "bit", nullable: false, defaultValue: true),
+                    IsSoftDeleted = table.Column<bool>(type: "bit", nullable: false),
+                    AvatarUrl = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true),
+                    AboutMe = table.Column<string>(type: "nvarchar(1000)", maxLength: 1000, nullable: true),
+                    UserPositionId = table.Column<Guid>(type: "uniqueidentifier", nullable: true),
+                    SignatureImagePath = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true),
+                    UserName = table.Column<string>(type: "nvarchar(256)", maxLength: 256, nullable: true),
+                    NormalizedUserName = table.Column<string>(type: "nvarchar(256)", maxLength: 256, nullable: true),
+                    Email = table.Column<string>(type: "nvarchar(256)", maxLength: 256, nullable: true),
+                    NormalizedEmail = table.Column<string>(type: "nvarchar(256)", maxLength: 256, nullable: true),
+                    EmailConfirmed = table.Column<bool>(type: "bit", nullable: false),
+                    PasswordHash = table.Column<string>(type: "nvarchar(max)", nullable: true),
+                    SecurityStamp = table.Column<string>(type: "nvarchar(max)", nullable: true),
+                    ConcurrencyStamp = table.Column<string>(type: "nvarchar(max)", nullable: true),
+                    PhoneNumber = table.Column<string>(type: "nvarchar(11)", maxLength: 11, nullable: true),
+                    PhoneNumberConfirmed = table.Column<bool>(type: "bit", nullable: false),
+                    TwoFactorEnabled = table.Column<bool>(type: "bit", nullable: false),
+                    LockoutEnd = table.Column<DateTimeOffset>(type: "datetimeoffset", nullable: true),
+                    LockoutEnabled = table.Column<bool>(type: "bit", nullable: false),
+                    AccessFailedCount = table.Column<int>(type: "int", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_AspNetUsers", x => x.Id);
+                    table.ForeignKey(
+                        name: "FK_AspNetUsers_UserPositions_UserPositionId",
+                        column: x => x.UserPositionId,
+                        principalTable: "UserPositions",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.SetNull);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "ContractApprovalLinks",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    ContractId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    AssigneeUserId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    Code = table.Column<string>(type: "nvarchar(32)", maxLength: 32, nullable: false),
+                    IsActive = table.Column<bool>(type: "bit", nullable: false),
+                    ExpiresAtUtc = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    CreatedAtUtc = table.Column<DateTime>(type: "datetime2", nullable: false)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_ContractApprovalLinks", x => x.Id);
+                    table.ForeignKey(
+                        name: "FK_ContractApprovalLinks_Contracts_ContractId",
+                        column: x => x.ContractId,
+                        principalTable: "Contracts",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Cascade);
+                });
+
+            migrationBuilder.CreateTable(
+                name: "ContractVersions",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    ContractId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    VersionNumber = table.Column<int>(type: "int", nullable: false),
+                    FilePath = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: false),
+                    FileName = table.Column<string>(type: "nvarchar(260)", maxLength: 260, nullable: false),
+                    CreatedByUserId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    CreatedByName = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: false),
+                    CreatedAtUtc = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    ChangeNote = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_ContractVersions", x => x.Id);
+                    table.ForeignKey(
+                        name: "FK_ContractVersions_Contracts_ContractId",
+                        column: x => x.ContractId,
+                        principalTable: "Contracts",
                         principalColumn: "Id",
                         onDelete: ReferentialAction.Cascade);
                 });
@@ -374,6 +677,31 @@ namespace PorslineClone.Infrastructure.Migrations
                 });
 
             migrationBuilder.CreateTable(
+                name: "FormUserAccesses",
+                columns: table => new
+                {
+                    FormId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    UserId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    CreatedAtUtc = table.Column<DateTime>(type: "datetime2", nullable: false, defaultValueSql: "GETUTCDATE()")
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_FormUserAccesses", x => new { x.FormId, x.UserId });
+                    table.ForeignKey(
+                        name: "FK_FormUserAccesses_AspNetUsers_UserId",
+                        column: x => x.UserId,
+                        principalTable: "AspNetUsers",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Cascade);
+                    table.ForeignKey(
+                        name: "FK_FormUserAccesses_Forms_FormId",
+                        column: x => x.FormId,
+                        principalTable: "Forms",
+                        principalColumn: "Id",
+                        onDelete: ReferentialAction.Cascade);
+                });
+
+            migrationBuilder.CreateTable(
                 name: "InboxMessages",
                 columns: table => new
                 {
@@ -419,153 +747,6 @@ namespace PorslineClone.Infrastructure.Migrations
                 });
 
             migrationBuilder.CreateTable(
-                name: "FormFields",
-                columns: table => new
-                {
-                    Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
-                    FormId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
-                    FieldType = table.Column<int>(type: "int", nullable: false),
-                    Label = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: false),
-                    Placeholder = table.Column<string>(type: "nvarchar(500)", maxLength: 500, nullable: true),
-                    HelpText = table.Column<string>(type: "nvarchar(1000)", maxLength: 1000, nullable: true),
-                    IsRequired = table.Column<bool>(type: "bit", nullable: false),
-                    SortOrder = table.Column<int>(type: "int", nullable: false),
-                    ColSpan = table.Column<int>(type: "int", nullable: false),
-                    OptionsJson = table.Column<string>(type: "nvarchar(max)", maxLength: 5000, nullable: true),
-                    RowId = table.Column<string>(type: "nvarchar(50)", maxLength: 50, nullable: true),
-                    ColIndex = table.Column<int>(type: "int", nullable: false, defaultValue: 0),
-                    RowColCount = table.Column<int>(type: "int", nullable: false, defaultValue: 1),
-                    ConditionsJson = table.Column<string>(type: "nvarchar(max)", maxLength: 10000, nullable: true),
-                    UploadMaxSizeMb = table.Column<int>(type: "int", nullable: true)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_FormFields", x => x.Id);
-                    table.ForeignKey(
-                        name: "FK_FormFields_Forms_FormId",
-                        column: x => x.FormId,
-                        principalTable: "Forms",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "FormSubmissions",
-                columns: table => new
-                {
-                    Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
-                    FormId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
-                    SubmitterName = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: true),
-                    SubmitterEmail = table.Column<string>(type: "nvarchar(300)", maxLength: 300, nullable: true),
-                    SubmittedAtUtc = table.Column<DateTime>(type: "datetime2", nullable: false),
-                    CurrentStepOrder = table.Column<int>(type: "int", nullable: false),
-                    Status = table.Column<int>(type: "int", nullable: false),
-                    FieldsJson = table.Column<string>(type: "nvarchar(max)", maxLength: 20000, nullable: true),
-                    StepsJson = table.Column<string>(type: "nvarchar(max)", maxLength: 20000, nullable: true)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_FormSubmissions", x => x.Id);
-                    table.ForeignKey(
-                        name: "FK_FormSubmissions_Forms_FormId",
-                        column: x => x.FormId,
-                        principalTable: "Forms",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "FormUserAccesses",
-                columns: table => new
-                {
-                    FormId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
-                    UserId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
-                    CreatedAtUtc = table.Column<DateTime>(type: "datetime2", nullable: false, defaultValueSql: "GETUTCDATE()")
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_FormUserAccesses", x => new { x.FormId, x.UserId });
-                    table.ForeignKey(
-                        name: "FK_FormUserAccesses_AspNetUsers_UserId",
-                        column: x => x.UserId,
-                        principalTable: "AspNetUsers",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
-                    table.ForeignKey(
-                        name: "FK_FormUserAccesses_Forms_FormId",
-                        column: x => x.FormId,
-                        principalTable: "Forms",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "RoleMenus",
-                columns: table => new
-                {
-                    RoleId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
-                    MenuId = table.Column<Guid>(type: "uniqueidentifier", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_RoleMenus", x => new { x.RoleId, x.MenuId });
-                    table.ForeignKey(
-                        name: "FK_RoleMenus_AspNetRoles_RoleId",
-                        column: x => x.RoleId,
-                        principalTable: "AspNetRoles",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
-                    table.ForeignKey(
-                        name: "FK_RoleMenus_MenuItems_MenuId",
-                        column: x => x.MenuId,
-                        principalTable: "MenuItems",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "RolePermissions",
-                columns: table => new
-                {
-                    RoleId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
-                    PermissionId = table.Column<Guid>(type: "uniqueidentifier", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_RolePermissions", x => new { x.RoleId, x.PermissionId });
-                    table.ForeignKey(
-                        name: "FK_RolePermissions_Permissions_PermissionId",
-                        column: x => x.PermissionId,
-                        principalTable: "Permissions",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
-                });
-
-            migrationBuilder.CreateTable(
-                name: "ResponderGroupMembers",
-                columns: table => new
-                {
-                    ResponderId = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
-                    GroupId = table.Column<Guid>(type: "uniqueidentifier", nullable: false)
-                },
-                constraints: table =>
-                {
-                    table.PrimaryKey("PK_ResponderGroupMembers", x => new { x.ResponderId, x.GroupId });
-                    table.ForeignKey(
-                        name: "FK_ResponderGroupMembers_ResponderGroups_GroupId",
-                        column: x => x.GroupId,
-                        principalTable: "ResponderGroups",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
-                    table.ForeignKey(
-                        name: "FK_ResponderGroupMembers_Responders_ResponderId",
-                        column: x => x.ResponderId,
-                        principalTable: "Responders",
-                        principalColumn: "Id",
-                        onDelete: ReferentialAction.Cascade);
-                });
-
-            migrationBuilder.CreateTable(
                 name: "UserGroupMembers",
                 columns: table => new
                 {
@@ -597,6 +778,11 @@ namespace PorslineClone.Infrastructure.Migrations
                     { new Guid("10000000-0000-0000-0000-000000000001"), "00000000-seed-0000-0000-000000000001", "مدیر سیستم", "Admin", "ADMIN" },
                     { new Guid("10000000-0000-0000-0000-000000000002"), "00000000-seed-0000-0000-000000000002", "کارشناس", "Expert", "EXPERT" }
                 });
+
+            migrationBuilder.InsertData(
+                table: "ContractSettings",
+                columns: new[] { "Id", "ApprovalEnabled", "ApprovalWorkflowJson", "DocumentNumberPrefix", "DocumentSequencePeriod", "LastDocumentSequence" },
+                values: new object[] { 1, false, null, "CNT", 0, 0 });
 
             migrationBuilder.InsertData(
                 table: "MenuItems",
@@ -640,8 +826,8 @@ namespace PorslineClone.Infrastructure.Migrations
 
             migrationBuilder.InsertData(
                 table: "SmsSettings",
-                columns: new[] { "Id", "ApprovalReferralSmsEnabled", "OtpEnabled", "SurveyCompletedNotificationEnabled", "SurveySendEnabled", "UserCreateSmsEnabled" },
-                values: new object[] { 1, true, true, true, true, true });
+                columns: new[] { "Id", "ApprovalReferralSmsEnabled", "ContractCreatorApprovalNotifySmsEnabled", "OtpEnabled", "SurveyCompletedNotificationEnabled", "SurveySendEnabled", "UserCreateSmsEnabled" },
+                values: new object[] { 1, true, true, true, true, true, true });
 
             migrationBuilder.InsertData(
                 table: "RoleMenus",
@@ -737,11 +923,101 @@ namespace PorslineClone.Infrastructure.Migrations
                 filter: "[PhoneNumber] IS NOT NULL");
 
             migrationBuilder.CreateIndex(
+                name: "IX_AspNetUsers_UserPositionId",
+                table: "AspNetUsers",
+                column: "UserPositionId");
+
+            migrationBuilder.CreateIndex(
                 name: "UserNameIndex",
                 table: "AspNetUsers",
                 column: "NormalizedUserName",
                 unique: true,
                 filter: "[NormalizedUserName] IS NOT NULL");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_ContractApprovalLinks_Code",
+                table: "ContractApprovalLinks",
+                column: "Code",
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_ContractApprovalLinks_ContractId_AssigneeUserId_IsActive",
+                table: "ContractApprovalLinks",
+                columns: new[] { "ContractId", "AssigneeUserId", "IsActive" });
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Contracts_ContractNumber",
+                table: "Contracts",
+                column: "ContractNumber",
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Contracts_ContractTypeId",
+                table: "Contracts",
+                column: "ContractTypeId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Contracts_CreatedAtUtc",
+                table: "Contracts",
+                column: "CreatedAtUtc");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Contracts_CreatedByUserId",
+                table: "Contracts",
+                column: "CreatedByUserId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Contracts_IsArchived",
+                table: "Contracts",
+                column: "IsArchived");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Contracts_Status_CurrentStepOrder",
+                table: "Contracts",
+                columns: new[] { "Status", "CurrentStepOrder" });
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Contracts_Title",
+                table: "Contracts",
+                column: "Title");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Contracts_WorkflowTemplateId",
+                table: "Contracts",
+                column: "WorkflowTemplateId");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_ContractTypes_IsActive_SortOrder",
+                table: "ContractTypes",
+                columns: new[] { "IsActive", "SortOrder" });
+
+            migrationBuilder.CreateIndex(
+                name: "IX_ContractTypes_Name",
+                table: "ContractTypes",
+                column: "Name",
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_ContractVersions_ContractId_VersionNumber",
+                table: "ContractVersions",
+                columns: new[] { "ContractId", "VersionNumber" },
+                unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_ContractVersions_CreatedAtUtc",
+                table: "ContractVersions",
+                column: "CreatedAtUtc");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_ContractWorkflowTemplates_IsActive_CreatedAtUtc",
+                table: "ContractWorkflowTemplates",
+                columns: new[] { "IsActive", "CreatedAtUtc" });
+
+            migrationBuilder.CreateIndex(
+                name: "IX_ContractWorkflowTemplates_Name",
+                table: "ContractWorkflowTemplates",
+                column: "Name",
+                unique: true);
 
             migrationBuilder.CreateIndex(
                 name: "IX_FormDispatchLinks_Code",
@@ -906,6 +1182,17 @@ namespace PorslineClone.Infrastructure.Migrations
                 column: "Name",
                 unique: true,
                 filter: "[IsDeleted] = 0");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_UserPositions_IsActive_SortOrder",
+                table: "UserPositions",
+                columns: new[] { "IsActive", "SortOrder" });
+
+            migrationBuilder.CreateIndex(
+                name: "IX_UserPositions_Name",
+                table: "UserPositions",
+                column: "Name",
+                unique: true);
         }
 
         /// <inheritdoc />
@@ -925,6 +1212,15 @@ namespace PorslineClone.Infrastructure.Migrations
 
             migrationBuilder.DropTable(
                 name: "AspNetUserTokens");
+
+            migrationBuilder.DropTable(
+                name: "ContractApprovalLinks");
+
+            migrationBuilder.DropTable(
+                name: "ContractSettings");
+
+            migrationBuilder.DropTable(
+                name: "ContractVersions");
 
             migrationBuilder.DropTable(
                 name: "FormDispatchLinks");
@@ -966,10 +1262,16 @@ namespace PorslineClone.Infrastructure.Migrations
                 name: "SecuritySettings");
 
             migrationBuilder.DropTable(
+                name: "SiteSettings");
+
+            migrationBuilder.DropTable(
                 name: "SmsSettings");
 
             migrationBuilder.DropTable(
                 name: "UserGroupMembers");
+
+            migrationBuilder.DropTable(
+                name: "Contracts");
 
             migrationBuilder.DropTable(
                 name: "Forms");
@@ -994,6 +1296,15 @@ namespace PorslineClone.Infrastructure.Migrations
 
             migrationBuilder.DropTable(
                 name: "UserGroups");
+
+            migrationBuilder.DropTable(
+                name: "ContractTypes");
+
+            migrationBuilder.DropTable(
+                name: "ContractWorkflowTemplates");
+
+            migrationBuilder.DropTable(
+                name: "UserPositions");
         }
     }
 }

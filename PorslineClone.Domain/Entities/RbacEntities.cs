@@ -98,6 +98,8 @@ public class SmsSettings
     public bool SurveyCompletedNotificationEnabled { get; set; } = true;
     public bool UserCreateSmsEnabled { get; set; } = true;
     public bool ApprovalReferralSmsEnabled { get; set; } = true;
+    /// <summary>پس از هر تأیید در گردش قرارداد، پیامک به کاربر ثبت‌کننده قرارداد</summary>
+    public bool ContractCreatorApprovalNotifySmsEnabled { get; set; } = true;
     public bool PublicFormRequireOtp { get; set; } = false;
 }
 

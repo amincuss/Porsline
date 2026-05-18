@@ -13,5 +13,9 @@ public class AppUser : IdentityUser<Guid>
     public bool IsSoftDeleted { get; set; }
     public string? AvatarUrl { get; set; }
     public string? AboutMe { get; set; }
+    public Guid? UserPositionId { get; set; }
+    public UserPosition? UserPosition { get; set; }
+    /// <summary>مسیر نسبی PNG امضای دیجیتال</summary>
+    public string? SignatureImagePath { get; set; }
     public ICollection<UserGroupMember> GroupMembers { get; set; } = new List<UserGroupMember>();
 }

@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -6,12 +7,20 @@ using System.Security.Claims;
 using PorslineClone.Application.Abstractions;
 using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
+using PorslineClone.Infrastructure.Services;
 
 namespace PorslineClone.Api.Controllers;
 
 [ApiController]
 [Route("api/admin/users")]
-public class AdminUsersController(UserManager<AppUser> userManager, RoleManager<AppRole> roleManager, ISmsSender smsSender, Infrastructure.Persistence.AppDbContext db, IFrontendUrlResolver frontendUrls) : ControllerBase
+public class AdminUsersController(
+    UserManager<AppUser> userManager,
+    RoleManager<AppRole> roleManager,
+    ISmsSender smsSender,
+    Infrastructure.Persistence.AppDbContext db,
+    IFrontendUrlResolver frontendUrls,
+    UserSignatureStorageService signatureStorage,
+    IWebHostEnvironment env) : ControllerBase
 {
     private Guid? CurrentUserGuid
     {
@@ -55,6 +64,14 @@ public class AdminUsersController(UserManager<AppUser> userManager, RoleManager<
         if (validGroupIds.Count != groupIds.Count)
             return BadRequest(new { message = "یک یا چند گروه انتخاب‌شده معتبر نیستند" });
 
+        Guid? positionId = null;
+        if (dto.UserPositionId is Guid pid && pid != Guid.Empty)
+        {
+            if (!await db.UserPositions.AnyAsync(x => x.Id == pid && x.IsActive, cancellationToken))
+                return BadRequest(new { message = "سمت انتخاب‌شده معتبر نیست" });
+            positionId = pid;
+        }
+
         var generatedPassword = PasswordGenerator.Generate();
         var user = new AppUser
         {
@@ -64,6 +81,7 @@ public class AdminUsersController(UserManager<AppUser> userManager, RoleManager<
             FirstName = firstName,
             LastName = lastName,
             NationalCode = nationalCode,
+            UserPositionId = positionId,
             CreatedByUserId = CurrentUserGuid,
             CreatedAtUtc = DateTime.UtcNow,
             IsActive = true,
@@ -111,6 +129,7 @@ public class AdminUsersController(UserManager<AppUser> userManager, RoleManager<
 
         return Ok(new
         {
+            id = user.Id,
             message = !smsSettings.UserCreateSmsEnabled
                 ? "کاربر با موفقیت ساخته شد"
                 : smsSent
@@ -189,12 +208,18 @@ public class AdminUsersController(UserManager<AppUser> userManager, RoleManager<
                 MobileNumber = x.PhoneNumber,
                 x.NationalCode,
                 x.CreatedAtUtc,
-                x.IsActive
+                x.IsActive,
+                x.UserPositionId,
+                x.SignatureImagePath
             })
             .ToListAsync(cancellationToken);
 
         // بارگذاری role‌ها به صورت batch
         var userIds = usersRaw.Select(x => x.Id).ToList();
+        var positionIds = usersRaw.Where(x => x.UserPositionId.HasValue).Select(x => x.UserPositionId!.Value).Distinct().ToList();
+        var positionsById = await db.UserPositions
+            .Where(x => positionIds.Contains(x.Id))
+            .ToDictionaryAsync(x => x.Id, x => x.Name, cancellationToken);
         var userRoles = await db.Set<Microsoft.AspNetCore.Identity.IdentityUserRole<Guid>>()
             .Where(x => userIds.Contains(x.UserId))
             .Join(db.Roles, ur => ur.RoleId, r => r.Id, (ur, r) => new { ur.UserId, r.Name })
@@ -224,6 +249,10 @@ public class AdminUsersController(UserManager<AppUser> userManager, RoleManager<
                 u.NationalCode,
                 u.CreatedAtUtc,
                 u.IsActive,
+                u.UserPositionId,
+                UserPositionName = u.UserPositionId.HasValue && positionsById.TryGetValue(u.UserPositionId.Value, out var pn) ? pn : null,
+                HasSignature = !string.IsNullOrWhiteSpace(u.SignatureImagePath),
+                SignaturePath = u.SignatureImagePath,
                 RoleName = roles.FirstOrDefault() ?? "",
                 RoleNames = roles,
                 Groups = groupNames
@@ -252,15 +281,18 @@ public class AdminUsersController(UserManager<AppUser> userManager, RoleManager<
     [Authorize(Policy = "users.read")]
     public async Task<IActionResult> WorkflowUsers(CancellationToken cancellationToken)
     {
-        var users = await userManager.Users
+        var users = await db.Users
             .Where(x => !x.IsSoftDeleted && x.IsActive)
             .OrderBy(x => x.FirstName).ThenBy(x => x.LastName)
             .Select(x => new
             {
                 x.Id,
+                x.FirstName,
+                x.LastName,
                 Name = (x.FirstName + " " + x.LastName).Trim(),
                 Email = x.Email ?? (x.PhoneNumber ?? ""),
-                x.AvatarUrl
+                x.AvatarUrl,
+                PositionName = x.UserPosition != null ? x.UserPosition.Name : null
             })
             .ToListAsync(cancellationToken);
         return Ok(users);
@@ -278,6 +310,15 @@ public class AdminUsersController(UserManager<AppUser> userManager, RoleManager<
         user.PhoneNumber = dto.MobileNumber.Trim();
         user.UserName = dto.MobileNumber.Trim();
         user.NationalCode = dto.NationalCode.Trim();
+
+        if (dto.UserPositionId is Guid pid && pid != Guid.Empty)
+        {
+            if (!await db.UserPositions.AnyAsync(x => x.Id == pid && x.IsActive))
+                return BadRequest(new { message = "سمت انتخاب‌شده معتبر نیست" });
+            user.UserPositionId = pid;
+        }
+        else
+            user.UserPositionId = null;
 
         var result = await userManager.UpdateAsync(user);
         if (!result.Succeeded) return BadRequest(result.Errors);
@@ -355,6 +396,60 @@ public class AdminUsersController(UserManager<AppUser> userManager, RoleManager<
         return Ok(new { message = "وضعیت کاربر بروزرسانی شد" });
     }
 
+    [HttpGet("{id:guid}/signature")]
+    [Authorize(Policy = "users.read")]
+    public async Task<IActionResult> GetSignature(Guid id)
+    {
+        var user = await userManager.FindByIdAsync(id.ToString());
+        if (user is null || string.IsNullOrWhiteSpace(user.SignatureImagePath)) return NotFound();
+        var full = UserSignatureStorageService.ResolveFullPath(env, user.SignatureImagePath);
+        if (!System.IO.File.Exists(full)) return NotFound();
+        return PhysicalFile(full, "image/png", enableRangeProcessing: true);
+    }
+
+    [HttpPost("{id:guid}/signature")]
+    [Authorize(Policy = "users.update")]
+    [RequestSizeLimit(3 * 1024 * 1024)]
+    [Consumes("multipart/form-data")]
+    public async Task<IActionResult> UploadSignature(Guid id, [FromForm] UploadUserSignatureForm form, CancellationToken ct)
+    {
+        var user = await userManager.FindByIdAsync(id.ToString());
+        if (user is null || user.IsSoftDeleted) return NotFound();
+
+        var file = form.Signature ?? form.File;
+        if (file is null && Request.HasFormContentType)
+        {
+            var f = await Request.ReadFormAsync(ct);
+            file = f.Files.GetFile("signature") ?? f.Files.FirstOrDefault();
+        }
+        if (file is null || file.Length <= 0)
+            return BadRequest(new { message = "فایل امضا ارسال نشده است" });
+
+        try
+        {
+            user.SignatureImagePath = await signatureStorage.SaveAsync(id, file, ct);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+
+        var update = await userManager.UpdateAsync(user);
+        if (!update.Succeeded) return BadRequest(update.Errors);
+        return Ok(new { message = "امضای دیجیتال ذخیره شد", signaturePath = user.SignatureImagePath });
+    }
+
+    [HttpDelete("{id:guid}/signature")]
+    [Authorize(Policy = "users.update")]
+    public async Task<IActionResult> DeleteSignature(Guid id)
+    {
+        var user = await userManager.FindByIdAsync(id.ToString());
+        if (user is null || user.IsSoftDeleted) return NotFound();
+        user.SignatureImagePath = null;
+        await userManager.UpdateAsync(user);
+        return Ok(new { message = "امضا حذف شد" });
+    }
+
     [HttpDelete("{id:guid}")]
     [Authorize(Policy = "users.delete")]
     public async Task<IActionResult> SoftDelete(Guid id)
@@ -419,4 +514,10 @@ public class AdminUsersController(UserManager<AppUser> userManager, RoleManager<
 }
 
 public record UserGroupOptionDto(Guid UserId, Guid Id, string Name);
+
+public sealed class UploadUserSignatureForm
+{
+    public IFormFile? Signature { get; set; }
+    public IFormFile? File { get; set; }
+}
 
