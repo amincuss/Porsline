@@ -7,6 +7,12 @@ public interface ISmsSender
     Task<bool> SendSmsAsync(SmsRequest smsRequest, CancellationToken cancellationToken = default);
 }
 
+public interface IInboxMessageService
+{
+    Task SendToUserAsync(Guid userId, string title, string body, CancellationToken cancellationToken = default);
+    Task SendToMobileAsync(string mobileNumber, string title, string body, CancellationToken cancellationToken = default);
+}
+
 public interface IAuthService
 {
     Task<OtpSendResultDto> SendOtpAsync(string mobileNumber, string ipAddress, CancellationToken cancellationToken = default);

@@ -14,9 +14,8 @@ internal static class WordOpenXmlImageHelper
 
     public static long PixelsToEmu(int px) => px * 9525L;
 
-    public static void ReplaceParagraphWithImage(
+    public static Run CreateImageRun(
         MainDocumentPart mainPart,
-        Paragraph paragraph,
         byte[] imageBytes,
         string fileExtension,
         int widthPx,
@@ -26,17 +25,12 @@ internal static class WordOpenXmlImageHelper
         var cx = PixelsToEmu(widthPx);
         var cy = imgW > 0 ? (long)((double)cx * imgH / imgW) : cx;
 
-        var pPr = paragraph.GetFirstChild<ParagraphProperties>()?.CloneNode(true) as ParagraphProperties;
-        paragraph.RemoveAllChildren();
-        if (pPr is not null)
-            paragraph.AppendChild(pPr);
-
         var imagePart = mainPart.AddImagePart(ResolveImagePartType(fileExtension));
         using (var stream = new MemoryStream(imageBytes))
             imagePart.FeedData(stream);
 
         var relId = mainPart.GetIdOfPart(imagePart);
-        paragraph.AppendChild(new Run(CreateDrawing(relId, SanitizeImageName(imageName), cx, cy)));
+        return new Run(CreateDrawing(relId, SanitizeImageName(imageName), cx, cy));
     }
 
     private static string SanitizeImageName(string name)

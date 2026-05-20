@@ -55,6 +55,37 @@ public static class ContractWorkflowSignatureValidator
             .CountAsync(ct);
     }
 
+    /// <summary>کلید placeholderهای امضا به ترتیب SortOrder (مرحله ۱ → اولین کلید، …).</summary>
+    public static async Task<IReadOnlyList<string>> GetOrderedSignatureFieldKeysAsync(
+        AppDbContext db,
+        Guid? templateId,
+        Guid? versionId,
+        CancellationToken ct = default)
+    {
+        if (templateId is null || templateId == Guid.Empty)
+            return [];
+
+        var resolvedVersionId = versionId;
+        if (resolvedVersionId is null || resolvedVersionId == Guid.Empty)
+        {
+            resolvedVersionId = await db.ContractDocumentTemplates
+                .AsNoTracking()
+                .Where(t => t.Id == templateId)
+                .Select(t => t.ActiveVersionId)
+                .FirstOrDefaultAsync(ct);
+        }
+
+        if (resolvedVersionId is null || resolvedVersionId == Guid.Empty)
+            return [];
+
+        return await db.ContractDocumentTemplateFields
+            .AsNoTracking()
+            .Where(f => f.VersionId == resolvedVersionId && f.FieldType == ContractTemplateFieldType.Signature)
+            .OrderBy(f => f.SortOrder)
+            .Select(f => f.Key)
+            .ToListAsync(ct);
+    }
+
     public static string? ValidateCounts(int signatureCount, int approverCount)
     {
         if (signatureCount == approverCount)

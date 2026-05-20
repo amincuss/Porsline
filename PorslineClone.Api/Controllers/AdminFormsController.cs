@@ -8,6 +8,7 @@ using PorslineClone.Application.Abstractions;
 using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
+using PorslineClone.Infrastructure.Services;
 using PorslineClone.Api.RuleEngine;
 
 namespace PorslineClone.Api.Controllers;
@@ -15,7 +16,7 @@ namespace PorslineClone.Api.Controllers;
 [ApiController]
 [Route("api/admin/forms")]
 [Authorize]
-public class AdminFormsController(AppDbContext db, IRuleEvaluationService ruleEvaluationService, IWebHostEnvironment env, ISmsSender smsSender, IFrontendUrlResolver frontendUrls) : ControllerBase
+public class AdminFormsController(AppDbContext db, IRuleEvaluationService ruleEvaluationService, IWebHostEnvironment env, ISmsSender smsSender, IInboxMessageService inbox, IFrontendUrlResolver frontendUrls) : ControllerBase
 {
     private string? CurrentUserId => User.FindFirstValue(ClaimTypes.NameIdentifier);
     private bool IsAdmin => User.IsInRole("Admin");
@@ -306,7 +307,14 @@ public class AdminFormsController(AppDbContext db, IRuleEvaluationService ruleEv
         var steps = string.IsNullOrWhiteSpace(form.ApprovalWorkflowJson)
             ? new List<WorkflowStepDto>()
             : (JsonSerializer.Deserialize<List<WorkflowStepDto>>(form.ApprovalWorkflowJson) ?? new List<WorkflowStepDto>());
-        return Ok(new WorkflowSettingsDto(form.ApprovalEnabled, steps.OrderBy(x => x.Order).ToList()));
+        var templateStillActive = form.WorkflowTemplateId is not null
+            && await db.FormWorkflowTemplates.AnyAsync(t => t.Id == form.WorkflowTemplateId && t.IsActive, ct);
+        return Ok(new WorkflowSettingsDto(
+            templateStillActive,
+            steps.OrderBy(x => x.Order).ToList(),
+            templateStillActive ? form.WorkflowTemplateId : null,
+            templateStillActive ? form.WorkflowName : null,
+            templateStillActive));
     }
 
     [HttpPut("{id:guid}/workflow")]
@@ -325,6 +333,44 @@ public class AdminFormsController(AppDbContext db, IRuleEvaluationService ruleEv
         form.ApprovalWorkflowJson = req.Enabled ? JsonSerializer.Serialize(cleaned) : null;
         await db.SaveChangesAsync(ct);
         return Ok(new { message = "گردش تأیید ذخیره شد" });
+    }
+
+    [HttpPut("{id:guid}/workflow-link")]
+    [Authorize(Policy = "forms.update")]
+    public async Task<IActionResult> SaveWorkflowLink(Guid id, [FromBody] SaveFormWorkflowLinkRequest req, CancellationToken ct)
+    {
+        var form = await ScopeVisibleForms(db.Forms).FirstOrDefaultAsync(f => f.Id == id && !f.IsDeleted, ct);
+        if (form is null) return NotFound(new { message = "فرم یافت نشد" });
+
+        if (!req.ConnectWorkflow)
+        {
+            form.WorkflowTemplateId = null;
+            form.WorkflowName = null;
+            form.ApprovalEnabled = false;
+            await db.SaveChangesAsync(ct);
+            return Ok(new { message = "اتصال گردش کار حذف شد", useTemplate = false });
+        }
+
+        if (!Guid.TryParse(req.WorkflowTemplateId, out var templateId))
+            return BadRequest(new { message = "قالب گردش کار انتخاب نشده است" });
+
+        var template = await db.FormWorkflowTemplates
+            .FirstOrDefaultAsync(x => x.Id == templateId && x.IsActive, ct);
+        if (template is null)
+            return BadRequest(new { message = "گردش کار یافت نشد یا غیرفعال است" });
+
+        form.WorkflowTemplateId = template.Id;
+        form.WorkflowName = template.Name;
+        form.ApprovalEnabled = true;
+        form.ApprovalWorkflowJson = null;
+        await db.SaveChangesAsync(ct);
+        return Ok(new
+        {
+            message = $"فرم به گردش کار «{template.Name}» متصل شد",
+            workflowTemplateId = template.Id,
+            workflowName = template.Name,
+            useTemplate = true,
+        });
     }
 
     [HttpPut("{formId:guid}/fields/{fieldId:guid}/rules")]
@@ -375,6 +421,7 @@ public class AdminFormsController(AppDbContext db, IRuleEvaluationService ruleEv
     {
         var form = await ScopeVisibleForms(db.Forms)
             .Include(f => f.Fields.OrderBy(x => x.SortOrder))
+            .Include(f => f.WorkflowTemplate)
             .FirstOrDefaultAsync(f => f.Id == id && !f.IsDeleted, ct);
         if (form is null) return NotFound(new { message = "فرم یافت نشد" });
 
@@ -424,42 +471,36 @@ public class AdminFormsController(AppDbContext db, IRuleEvaluationService ruleEv
             values.TryGetValue(f.Id.ToString(), out var v) ? v : ""
         )).ToList();
 
-        var steps = BuildApprovalSteps(form.ApprovalWorkflowJson);
-        var hasWorkflow = form.ApprovalEnabled && steps.Count > 0;
-        if (hasWorkflow) steps[0].Status = "pending";
-
-        db.FormSubmissions.Add(new FormSubmission
-        {
-            Id = Guid.NewGuid(),
-            FormId = form.Id,
-            SubmitterName = req.SubmitterName,
-            SubmitterEmail = req.SubmitterEmail,
-            SubmittedAtUtc = DateTime.UtcNow,
-            CurrentStepOrder = hasWorkflow ? 1 : 0,
-            Status = hasWorkflow ? FormSubmissionStatus.InProgress : FormSubmissionStatus.Approved,
-            FieldsJson = JsonSerializer.Serialize(fieldValues),
-            StepsJson = hasWorkflow ? JsonSerializer.Serialize(steps) : null
-        });
+        var submission = FormSubmissionFactory.Create(form, fieldValues, req.SubmitterName, req.SubmitterEmail, null, null);
+        db.FormSubmissions.Add(submission);
 
         await db.SaveChangesAsync(ct);
 
-        if (hasWorkflow)
+        if (submission.Status == FormSubmissionStatus.InProgress
+            && submission.WorkflowStartedAtUtc is not null)
         {
+            var steps = WorkflowStepBuilder.BuildApprovalStepsFromInline(form.ApprovalWorkflowJson, startImmediately: true);
             var firstStep = steps.FirstOrDefault(x => x.Status == "pending");
             if (firstStep is not null)
                 await SendInitialApprovalSmsAsync(firstStep.UserId, form.Title, ct);
         }
 
-        return Ok(new { message = "فرم ثبت شد" });
+        var needsStart = submission.Status == FormSubmissionStatus.Pending && submission.WorkflowTemplateId is not null;
+        return Ok(new
+        {
+            message = needsStart
+                ? $"فرم ثبت شد. برای شروع گردش «{submission.WorkflowName}» دکمه شروع را بزنید."
+                : "فرم ثبت شد",
+            needsWorkflowStart = needsStart,
+            workflowName = submission.WorkflowName,
+        });
     }
 
     private async Task SendInitialApprovalSmsAsync(Guid approverUserId, string formTitle, CancellationToken ct)
     {
         var smsSettings = await db.SmsSettings.FirstOrDefaultAsync(ct) ?? new SmsSettings();
-        if (!smsSettings.ApprovalReferralSmsEnabled) return;
-
         var approver = await db.Users.FirstOrDefaultAsync(x => x.Id == approverUserId, ct);
-        if (approver is null || string.IsNullOrWhiteSpace(approver.PhoneNumber)) return;
+        if (approver is null) return;
 
         var msg =
             $"یک درخواست جدید از فرم «{formTitle}» برای تایید شما ثبت شد.\n" +
@@ -468,26 +509,11 @@ public class AdminFormsController(AppDbContext db, IRuleEvaluationService ruleEv
         if (!string.IsNullOrWhiteSpace(adminBase))
             msg += $"\nلینک مستقیم: {adminBase}/admin/approvals";
 
+        await inbox.SendToUserAsync(approverUserId, "تأیید فرم", msg, ct);
+        if (!smsSettings.ApprovalReferralSmsEnabled || string.IsNullOrWhiteSpace(approver.PhoneNumber)) return;
         await smsSender.SendSmsAsync(new PorslineClone.Application.Contracts.SmsRequest(approver.PhoneNumber, msg), ct);
     }
 
-    private static List<ApprovalStepDto> BuildApprovalSteps(string? workflowJson)
-    {
-        if (string.IsNullOrWhiteSpace(workflowJson)) return new List<ApprovalStepDto>();
-        var workflow = JsonSerializer.Deserialize<List<WorkflowStepDto>>(workflowJson) ?? new List<WorkflowStepDto>();
-        return workflow
-            .OrderBy(x => x.Order)
-            .Select((x, i) => new ApprovalStepDto
-            {
-                Id = Guid.NewGuid(),
-                Order = i + 1,
-                UserId = x.UserId,
-                Status = i == 0 ? "pending" : "waiting",
-                OnReject = x.OnReject is "continue" ? "continue" : "stop",
-                Note = x.Note
-            })
-            .ToList();
-    }
 }
 
 public record CreateFormRequest(string? Title, string? Description, string? QuestionDisplayMode = "all", DateTime? ExpiresAtUtc = null);

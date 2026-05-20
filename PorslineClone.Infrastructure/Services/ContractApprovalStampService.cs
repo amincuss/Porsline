@@ -1,24 +1,19 @@
-using System.Diagnostics;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PorslineClone.Application.Abstractions;
+using PorslineClone.Application.ContractTemplates;
 using PorslineClone.Infrastructure.Options;
+using PorslineClone.Infrastructure.Services.ContractTemplates;
 using PdfSharpCore.Drawing;
 using PdfSharpCore.Pdf;
 using PdfSharpCore.Pdf.IO;
-using DocumentFormat.OpenXml;
-using DocumentFormat.OpenXml.Packaging;
-using DocumentFormat.OpenXml.Wordprocessing;
-using A = DocumentFormat.OpenXml.Drawing;
-using DW = DocumentFormat.OpenXml.Drawing.Wordprocessing;
-using PIC = DocumentFormat.OpenXml.Drawing.Pictures;
 
 namespace PorslineClone.Infrastructure.Services;
 
 public sealed record ContractSignatoryStamp(string SignatureRelativePath, string FullName, string? PositionTitle);
 
-/// <summary>درج امضای تأییدکنندگان و ذخیره نسخه PDF امضاشده</summary>
+/// <summary>بازنویسی امضا روی همان فایل قرارداد (بدون ساخت مسیر _signed_ جدید برای DOCX).</summary>
 public class ContractApprovalStampService(
     IHostEnvironment env,
     ILogger<ContractApprovalStampService> logger,
@@ -32,123 +27,179 @@ public class ContractApprovalStampService(
     private const double Margin = 36;
     private const double BlockHeight = 78;
 
-    public bool TryStampAndSavePdf(
-        string sourceRelativePath,
-        string signatureRelativePath,
-        string fullName,
-        string? positionTitle,
-        int stackIndex,
-        out string? newRelativePath)
-    {
-        newRelativePath = null;
-        if (!_options.Enabled) return false;
-
-        var sourceFull = UserSignatureStorageService.ResolveFullPath(env, sourceRelativePath);
-        if (!File.Exists(sourceFull)) return false;
-
-        var sigFull = UserSignatureStorageService.ResolveFullPath(env, signatureRelativePath);
-        if (!File.Exists(sigFull)) return false;
-
-        var ext = Path.GetExtension(sourceFull).ToLowerInvariant();
-        try
-        {
-            if (ext == ".pdf")
-            {
-                newRelativePath = StampPdf(sourceFull, sigFull, fullName, positionTitle, stackIndex);
-                return true;
-            }
-
-            if (ext == ".docx")
-            {
-                var docxRel = StampDocx(sourceFull, sigFull, fullName, positionTitle);
-                var docxFull = UserSignatureStorageService.ResolveFullPath(env, docxRel);
-                var pdfRel = TryConvertDocxToPdfRelative(docxFull);
-                newRelativePath = pdfRel ?? docxRel;
-                return true;
-            }
-
-            return false;
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Contract stamp failed for {Path}", sourceRelativePath);
-            return false;
-        }
-    }
-
     public static bool IsSignedDocumentPath(string? relativePath) =>
         !string.IsNullOrWhiteSpace(relativePath)
         && relativePath.Contains("_signed_", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>از نسخه اصلی، PDF با تمام امضاهای تأییدشده می‌سازد.</summary>
-    public bool TryRebuildSignedPdf(
-        string originalRelativePath,
-        IReadOnlyList<ContractSignatoryStamp> signatories,
-        out string? newRelativePath)
+    /// <summary>
+    /// از نسخهٔ pristine کپی می‌گیرد، امضاها را در workRelativePath می‌نویسد (همان فایل کاری — بازنویسی مستقیم).
+    /// </summary>
+    public bool TryRewriteContractFile(
+        string workRelativePath,
+        string pristineRelativePath,
+        IReadOnlyList<ContractSignatureSlot> slots,
+        out string? resultRelativePath)
     {
-        newRelativePath = null;
-        if (!_options.Enabled || signatories.Count == 0) return false;
+        resultRelativePath = workRelativePath;
 
-        var sourceFull = UserSignatureStorageService.ResolveFullPath(env, originalRelativePath);
-        if (!File.Exists(sourceFull)) return false;
+        if (!_options.Enabled || slots.Count == 0)
+        {
+            logger.LogWarning("Contract signatures disabled or no slots");
+            return false;
+        }
 
-        var ext = Path.GetExtension(sourceFull).ToLowerInvariant();
+        var workFull = ResolveFullPath(workRelativePath);
+        var pristineFull = ResolveFullPath(pristineRelativePath);
+
+        if (!File.Exists(pristineFull))
+        {
+            logger.LogWarning("Pristine contract file missing: {Path}", pristineRelativePath);
+            return false;
+        }
+
+        var ext = Path.GetExtension(pristineFull).ToLowerInvariant();
+        if (ext is not ".docx" and not ".doc")
+            return TryRewritePdfFromPristine(pristineFull, workFull, ext, slots);
+
         try
         {
-            string pdfFull;
-            if (ext == ".pdf")
+            Directory.CreateDirectory(Path.GetDirectoryName(workFull)!);
+            File.Copy(pristineFull, workFull, overwrite: true);
+
+            var keysInDoc = ContractSignatureDocumentWriter.ScanPlaceholderKeys(workFull);
+            logger.LogInformation(
+                "Signature rewrite: work={Work}, pristine={Pristine}, slots={Slots}, placeholdersInDoc=[{Keys}]",
+                workRelativePath,
+                pristineRelativePath,
+                slots.Count,
+                string.Join(", ", keysInDoc));
+
+            var result = ContractSignatureDocumentWriter.ApplySignatures(workFull, slots);
+
+            if (result.InsertedInPlaceholder == 0)
             {
-                pdfFull = CopyToWorkPdf(sourceFull);
-            }
-            else if (ext == ".docx")
-            {
-                var converted = TryConvertDocxToPdfRelative(sourceFull);
-                if (converted is null) return false;
-                pdfFull = UserSignatureStorageService.ResolveFullPath(env, converted);
-                if (!File.Exists(pdfFull)) return false;
-            }
-            else
-            {
+                logger.LogError(
+                    "No signature inserted into {Work}. Placeholders in doc: [{Keys}], required slot keys: [{SlotKeys}]",
+                    workRelativePath,
+                    string.Join(", ", keysInDoc),
+                    string.Join(", ", slots.Select(s => ContractTemplateSystemFields.NormalizeKey(s.PlaceholderKey))));
                 return false;
             }
 
-            using var document = PdfReader.Open(pdfFull, PdfDocumentOpenMode.Modify);
-            var page = document.Pages[^1];
-            for (var i = 0; i < signatories.Count; i++)
+            if (result.MissingKeys.Count > 0)
             {
-                var s = signatories[i];
-                var sigFull = UserSignatureStorageService.ResolveFullPath(env, s.SignatureRelativePath);
-                if (!File.Exists(sigFull)) continue;
-                DrawStampOnPage(page, sigFull, s.FullName, s.PositionTitle, i);
+                logger.LogWarning(
+                    "No matching {{key}} in Word for: [{Keys}]. Add exact placeholders or align template field keys.",
+                    string.Join(", ", result.MissingKeys));
             }
 
-            var dir = Path.GetDirectoryName(sourceFull)!;
-            var baseName = Path.GetFileNameWithoutExtension(sourceFull);
-            var destFull = Path.Combine(dir, $"{baseName}_signed_{DateTime.UtcNow:yyyyMMddHHmmssfff}.pdf");
-            document.Save(destFull);
-            TryDeleteQuiet(pdfFull != sourceFull ? pdfFull : null);
-            newRelativePath = ToRelative(destFull);
+            logger.LogInformation(
+                "Signatures written to {Work}: {Count} placeholder(s) filled (strict key match)",
+                workRelativePath,
+                result.InsertedInPlaceholder);
+
             return true;
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Contract rebuild stamp failed for {Path}", originalRelativePath);
+            logger.LogError(ex, "Failed to rewrite signatures on {Work}", workRelativePath);
             return false;
         }
     }
 
-    private static void TryDeleteQuiet(string? path)
+    public bool TryRebuildSignedDocument(
+        string originalRelativePath,
+        IReadOnlyList<ContractSignatureSlot> slots,
+        out string? newRelativePath)
+        => TryRewriteContractFile(originalRelativePath, originalRelativePath, slots, out newRelativePath);
+
+    public bool TryRebuildSignedPdf(
+        string originalRelativePath,
+        IReadOnlyList<ContractSignatoryStamp> signatories,
+        IReadOnlyList<string>? signaturePlaceholderKeys,
+        out string? newRelativePath)
     {
-        if (string.IsNullOrWhiteSpace(path)) return;
-        try { File.Delete(path); } catch { /* ignore */ }
+        var slots = BuildSlots(signatories, signaturePlaceholderKeys);
+        return TryRebuildSignedDocument(originalRelativePath, slots, out newRelativePath);
     }
 
-    private static string CopyToWorkPdf(string sourceFull)
+    private List<ContractSignatureSlot> BuildSlots(
+        IReadOnlyList<ContractSignatoryStamp> signatories,
+        IReadOnlyList<string>? keys)
     {
-        var dir = Path.GetDirectoryName(sourceFull)!;
-        var work = Path.Combine(dir, $"_work_{Guid.NewGuid():N}.pdf");
-        File.Copy(sourceFull, work, overwrite: true);
-        return work;
+        var slots = new List<ContractSignatureSlot>();
+        for (var i = 0; i < signatories.Count; i++)
+        {
+            var s = signatories[i];
+            var sigFull = UserSignatureStorageService.ResolveFullPath(env, s.SignatureRelativePath);
+            if (!File.Exists(sigFull))
+                continue;
+
+            var ext = Path.GetExtension(sigFull);
+            if (string.IsNullOrWhiteSpace(ext))
+                ext = ".png";
+
+            var key = keys is not null && i < keys.Count
+                ? keys[i]
+                : $"sign_{i + 1}";
+
+            slots.Add(new ContractSignatureSlot(
+                WorkflowOrder: i + 1,
+                PlaceholderKey: key,
+                ImageBytes: File.ReadAllBytes(sigFull),
+                ImageExtension: ext,
+                ApproverFullName: s.FullName,
+                PositionTitle: s.PositionTitle));
+        }
+
+        return slots;
+    }
+
+    private bool TryRewritePdfFromPristine(
+        string pristineFull,
+        string workFull,
+        string ext,
+        IReadOnlyList<ContractSignatureSlot> slots)
+    {
+        string pdfWork;
+        if (ext == ".pdf")
+        {
+            pdfWork = workFull.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)
+                ? workFull
+                : Path.ChangeExtension(workFull, ".pdf");
+            File.Copy(pristineFull, pdfWork, overwrite: true);
+        }
+        else
+        {
+            var converted = pdfConverter.TryConvert(pristineFull);
+            if (converted is null)
+                return false;
+            pdfWork = workFull.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)
+                ? workFull
+                : Path.ChangeExtension(workFull, ".pdf");
+            File.Copy(converted, pdfWork, overwrite: true);
+        }
+
+        using var document = PdfReader.Open(pdfWork, PdfDocumentOpenMode.Modify);
+        var page = document.Pages[^1];
+        var stackIndex = 0;
+
+        foreach (var slot in slots.OrderBy(s => s.WorkflowOrder))
+        {
+            var tempSig = Path.Combine(Path.GetTempPath(), $"sig_{Guid.NewGuid():N}{slot.ImageExtension}");
+            try
+            {
+                File.WriteAllBytes(tempSig, slot.ImageBytes);
+                DrawStampOnPage(page, tempSig, slot.ApproverFullName, slot.PositionTitle, stackIndex++);
+            }
+            finally
+            {
+                TryDeleteQuiet(tempSig);
+            }
+        }
+
+        document.Save(pdfWork);
+        return true;
     }
 
     private void DrawStampOnPage(PdfPage page, string sigFull, string fullName, string? positionTitle, int stackIndex)
@@ -159,110 +210,51 @@ public class ContractApprovalStampService(
         gfx.DrawImage(img, Margin, y, SigWidth, SigHeight);
         var font = new XFont("Arial", 10, XFontStyle.Bold);
         var subFont = new XFont("Arial", 9, XFontStyle.Regular);
-        var nameY = y + SigHeight + 6;
-        gfx.DrawString(fullName, font, XBrushes.DarkSlateGray, Margin, nameY);
+        var lineY = y + SigHeight + 6;
         if (!string.IsNullOrWhiteSpace(positionTitle))
-            gfx.DrawString(positionTitle, subFont, XBrushes.Gray, Margin, nameY + 14);
-    }
+        {
+            gfx.DrawString(positionTitle, subFont, XBrushes.Gray, Margin, lineY);
+            lineY += 14;
+        }
 
-    private string StampPdf(string sourceFull, string sigFull, string fullName, string? positionTitle, int stackIndex)
-    {
-        var dir = Path.GetDirectoryName(sourceFull)!;
-        var baseName = Path.GetFileNameWithoutExtension(sourceFull);
-        var destFull = Path.Combine(dir, $"{baseName}_signed_{DateTime.UtcNow:yyyyMMddHHmmssfff}.pdf");
-
-        using var document = PdfReader.Open(sourceFull, PdfDocumentOpenMode.Modify);
-        var page = document.Pages[^1];
-        DrawStampOnPage(page, sigFull, fullName, positionTitle, stackIndex);
-        document.Save(destFull);
-        return ToRelative(destFull);
+        if (!string.IsNullOrWhiteSpace(fullName))
+            gfx.DrawString(fullName, font, XBrushes.DarkSlateGray, Margin, lineY);
     }
 
     private static double ComputeStampY(PdfPage page, int stackIndex)
     {
         var fromBottom = Margin + SigHeight + 28 + stackIndex * BlockHeight;
-        if (fromBottom <= page.Height.Point - Margin)
-            return page.Height.Point - fromBottom;
-
-        return Margin;
+        return fromBottom <= page.Height.Point - Margin
+            ? page.Height.Point - fromBottom
+            : Margin;
     }
 
-    private string StampDocx(string sourceFull, string sigFull, string fullName, string? positionTitle)
+    private static void TryDeleteQuiet(string? path)
     {
+        if (string.IsNullOrWhiteSpace(path)) return;
+        try { File.Delete(path); } catch { /* ignore */ }
+    }
+
+    /// <summary>یک کپی فقط-خواندنی از سند بدون امضا (یک‌بار ساخته می‌شود).</summary>
+    public string EnsurePristineBackupRelative(string sourceRelative)
+    {
+        var sourceFull = ResolveFullPath(sourceRelative);
+        if (!File.Exists(sourceFull))
+            return sourceRelative;
+
         var dir = Path.GetDirectoryName(sourceFull)!;
         var baseName = Path.GetFileNameWithoutExtension(sourceFull);
-        var destFull = Path.Combine(dir, $"{baseName}_signed_{DateTime.UtcNow:yyyyMMddHHmmssfff}.docx");
-        File.Copy(sourceFull, destFull, overwrite: true);
+        var ext = Path.GetExtension(sourceFull);
+        var pristineFull = Path.Combine(dir, $"{baseName}_pristine{ext}");
 
-        using var doc = WordprocessingDocument.Open(destFull, true);
-        var body = doc.MainDocumentPart!.Document!.Body!;
-        body.AppendChild(new Paragraph());
-        var imagePart = doc.MainDocumentPart.AddImagePart(ImagePartType.Png);
-        using (var stream = File.OpenRead(sigFull))
-            imagePart.FeedData(stream);
-        var relId = doc.MainDocumentPart.GetIdOfPart(imagePart);
+        if (!File.Exists(pristineFull))
+            File.Copy(sourceFull, pristineFull, overwrite: false);
 
-        body.AppendChild(CreateImageParagraph(relId, fullName));
-        body.AppendChild(new Paragraph(new Run(new Text(fullName) { Space = SpaceProcessingModeValues.Preserve })));
-        if (!string.IsNullOrWhiteSpace(positionTitle))
-            body.AppendChild(new Paragraph(new Run(new Text(positionTitle) { Space = SpaceProcessingModeValues.Preserve })));
-
-        doc.MainDocumentPart.Document.Save();
-        return ToRelative(destFull);
+        return ToRelative(pristineFull);
     }
 
-    private string? TryConvertDocxToPdfRelative(string docxFull)
-    {
-        var pdfFull = pdfConverter.TryConvert(docxFull);
-        if (pdfFull is null)
-        {
-            logger.LogInformation("PDF conversion unavailable; DOCX kept at {Path}", docxFull);
-            return null;
-        }
-
-        var signedPdf = Path.Combine(
-            Path.GetDirectoryName(docxFull)!,
-            $"{Path.GetFileNameWithoutExtension(docxFull)}_aspdf_{DateTime.UtcNow:yyyyMMddHHmmssfff}.pdf");
-        File.Copy(pdfFull, signedPdf, overwrite: true);
-        return ToRelative(signedPdf);
-    }
-
-    private static Paragraph CreateImageParagraph(string relationshipId, string name)
-    {
-        const long cx = 1400000L;
-        const long cy = 550000L;
-        var element =
-            new DocumentFormat.OpenXml.Wordprocessing.Drawing(
-                new DW.Inline(
-                    new DW.Extent { Cx = cx, Cy = cy },
-                    new DW.EffectExtent { LeftEdge = 0L, TopEdge = 0L, RightEdge = 0L, BottomEdge = 0L },
-                    new DW.DocProperties { Id = 1U, Name = name },
-                    new DW.NonVisualGraphicFrameDrawingProperties(new A.GraphicFrameLocks { NoChangeAspect = true }),
-                    new A.Graphic(
-                        new A.GraphicData(
-                            new PIC.Picture(
-                                new PIC.NonVisualPictureProperties(
-                                    new PIC.NonVisualDrawingProperties { Id = 0U, Name = "Signature.png" },
-                                    new PIC.NonVisualPictureDrawingProperties()),
-                                new PIC.BlipFill(
-                                    new A.Blip { Embed = relationshipId },
-                                    new A.Stretch(new A.FillRectangle())),
-                                new PIC.ShapeProperties(
-                                    new A.Transform2D(
-                                        new A.Offset { X = 0L, Y = 0L },
-                                        new A.Extents { Cx = cx, Cy = cy }),
-                                    new A.PresetGeometry(new A.AdjustValueList()) { Preset = A.ShapeTypeValues.Rectangle }))
-                        ) { Uri = "http://schemas.openxmlformats.org/drawingml/2006/picture" })
-                )
-                {
-                    DistanceFromTop = 0U,
-                    DistanceFromBottom = 0U,
-                    DistanceFromLeft = 0U,
-                    DistanceFromRight = 0U
-                });
-
-        return new Paragraph(new Run(element));
-    }
+    private string ResolveFullPath(string relativePath)
+        => UserSignatureStorageService.ResolveFullPath(env, relativePath);
 
     private string ToRelative(string fullPath)
     {

@@ -5,7 +5,7 @@ using PorslineClone.Infrastructure.Persistence;
 
 namespace PorslineClone.Infrastructure.Services;
 
-/// <summary>تولید شماره یکتای سند قرارداد؛ فرمت EN-سال‌شمسی-سریال (۴ رقم).</summary>
+/// <summary>تولید شماره یکتای سند قرارداد؛ فرمت EN + سال شمسی + سریال ۴ رقمی (بدون خط تیره)، مثلاً EN14040001.</summary>
 public static class ContractDocumentNumberService
 {
     private const string NumberPrefix = "EN";
@@ -42,7 +42,7 @@ public static class ContractDocumentNumberService
 
             settings.LastDocumentSequence++;
             settings.DocumentNumberPrefix = NumberPrefix;
-            var number = $"{NumberPrefix}-{jalaliYear}-{settings.LastDocumentSequence:D4}";
+            var number = $"{NumberPrefix}{jalaliYear}{settings.LastDocumentSequence:D4}";
 
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);

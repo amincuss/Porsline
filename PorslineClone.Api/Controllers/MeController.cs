@@ -120,20 +120,103 @@ public class MyAccountController(UserManager<AppUser> userManager, AppDbContext 
         });
     }
 
-    [HttpGet("messages")]
-    public async Task<IActionResult> Messages(CancellationToken cancellationToken)
+    [HttpGet("messages/stats")]
+    public async Task<IActionResult> MessageStats(CancellationToken cancellationToken)
     {
-        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (!Guid.TryParse(userId, out var id)) return Unauthorized();
+        if (!TryGetUserId(out var id)) return Unauthorized();
 
-        var items = await db.InboxMessages
-            .Where(x => x.UserId == id)
+        var q = db.InboxMessages.Where(x => x.UserId == id);
+        var total = await q.CountAsync(cancellationToken);
+        var unread = await q.CountAsync(x => !x.IsRead && !x.IsArchived, cancellationToken);
+        var archived = await q.CountAsync(x => x.IsArchived, cancellationToken);
+
+        return Ok(new InboxStatsDto(total, unread, archived));
+    }
+
+    [HttpGet("messages")]
+    public async Task<IActionResult> Messages([FromQuery] string? folder, CancellationToken cancellationToken)
+    {
+        if (!TryGetUserId(out var id)) return Unauthorized();
+
+        var q = db.InboxMessages.Where(x => x.UserId == id);
+        q = (folder ?? "inbox").ToLowerInvariant() switch
+        {
+            "archived" => q.Where(x => x.IsArchived),
+            "all" => q,
+            _ => q.Where(x => !x.IsArchived),
+        };
+
+        var items = await q
             .OrderByDescending(x => x.CreatedAtUtc)
-            .Take(50)
-            .Select(x => new InboxMessageDto(x.Id, x.Title, x.Body, x.IsRead, x.CreatedAtUtc))
+            .Take(100)
+            .Select(x => new InboxMessageDto(
+                x.Id,
+                x.Title,
+                x.Body,
+                x.IsRead,
+                x.IsArchived,
+                x.CreatedAtUtc,
+                x.ReadAtUtc))
             .ToListAsync(cancellationToken);
 
         return Ok(items);
+    }
+
+    [HttpPatch("messages/{messageId:guid}/read")]
+    public async Task<IActionResult> MarkMessageRead(Guid messageId, CancellationToken cancellationToken)
+    {
+        if (!TryGetUserId(out var id)) return Unauthorized();
+
+        var msg = await db.InboxMessages.FirstOrDefaultAsync(x => x.Id == messageId && x.UserId == id, cancellationToken);
+        if (msg is null) return NotFound(new { message = "پیام یافت نشد" });
+
+        if (!msg.IsRead)
+        {
+            msg.IsRead = true;
+            msg.ReadAtUtc = DateTime.UtcNow;
+            await db.SaveChangesAsync(cancellationToken);
+        }
+
+        return Ok(new { message = "پیام خوانده شد" });
+    }
+
+    [HttpPatch("messages/{messageId:guid}/archive")]
+    public async Task<IActionResult> ArchiveMessage(Guid messageId, CancellationToken cancellationToken)
+    {
+        if (!TryGetUserId(out var id)) return Unauthorized();
+
+        var msg = await db.InboxMessages.FirstOrDefaultAsync(x => x.Id == messageId && x.UserId == id, cancellationToken);
+        if (msg is null) return NotFound(new { message = "پیام یافت نشد" });
+
+        msg.IsArchived = true;
+        if (!msg.IsRead)
+        {
+            msg.IsRead = true;
+            msg.ReadAtUtc = DateTime.UtcNow;
+        }
+        await db.SaveChangesAsync(cancellationToken);
+
+        return Ok(new { message = "پیام بایگانی شد" });
+    }
+
+    [HttpDelete("messages/{messageId:guid}")]
+    public async Task<IActionResult> DeleteMessage(Guid messageId, CancellationToken cancellationToken)
+    {
+        if (!TryGetUserId(out var id)) return Unauthorized();
+
+        var msg = await db.InboxMessages.FirstOrDefaultAsync(x => x.Id == messageId && x.UserId == id, cancellationToken);
+        if (msg is null) return NotFound(new { message = "پیام یافت نشد" });
+
+        db.InboxMessages.Remove(msg);
+        await db.SaveChangesAsync(cancellationToken);
+
+        return Ok(new { message = "پیام حذف شد" });
+    }
+
+    private bool TryGetUserId(out Guid id)
+    {
+        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        return Guid.TryParse(userId, out id);
     }
 }
 

@@ -22,7 +22,11 @@ public class AdminSecuritySettingsController(AppDbContext db) : ControllerBase
             settings.MaxFailedOtpAttempts,
             settings.LockoutMinutes,
             settings.MaskAuthErrors,
-            settings.LoginMethod));
+            settings.LoginMethod,
+            settings.AnonymousLinkExpiryDays,
+            settings.DispatchLinkRequireOtp,
+            settings.AccessTokenLifetimeMinutes,
+            settings.RefreshTokenLifetimeDays));
     }
 
     [HttpPut("security")]
@@ -42,6 +46,10 @@ public class AdminSecuritySettingsController(AppDbContext db) : ControllerBase
         settings.LockoutMinutes = Math.Clamp(dto.LockoutMinutes, 1, 120);
         settings.MaskAuthErrors = dto.MaskAuthErrors;
         settings.LoginMethod = dto.LoginMethod;
+        settings.AnonymousLinkExpiryDays = Math.Clamp(dto.AnonymousLinkExpiryDays, 1, 365);
+        settings.DispatchLinkRequireOtp = dto.DispatchLinkRequireOtp;
+        settings.AccessTokenLifetimeMinutes = Math.Clamp(dto.AccessTokenLifetimeMinutes, 5, 1440);
+        settings.RefreshTokenLifetimeDays = Math.Clamp(dto.RefreshTokenLifetimeDays, 1, 90);
 
         await db.SaveChangesAsync(cancellationToken);
         return Ok(new { message = "تنظیمات امنیتی ذخیره شد" });

@@ -17,6 +17,7 @@ public class AdminUsersController(
     UserManager<AppUser> userManager,
     RoleManager<AppRole> roleManager,
     ISmsSender smsSender,
+    IInboxMessageService inbox,
     Infrastructure.Persistence.AppDbContext db,
     IFrontendUrlResolver frontendUrls,
     UserSignatureStorageService signatureStorage,
@@ -50,6 +51,15 @@ public class AdminUsersController(
         if (await userManager.Users.AnyAsync(x => x.NationalCode == nationalCode, cancellationToken))
             return BadRequest(new { message = "این کد ملی قبلا ثبت شده است" });
 
+        var personnelCode = dto.PersonnelCode?.Trim();
+        if (!string.IsNullOrWhiteSpace(personnelCode)
+            && await userManager.Users.AnyAsync(x => x.PersonnelCode == personnelCode, cancellationToken))
+            return BadRequest(new { message = "این کد پرسنلی قبلا ثبت شده است" });
+
+        var gender = ParseUserGender(dto.Gender);
+        if (dto.Gender is { Length: > 0 } gRaw && gender is null)
+            return BadRequest(new { message = "جنسیت معتبر نیست (آقای یا خانم)" });
+
         var groupIds = (dto.GroupIds ?? [])
             .Where(x => x != Guid.Empty)
             .Distinct()
@@ -81,6 +91,8 @@ public class AdminUsersController(
             FirstName = firstName,
             LastName = lastName,
             NationalCode = nationalCode,
+            PersonnelCode = string.IsNullOrWhiteSpace(personnelCode) ? null : personnelCode,
+            Gender = gender,
             UserPositionId = positionId,
             CreatedByUserId = CurrentUserGuid,
             CreatedAtUtc = DateTime.UtcNow,
@@ -102,27 +114,22 @@ public class AdminUsersController(
 
         var smsSettings = await db.SmsSettings.FirstOrDefaultAsync(cancellationToken) ?? new SmsSettings();
 
+        var (dateStr, timeStr) = SmsDateTimeFormatter.FormatUtcNowTehran();
+        var baseUrl = await frontendUrls.ResolveAdminBaseUrlAsync(cancellationToken);
+        var loginUrl = string.IsNullOrWhiteSpace(baseUrl) ? "/login" : $"{baseUrl}/login";
+        var welcomeText =
+            $"کارشناس محترم {firstName} {lastName}،\n" +
+            $"کاربری شما در تاریخ {dateStr} ساعت {timeStr} ساخته شد.\n" +
+            $"جهت استفاده از پنل به لینک زیر مراجعه نمایید:\n{loginUrl}";
+
+        await inbox.SendToUserAsync(user.Id, "خوش‌آمدگویی", welcomeText, cancellationToken);
+
         bool smsSent = false;
         string? smsFailReason = null;
 
         if (smsSettings.UserCreateSmsEnabled)
         {
-            var nowTehran = TimeZoneInfo.ConvertTimeFromUtc(
-                DateTime.UtcNow,
-                TimeZoneInfo.FindSystemTimeZoneById("Iran Standard Time"));
-
-            var dateStr  = nowTehran.ToString("yyyy/MM/dd");
-            var timeStr  = nowTehran.ToString("HH:mm");
-            var baseUrl = await frontendUrls.ResolveAdminBaseUrlAsync(cancellationToken);
-            var loginUrl = string.IsNullOrWhiteSpace(baseUrl) ? "/login" : $"{baseUrl}/login";
-
-            var smsText =
-                $"کارشناس محترم {firstName} {lastName}،\n" +
-                $"کاربری شما در تاریخ {dateStr} ساعت {timeStr} ساخته شد.\n" +
-                $"جهت استفاده از پنل به لینک زیر مراجعه نمایید:\n{loginUrl}";
-
-            smsSent = await smsSender.SendSmsAsync(new SmsRequest(mobileNumber, smsText), cancellationToken);
-
+            smsSent = await smsSender.SendSmsAsync(new SmsRequest(mobileNumber, welcomeText), cancellationToken);
             if (!smsSent)
                 smsFailReason = "ارسال پیامک با خطا مواجه شد";
         }
@@ -310,6 +317,20 @@ public class AdminUsersController(
         user.PhoneNumber = dto.MobileNumber.Trim();
         user.UserName = dto.MobileNumber.Trim();
         user.NationalCode = dto.NationalCode.Trim();
+
+        var personnelCode = dto.PersonnelCode?.Trim();
+        if (!string.IsNullOrWhiteSpace(personnelCode)
+            && await userManager.Users.AnyAsync(x => x.PersonnelCode == personnelCode && x.Id != id))
+            return BadRequest(new { message = "این کد پرسنلی قبلا ثبت شده است" });
+        user.PersonnelCode = string.IsNullOrWhiteSpace(personnelCode) ? null : personnelCode;
+
+        if (dto.Gender is { Length: > 0 } gRaw)
+        {
+            var parsed = ParseUserGender(gRaw);
+            if (parsed is null)
+                return BadRequest(new { message = "جنسیت معتبر نیست (آقای یا خانم)" });
+            user.Gender = parsed;
+        }
 
         if (dto.UserPositionId is Guid pid && pid != Guid.Empty)
         {
@@ -510,6 +531,17 @@ public class AdminUsersController(
             .OrderBy(x => x.Name)
             .Select(x => new RoleItemDto(x.Id, x.Name!, x.DisplayName))
             .ToListAsync(cancellationToken);
+    }
+
+    private static UserGender? ParseUserGender(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        return raw.Trim().ToLowerInvariant() switch
+        {
+            "male" or "m" or "1" or "آقا" or "آقای" or "mr" => UserGender.Male,
+            "female" or "f" or "2" or "خانم" or "ms" => UserGender.Female,
+            _ => null,
+        };
     }
 }
 

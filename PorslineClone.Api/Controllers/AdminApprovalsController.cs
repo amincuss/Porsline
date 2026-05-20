@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.StaticFiles;
 using PorslineClone.Application.Abstractions;
+using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
 
@@ -15,7 +16,7 @@ namespace PorslineClone.Api.Controllers;
 [ApiController]
 [Route("api/admin/approvals")]
 [Authorize]
-public class AdminApprovalsController(AppDbContext db, UserManager<AppUser> userManager, ISmsSender smsSender, IWebHostEnvironment env, IFrontendUrlResolver frontendUrls) : ControllerBase
+public class AdminApprovalsController(AppDbContext db, UserManager<AppUser> userManager, ISmsSender smsSender, IInboxMessageService inbox, IWebHostEnvironment env, IFrontendUrlResolver frontendUrls) : ControllerBase
 {
     [HttpGet]
     [Authorize(Policy = "approvals.read")]
@@ -265,11 +266,9 @@ public class AdminApprovalsController(AppDbContext db, UserManager<AppUser> user
         CancellationToken ct)
     {
         var smsSettings = await db.SmsSettings.FirstOrDefaultAsync(ct) ?? new SmsSettings();
-        if (!smsSettings.ApprovalReferralSmsEnabled) return;
 
         var nextUser = await userManager.FindByIdAsync(nextUserId.ToString());
         if (nextUser is null) return;
-        if (string.IsNullOrWhiteSpace(nextUser.PhoneNumber)) return;
 
         var formTitle = await db.Forms
             .Where(f => f.Id == formId)
@@ -287,6 +286,8 @@ public class AdminApprovalsController(AppDbContext db, UserManager<AppUser> user
         if (!string.IsNullOrWhiteSpace(adminBase))
             msg += $"\nلینک مستقیم: {adminBase}/admin/approvals";
 
+        await inbox.SendToUserAsync(nextUserId, "ارجاع تأیید فرم", msg, ct);
+        if (!smsSettings.ApprovalReferralSmsEnabled || string.IsNullOrWhiteSpace(nextUser.PhoneNumber)) return;
         await smsSender.SendSmsAsync(new PorslineClone.Application.Contracts.SmsRequest(nextUser.PhoneNumber, msg), ct);
     }
 
@@ -306,12 +307,12 @@ public class AdminApprovalsController(AppDbContext db, UserManager<AppUser> user
         FormSubmissionStatus.InProgress => "in_progress",
         FormSubmissionStatus.Approved => "approved",
         FormSubmissionStatus.Rejected => "rejected",
+        FormSubmissionStatus.Submitted => "submitted",
         _ => "pending"
     };
 }
 
 public record ApprovalActionRequest(string? Comment);
-public record FormFieldValueDto(string Label, string Value);
 public class ApprovalStepDto
 {
     public Guid Id { get; set; }

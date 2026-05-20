@@ -189,6 +189,21 @@ if (dbStartup.RunMigrations || dbStartup.RunSeed || dbStartup.ApplySchemaPatch)
         logger.LogInformation("RunMigrations is disabled. Apply migrations manually (dotnet ef database update).");
     }
 
+    if (dbStartup.ApplySchemaPatch || dbStartup.RunMigrations)
+    {
+        try
+        {
+            await DatabaseSchemaPatcher.ApplySecuritySettingsColumnsAsync(db);
+            logger.LogInformation("SecuritySettings schema columns verified.");
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "SecuritySettings schema patch failed.");
+            if (!dbStartup.ContinueOnMigrationError)
+                throw;
+        }
+    }
+
     if (dbStartup.ApplySchemaPatch)
     {
         try

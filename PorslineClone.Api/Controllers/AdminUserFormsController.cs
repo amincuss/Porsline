@@ -6,15 +6,21 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.StaticFiles;
 using PorslineClone.Application.Abstractions;
+using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
+using PorslineClone.Infrastructure.Services;
 
 namespace PorslineClone.Api.Controllers;
 
 [ApiController]
 [Route("api/admin/user-forms")]
 [Authorize]
-public class AdminUserFormsController(AppDbContext db, IFrontendUrlResolver frontendUrls, IWebHostEnvironment env) : ControllerBase
+public class AdminUserFormsController(
+    AppDbContext db,
+    IFrontendUrlResolver frontendUrls,
+    IWebHostEnvironment env,
+    FormWorkflowProcessor workflowProcessor) : ControllerBase
 {
     private async Task<FormSubmission?> GetAuthorizedSubmissionAsync(Guid id, CancellationToken ct)
     {
@@ -70,6 +76,7 @@ public class AdminUserFormsController(AppDbContext db, IFrontendUrlResolver fron
                 "rejected" => q.Where(x => x.Status == FormSubmissionStatus.Rejected),
                 "in_progress" => q.Where(x => x.Status == FormSubmissionStatus.InProgress),
                 "pending" => q.Where(x => x.Status == FormSubmissionStatus.Pending),
+                "submitted" => q.Where(x => x.Status == FormSubmissionStatus.Submitted),
                 _ => q
             };
         }
@@ -81,6 +88,8 @@ public class AdminUserFormsController(AppDbContext db, IFrontendUrlResolver fron
             "name_desc" => q.OrderByDescending(x => x.SubmitterName),
             _ => q.OrderByDescending(x => x.SubmittedAtUtc)
         };
+
+        await ProcessDueScheduledWorkflowStartsAsync(ct);
 
         var total = await q.CountAsync(ct);
         var data = await q.Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(ct);
@@ -96,11 +105,22 @@ public class AdminUserFormsController(AppDbContext db, IFrontendUrlResolver fron
                 .Where(s => s.Status == "approved" || s.Status == "rejected")
                 .OrderByDescending(s => s.ActionAt ?? DateTime.MinValue)
                 .FirstOrDefault();
-            var accessCode = await db.FormDispatchLinks
-                .Where(l => l.FormId == x.FormId && l.ResponderFullName == (x.SubmitterName ?? "") && l.UsedAtUtc == null && l.ExpiresAtUtc > DateTime.UtcNow)
-                .OrderByDescending(l => l.CreatedAtUtc)
-                .Select(l => l.Code)
-                .FirstOrDefaultAsync(ct);
+            string? accessCode = null;
+            if (x.DispatchLinkId is not null)
+            {
+                accessCode = await db.FormDispatchLinks
+                    .Where(l => l.Id == x.DispatchLinkId)
+                    .Select(l => l.Code)
+                    .FirstOrDefaultAsync(ct);
+            }
+            else if (x.ResponderId is not null)
+            {
+                accessCode = await db.FormDispatchLinks
+                    .Where(l => l.FormId == x.FormId && l.ResponderId == x.ResponderId && l.UsedAtUtc != null)
+                    .OrderByDescending(l => l.UsedAtUtc)
+                    .Select(l => l.Code)
+                    .FirstOrDefaultAsync(ct);
+            }
 
             result.Add(new
             {
@@ -110,11 +130,21 @@ public class AdminUserFormsController(AppDbContext db, IFrontendUrlResolver fron
                 x.SubmittedAtUtc,
                 SubmitterName = x.SubmitterName,
                 SubmitterMobile = x.SubmitterEmail,
-                ApprovalStatus = x.Status.ToString().ToLowerInvariant(),
+                ApprovalStatus = ToClientStatus(x.Status),
+                SuggestedWorkflowTemplateId = x.Form.WorkflowTemplateId,
+                SuggestedWorkflowName = x.Form.WorkflowName,
                 LatestApprover = latest?.UserName,
                 LatestApproverActionAt = latest?.ActionAt,
                 IsApprovalCompleted = x.Status is FormSubmissionStatus.Approved or FormSubmissionStatus.Rejected,
-                PublicLink = string.IsNullOrWhiteSpace(accessCode) ? null : $"{baseUrl}/forms/fill?c={accessCode}"
+                PublicLink = string.IsNullOrWhiteSpace(accessCode) ? null : $"{baseUrl}/forms/fill?c={accessCode}",
+                x.WorkflowName,
+                x.WorkflowTemplateId,
+                x.WorkflowStartedAtUtc,
+                x.WorkflowScheduledStartAtUtc,
+                CanStartWorkflow = CanStartWorkflow(x),
+                CanAssignWorkflow = CanAssignWorkflow(x),
+                CanUnassignWorkflow = CanUnassignWorkflow(x),
+                NeedsWorkflowStart = x.Status == FormSubmissionStatus.Pending && x.WorkflowTemplateId is not null,
             });
         }
 
@@ -178,7 +208,9 @@ public class AdminUserFormsController(AppDbContext db, IFrontendUrlResolver fron
             submission.SubmittedAtUtc,
             SubmitterName = submission.SubmitterName,
             SubmitterMobile = submission.SubmitterEmail,
-            ApprovalStatus = submission.Status.ToString().ToLowerInvariant(),
+            ApprovalStatus = ToClientStatus(submission.Status),
+            SuggestedWorkflowTemplateId = submission.Form.WorkflowTemplateId,
+            SuggestedWorkflowName = submission.Form.WorkflowName,
             Fields = values.Select(v => new
             {
                 v.Label,
@@ -194,9 +226,192 @@ public class AdminUserFormsController(AppDbContext db, IFrontendUrlResolver fron
                 s.Status,
                 s.ActionAt,
                 s.Note
-            })
+            }),
+            submission.WorkflowName,
+            submission.WorkflowTemplateId,
+            submission.WorkflowStartedAtUtc,
+            submission.WorkflowScheduledStartAtUtc,
+            CanStartWorkflow = CanStartWorkflow(submission),
+            CanAssignWorkflow = CanAssignWorkflow(submission),
+            CanUnassignWorkflow = CanUnassignWorkflow(submission),
         });
     }
+
+    [HttpPost("{id:guid}/assign-workflow")]
+    [Authorize(Policy = "forms.update")]
+    public async Task<IActionResult> AssignWorkflow(Guid id, [FromBody] AssignWorkflowRequest req, CancellationToken ct)
+    {
+        var submission = await GetAuthorizedSubmissionAsync(id, ct);
+        if (submission is null) return NotFound(new { message = "پاسخ فرم یافت نشد" });
+        if (!CanAssignWorkflow(submission))
+            return BadRequest(new { message = "در وضعیت فعلی امکان انتصاب گردش وجود ندارد" });
+
+        if (!Guid.TryParse(req.WorkflowTemplateId, out var templateId))
+            return BadRequest(new { message = "گردش انتخاب‌شده نامعتبر است" });
+
+        var template = await db.FormWorkflowTemplates
+            .FirstOrDefaultAsync(x => x.Id == templateId && x.IsActive, ct);
+        if (template is null)
+            return BadRequest(new { message = "گردش یافت نشد یا غیرفعال است" });
+
+        var mode = (req.StartMode ?? "manual").Trim().ToLowerInvariant();
+        DateTime? scheduledUtc = null;
+        if (mode == "scheduled")
+        {
+            if (string.IsNullOrWhiteSpace(req.ScheduledStartAtUtc) ||
+                !DateTime.TryParse(req.ScheduledStartAtUtc, null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsed))
+                return BadRequest(new { message = "تاریخ شروع گردش نامعتبر است" });
+            scheduledUtc = parsed.Kind == DateTimeKind.Unspecified
+                ? DateTime.SpecifyKind(parsed, DateTimeKind.Utc)
+                : parsed.ToUniversalTime();
+            if (scheduledUtc <= DateTime.UtcNow)
+                return BadRequest(new { message = "تاریخ شروع باید در آینده باشد" });
+        }
+
+        submission.WorkflowTemplateId = template.Id;
+        submission.WorkflowName = template.Name;
+        submission.WorkflowStartedAtUtc = null;
+        submission.WorkflowScheduledStartAtUtc = mode == "scheduled" ? scheduledUtc : null;
+        submission.Status = FormSubmissionStatus.Pending;
+        submission.CurrentStepOrder = 1;
+        submission.StepsJson = JsonSerializer.Serialize(
+            WorkflowStepBuilder.BuildApprovalStepsFromTemplate(template.StepsJson, startImmediately: false));
+
+        await db.SaveChangesAsync(ct);
+
+        if (mode == "now")
+        {
+            await db.Entry(submission).ReloadAsync(ct);
+            var (ok, err) = await workflowProcessor.TryStartWorkflowAsync(submission, ct);
+            if (!ok) return BadRequest(new { message = err ?? "شروع گردش ناموفق بود" });
+            return Ok(new
+            {
+                message = $"گردش «{submission.WorkflowName}» انتصاب و شروع شد",
+                workflowStartedAtUtc = submission.WorkflowStartedAtUtc,
+            });
+        }
+
+        if (mode == "scheduled")
+        {
+            return Ok(new
+            {
+                message = $"گردش «{submission.WorkflowName}» انتصاب شد و در تاریخ برنامه‌ریزی‌شده شروع می‌شود",
+                workflowScheduledStartAtUtc = submission.WorkflowScheduledStartAtUtc,
+            });
+        }
+
+        return Ok(new
+        {
+            message = $"گردش «{submission.WorkflowName}» انتصاب شد. برای شروع دکمه «شروع گردش» را بزنید",
+            canStartWorkflow = true,
+        });
+    }
+
+    [HttpPost("{id:guid}/unassign-workflow")]
+    [Authorize(Policy = "forms.update")]
+    public async Task<IActionResult> UnassignWorkflow(Guid id, CancellationToken ct)
+    {
+        var submission = await GetAuthorizedSubmissionAsync(id, ct);
+        if (submission is null) return NotFound(new { message = "پاسخ فرم یافت نشد" });
+        if (!CanUnassignWorkflow(submission))
+            return BadRequest(new { message = "در وضعیت فعلی امکان حذف گردش وجود ندارد" });
+
+        submission.WorkflowTemplateId = null;
+        submission.WorkflowName = null;
+        submission.WorkflowStartedAtUtc = null;
+        submission.WorkflowScheduledStartAtUtc = null;
+        submission.StepsJson = null;
+        submission.Status = FormSubmissionStatus.Submitted;
+        submission.CurrentStepOrder = 0;
+
+        var links = await db.FormSubmissionApprovalLinks
+            .Where(x => x.FormSubmissionId == id && x.IsActive)
+            .ToListAsync(ct);
+        foreach (var link in links)
+            link.IsActive = false;
+
+        await db.SaveChangesAsync(ct);
+        return Ok(new { message = "گردش از پاسخ فرم حذف شد" });
+    }
+
+    [HttpPost("{id:guid}/start-workflow")]
+    [Authorize(Policy = "forms.update")]
+    public async Task<IActionResult> StartWorkflow(Guid id, CancellationToken ct)
+    {
+        var submission = await GetAuthorizedSubmissionAsync(id, ct);
+        if (submission is null) return NotFound(new { message = "پاسخ فرم یافت نشد" });
+        if (submission.WorkflowTemplateId is null && string.IsNullOrWhiteSpace(submission.StepsJson))
+            return BadRequest(new { message = "برای این پاسخ گردش تأیید تعریف نشده است" });
+        if (submission.WorkflowStartedAtUtc is not null)
+            return BadRequest(new { message = "گردش این پاسخ قبلاً شروع شده است" });
+        if (submission.Status != FormSubmissionStatus.Pending)
+            return BadRequest(new { message = "گردش این پاسخ قبلاً شروع شده یا به پایان رسیده است" });
+
+        var (ok, err) = await workflowProcessor.TryStartWorkflowAsync(submission, ct);
+        if (!ok) return BadRequest(new { message = err ?? "شروع گردش ناموفق بود" });
+
+        return Ok(new { message = $"گردش «{submission.WorkflowName ?? "تأیید"}» شروع شد" });
+    }
+
+    [HttpPost("{id:guid}/resend-approval-sms")]
+    [Authorize(Policy = "forms.update")]
+    public async Task<IActionResult> ResendApprovalSms(Guid id, CancellationToken ct)
+    {
+        var result = await workflowProcessor.ResendPendingApprovalSmsAsync(id, ct);
+        if (!result.Success)
+        {
+            var status = result.HttpStatus ?? 400;
+            if (status == 404) return NotFound(new { message = result.Message });
+            return BadRequest(new { message = result.Message });
+        }
+        return Ok(new { message = result.Message });
+    }
+
+    private async Task ProcessDueScheduledWorkflowStartsAsync(CancellationToken ct)
+    {
+        var due = await db.FormSubmissions
+            .Where(x => x.WorkflowScheduledStartAtUtc != null
+                && x.WorkflowScheduledStartAtUtc <= DateTime.UtcNow
+                && x.WorkflowStartedAtUtc == null
+                && x.WorkflowTemplateId != null
+                && x.Status == FormSubmissionStatus.Pending)
+            .ToListAsync(ct);
+
+        foreach (var submission in due)
+            await workflowProcessor.TryStartWorkflowAsync(submission, ct);
+    }
+
+    private static bool HasAssignedWorkflow(FormSubmission submission) =>
+        submission.WorkflowTemplateId is not null
+        || (!string.IsNullOrWhiteSpace(submission.StepsJson) && submission.StepsJson.Trim() != "[]");
+
+    private static bool CanAssignWorkflow(FormSubmission submission) =>
+        submission.WorkflowStartedAtUtc is null
+        && !HasAssignedWorkflow(submission)
+        && submission.Status is FormSubmissionStatus.Submitted
+            or FormSubmissionStatus.Approved; // پاسخ‌های قدیمی که بدون گردش «تأیید» شده بودند
+
+    private static bool CanUnassignWorkflow(FormSubmission submission) =>
+        submission.WorkflowStartedAtUtc is null
+        && submission.Status is not FormSubmissionStatus.InProgress
+        && HasAssignedWorkflow(submission);
+
+    private static bool CanStartWorkflow(FormSubmission submission) =>
+        submission.Status == FormSubmissionStatus.Pending
+        && submission.WorkflowTemplateId is not null
+        && submission.WorkflowStartedAtUtc is null
+        && !string.IsNullOrWhiteSpace(submission.StepsJson)
+        && (submission.WorkflowScheduledStartAtUtc is null || submission.WorkflowScheduledStartAtUtc <= DateTime.UtcNow);
+
+    private static string ToClientStatus(FormSubmissionStatus status) => status switch
+    {
+        FormSubmissionStatus.Pending => "pending",
+        FormSubmissionStatus.InProgress => "in_progress",
+        FormSubmissionStatus.Approved => "approved",
+        FormSubmissionStatus.Rejected => "rejected",
+        FormSubmissionStatus.Submitted => "submitted",
+        _ => "pending"
+    };
 
     [HttpGet("{id:guid}/files/{index:int}/download")]
     [Authorize(Policy = "responders.read")]

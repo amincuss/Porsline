@@ -6,6 +6,7 @@ using PorslineClone.Application.Abstractions;
 using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
+using PorslineClone.Infrastructure.Services;
 
 namespace PorslineClone.Api.Controllers;
 
@@ -16,6 +17,7 @@ public class PublicFormsController(
     AppDbContext db,
     IWebHostEnvironment env,
     ISmsSender smsSender,
+    IInboxMessageService inbox,
     IFrontendUrlResolver frontendUrls) : ControllerBase
 {
     private static string NormalizeMobile(string? input)
@@ -43,13 +45,15 @@ public class PublicFormsController(
         if (!form.IsActive) return BadRequest(new { message = "این فرم غیرفعال است" });
         if (form.ExpiresAtUtc.HasValue && form.ExpiresAtUtc.Value < DateTime.UtcNow)
             return BadRequest(new { message = "اعتبار این فرم به پایان رسیده است" });
-        var smsSettings = await db.SmsSettings.FirstOrDefaultAsync(ct);
-        var requireOtp = smsSettings?.PublicFormRequireOtp ?? false;
+        var security = await SecuritySettingsHelper.GetAsync(db, ct);
+        var smsSettings = await db.SmsSettings.AsNoTracking().FirstOrDefaultAsync(ct);
+        var requireOtp = SecuritySettingsHelper.DispatchLinkRequiresOtp(security, smsSettings);
         if (requireOtp && link.OtpVerifiedAtUtc is null)
         {
             return Ok(new
             {
                 requiresOtp = true,
+                linkExpiresAtUtc = link.ExpiresAtUtc,
                 title = form.Title,
                 mobileNumber = NormalizeMobile(link.ResponderMobileNumber)
             });
@@ -61,6 +65,7 @@ public class PublicFormsController(
             form.Title,
             form.Description,
             form.ExpiresAtUtc,
+            linkExpiresAtUtc = link.ExpiresAtUtc,
             form.QuestionDisplayMode,
             RequiresOtp = false,
             Responder = new { link.ResponderId, FullName = link.ResponderFullName, MobileNumber = link.ResponderMobileNumber },
@@ -153,13 +158,15 @@ public class PublicFormsController(
 
         var form = await db.Forms
             .Include(f => f.Fields.OrderBy(x => x.SortOrder))
+            .Include(f => f.WorkflowTemplate)
             .FirstOrDefaultAsync(f => f.Id == link.FormId && !f.IsDeleted, ct);
         if (form is null) return NotFound(new { message = "فرم یافت نشد" });
         if (!form.IsActive) return BadRequest(new { message = "این فرم غیرفعال است" });
         if (form.ExpiresAtUtc.HasValue && form.ExpiresAtUtc.Value < DateTime.UtcNow)
             return BadRequest(new { message = "اعتبار این فرم به پایان رسیده است" });
-        var smsSettings = await db.SmsSettings.FirstOrDefaultAsync(ct);
-        var requireOtp = smsSettings?.PublicFormRequireOtp ?? false;
+        var security = await SecuritySettingsHelper.GetAsync(db, ct);
+        var smsSettings = await db.SmsSettings.AsNoTracking().FirstOrDefaultAsync(ct);
+        var requireOtp = SecuritySettingsHelper.DispatchLinkRequiresOtp(security, smsSettings);
         if (requireOtp && link.OtpVerifiedAtUtc is null)
             return BadRequest(new { message = "ابتدا احراز هویت OTP انجام شود" });
 
@@ -214,28 +221,22 @@ public class PublicFormsController(
             values.TryGetValue(f.Id.ToString(), out var v) ? v : ""
         )).ToList();
 
-        var steps = BuildApprovalSteps(form.ApprovalWorkflowJson);
-        var hasWorkflow = form.ApprovalEnabled && steps.Count > 0;
-        if (hasWorkflow) steps[0].Status = "pending";
-
-        db.FormSubmissions.Add(new FormSubmission
-        {
-            Id = Guid.NewGuid(),
-            FormId = form.Id,
-            SubmitterName = link.ResponderFullName,
-            SubmitterEmail = null,
-            SubmittedAtUtc = DateTime.UtcNow,
-            CurrentStepOrder = hasWorkflow ? 1 : 0,
-            Status = hasWorkflow ? FormSubmissionStatus.InProgress : FormSubmissionStatus.Approved,
-            FieldsJson = JsonSerializer.Serialize(fieldValues),
-            StepsJson = hasWorkflow ? JsonSerializer.Serialize(steps) : null
-        });
+        var responderId = link.ResponderId != Guid.Empty ? link.ResponderId : responder.Id;
+        var submission = FormSubmissionFactory.Create(
+            form,
+            fieldValues,
+            link.ResponderFullName,
+            link.ResponderMobileNumber,
+            responderId,
+            link.Id);
+        db.FormSubmissions.Add(submission);
         link.UsedAtUtc = DateTime.UtcNow;
 
         await db.SaveChangesAsync(ct);
 
-        if (hasWorkflow)
+        if (submission.Status == FormSubmissionStatus.InProgress && submission.WorkflowStartedAtUtc is not null)
         {
+            var steps = FormWorkflowProcessor.DeserializeSteps(submission.StepsJson);
             var firstStep = steps.FirstOrDefault(x => x.Status == "pending");
             if (firstStep is not null)
                 await SendInitialApprovalSmsAsync(firstStep.UserId, form.Title, ct);
@@ -247,10 +248,8 @@ public class PublicFormsController(
     private async Task SendInitialApprovalSmsAsync(Guid approverUserId, string formTitle, CancellationToken ct)
     {
         var smsSettings = await db.SmsSettings.FirstOrDefaultAsync(ct) ?? new SmsSettings();
-        if (!smsSettings.ApprovalReferralSmsEnabled) return;
-
         var approver = await db.Users.FirstOrDefaultAsync(x => x.Id == approverUserId, ct);
-        if (approver is null || string.IsNullOrWhiteSpace(approver.PhoneNumber)) return;
+        if (approver is null) return;
 
         var msg =
             $"یک درخواست جدید از فرم «{formTitle}» برای تایید شما ثبت شد.\n" +
@@ -259,26 +258,11 @@ public class PublicFormsController(
         if (!string.IsNullOrWhiteSpace(adminBase))
             msg += $"\nلینک مستقیم: {adminBase}/admin/approvals";
 
+        await inbox.SendToUserAsync(approverUserId, "تأیید فرم", msg, ct);
+        if (!smsSettings.ApprovalReferralSmsEnabled || string.IsNullOrWhiteSpace(approver.PhoneNumber)) return;
         await smsSender.SendSmsAsync(new PorslineClone.Application.Contracts.SmsRequest(approver.PhoneNumber, msg), ct);
     }
 
-    private static List<ApprovalStepDto> BuildApprovalSteps(string? workflowJson)
-    {
-        if (string.IsNullOrWhiteSpace(workflowJson)) return [];
-        var workflow = JsonSerializer.Deserialize<List<WorkflowStepDto>>(workflowJson) ?? [];
-        return workflow
-            .OrderBy(x => x.Order)
-            .Select((x, i) => new ApprovalStepDto
-            {
-                Id = Guid.NewGuid(),
-                Order = i + 1,
-                UserId = x.UserId,
-                Status = i == 0 ? "pending" : "waiting",
-                OnReject = x.OnReject is "continue" ? "continue" : "stop",
-                Note = x.Note
-            })
-            .ToList();
-    }
 }
 
 public class PublicSubmitRequest

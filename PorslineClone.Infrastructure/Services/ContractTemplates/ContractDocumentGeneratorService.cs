@@ -54,7 +54,7 @@ public partial class ContractDocumentGeneratorService : IContractDocumentGenerat
 
     private static void ScanInContainer(OpenXmlElement container, HashSet<string> found)
     {
-        foreach (var paragraph in container.Descendants<Paragraph>())
+        foreach (var paragraph in EnumerateContentParagraphs(container))
         {
             var combined = PlaceholderParagraphHelper.GetParagraphText(paragraph);
             ExtractFromText(combined, found);
@@ -82,12 +82,15 @@ public partial class ContractDocumentGeneratorService : IContractDocumentGenerat
         part.Document.Save();
     }
 
+    private static IEnumerable<Paragraph> EnumerateContentParagraphs(OpenXmlElement container)
+        => container.Descendants<Paragraph>();
+
     private static void ReplaceInContainer(
         MainDocumentPart mainPart,
         OpenXmlElement container,
         IReadOnlyDictionary<string, string> fieldValues)
     {
-        foreach (var paragraph in container.Descendants<Paragraph>().ToList())
+        foreach (var paragraph in EnumerateContentParagraphs(container).ToList())
             ReplaceInParagraph(mainPart, paragraph, fieldValues);
     }
 
@@ -104,7 +107,15 @@ public partial class ContractDocumentGeneratorService : IContractDocumentGenerat
         if (string.IsNullOrEmpty(combined))
             return;
 
-        if (TryReplaceSingleImagePlaceholder(mainPart, paragraph, combined, fieldValues))
+        // ۱) تصاویر در همان محل placeholder (inline)
+        ParagraphImageInserter.TryInsertAllImagePlaceholders(
+            mainPart, paragraph, fieldValues, PlaceholderRegex);
+
+        // ۲) متن — بعد از درج تصویر دوباره متن را بخوان
+        combined = PlaceholderParagraphHelper.NormalizeForPlaceholderMatch(
+            PlaceholderParagraphHelper.GetParagraphText(paragraph));
+
+        if (string.IsNullOrEmpty(combined))
             return;
 
         var updated = PlaceholderRegex.Replace(combined, match =>
@@ -113,7 +124,7 @@ public partial class ContractDocumentGeneratorService : IContractDocumentGenerat
             if (!TryResolveValue(rawKey, fieldValues, out var value))
                 return match.Value;
 
-            if (ContractTemplateImageValue.TryParse(value, out _))
+            if (ContractTemplateImageValue.TryParse(UnwrapStoredFieldValue(value), out _))
                 return "";
 
             return value ?? "";
@@ -123,48 +134,6 @@ public partial class ContractDocumentGeneratorService : IContractDocumentGenerat
             return;
 
         ApplyTextToParagraph(paragraph, updated);
-    }
-
-    private static bool TryReplaceSingleImagePlaceholder(
-        MainDocumentPart mainPart,
-        Paragraph paragraph,
-        string normalizedParagraphText,
-        IReadOnlyDictionary<string, string> fieldValues)
-    {
-        var match = PlaceholderRegex.Match(normalizedParagraphText);
-        if (!match.Success)
-            return false;
-
-        if (match.Index > 0 || match.Index + match.Length < normalizedParagraphText.Length)
-            return false;
-
-        var rawKey = match.Groups[1].Value.Trim();
-        if (!TryResolveValue(rawKey, fieldValues, out var rawValue))
-            return false;
-
-        if (!ContractTemplateImageValue.TryParse(UnwrapStoredFieldValue(rawValue), out var imagePayload) ||
-            imagePayload is null)
-            return false;
-
-        try
-        {
-            var (bytes, ext) = ContractTemplateImageValue.DecodeDataUrl(imagePayload.DataUrl);
-            if (ext.Equals(".webp", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("WebP in Word unsupported");
-
-            WordOpenXmlImageHelper.ReplaceParagraphWithImage(
-                mainPart,
-                paragraph,
-                bytes,
-                ext,
-                imagePayload.WidthPx,
-                rawKey);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
     }
 
     private static void ApplyTextToParagraph(Paragraph paragraph, string text)
@@ -182,7 +151,11 @@ public partial class ContractDocumentGeneratorService : IContractDocumentGenerat
             texts[i].Text = "";
     }
 
-    /// <summary>مقدار ذخیره‌شده ممکن است JSON رشته‌ای دوباره escape شده یا آبجکت خام باشد.</summary>
+    internal static bool TryResolveValuePublic(
+        string rawPlaceholderKey,
+        IReadOnlyDictionary<string, string> fieldValues,
+        out string value) => TryResolveValue(rawPlaceholderKey, fieldValues, out value);
+
     internal static string UnwrapStoredFieldValue(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
@@ -224,7 +197,7 @@ public partial class ContractDocumentGeneratorService : IContractDocumentGenerat
         var body = doc.MainDocumentPart?.Document?.Body
             ?? throw new InvalidOperationException("بدنه سند Word یافت نشد");
 
-        var paragraphs = body.Descendants<Paragraph>().ToList();
+        var paragraphs = EnumerateContentParagraphs(body).ToList();
         if (paragraphs.Count == 0)
         {
             body.AppendChild(new Paragraph(new Run(new Text(token) { Space = SpaceProcessingModeValues.Preserve })));

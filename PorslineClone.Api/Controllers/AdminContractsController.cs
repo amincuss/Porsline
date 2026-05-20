@@ -33,6 +33,126 @@ public class AdminContractsController(
         ".pdf", ".doc", ".docx"
     };
 
+    private bool IsAdmin => User.IsInRole("Admin");
+    private bool CanReadAllContracts => IsAdmin || User.HasClaim("permission", "contracts.read.all");
+
+    private static bool UserIsInContractWorkflow(Contract contract, Guid userId)
+    {
+        var steps = ContractWorkflowProcessor.DeserializeSteps(contract.StepsJson);
+        return steps.Any(s => s.UserId == userId);
+    }
+
+    private bool UserCanAccessContract(Contract contract, Guid userId) =>
+        CanReadAllContracts
+        || contract.CreatedByUserId == userId
+        || UserIsInContractWorkflow(contract, userId);
+
+    private IQueryable<Contract> ScopeVisibleContracts(IQueryable<Contract> query, Guid userId)
+    {
+        if (CanReadAllContracts)
+            return query;
+
+        var idStr = userId.ToString();
+        return query.Where(c =>
+            c.CreatedByUserId == userId
+            || (c.StepsJson != null && c.StepsJson.Contains(idStr)));
+    }
+
+    private bool TryGetCurrentUserId(out Guid userId) =>
+        Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out userId);
+
+    private IActionResult? DenyIfNoContractAccess(Contract contract)
+    {
+        if (!TryGetCurrentUserId(out var userId))
+            return Unauthorized();
+        return UserCanAccessContract(contract, userId) ? null : Forbid();
+    }
+
+    [HttpGet("party-lookup")]
+    [Authorize(Policy = "contracts.read")]
+    public async Task<IActionResult> PartyLookup([FromQuery] string q, CancellationToken ct)
+    {
+        if (!TryGetCurrentUserId(out var currentUserGuid))
+            return Unauthorized();
+
+        var digits = NormalizeDigits(q ?? "");
+        if (digits.Length < 3)
+            return Ok(Array.Empty<ContractPartyLookupItemDto>());
+
+        var rows = await ScopeVisibleContracts(db.Contracts.AsNoTracking(), currentUserGuid)
+            .Where(c => c.NationalId.Contains(digits))
+            .OrderByDescending(c => c.CreatedAtUtc)
+            .Select(c => new
+            {
+                c.NationalId,
+                c.FirstName,
+                c.LastName,
+                c.Phone,
+                c.SubjectPersonName,
+                c.Title,
+                c.ContractTypeId,
+                c.CreatedAtUtc,
+            })
+            .Take(50)
+            .ToListAsync(ct);
+
+        var items = rows
+            .GroupBy(r => r.NationalId)
+            .Select(g =>
+            {
+                var latest = g.OrderByDescending(x => x.CreatedAtUtc).First();
+                return new ContractPartyLookupItemDto(
+                    latest.NationalId,
+                    latest.FirstName,
+                    latest.LastName,
+                    latest.Phone,
+                    latest.SubjectPersonName,
+                    latest.Title,
+                    latest.ContractTypeId,
+                    g.Count());
+            })
+            .OrderByDescending(x => x.ContractCount)
+            .ThenBy(x => x.NationalId)
+            .Take(12)
+            .ToList();
+
+        return Ok(items);
+    }
+
+    [HttpGet("party/{nationalId}")]
+    [Authorize(Policy = "contracts.read")]
+    public async Task<IActionResult> PartyByNationalId(string nationalId, CancellationToken ct)
+    {
+        if (!TryGetCurrentUserId(out var currentUserGuid))
+            return Unauthorized();
+
+        var digits = NormalizeDigits(nationalId ?? "");
+        if (digits.Length != 10)
+            return BadRequest(new { message = "کد ملی باید ۱۰ رقم باشد" });
+
+        var contract = await ScopeVisibleContracts(db.Contracts.AsNoTracking(), currentUserGuid)
+            .Where(c => c.NationalId == digits)
+            .OrderByDescending(c => c.CreatedAtUtc)
+            .FirstOrDefaultAsync(ct);
+
+        if (contract is null)
+            return NotFound(new { message = "قراردادی با این کد ملی یافت نشد" });
+
+        Dictionary<string, string>? templateValues = null;
+        if (!string.IsNullOrWhiteSpace(contract.TemplateFieldValuesJson))
+            templateValues = ContractTemplateFieldValuesParser.Parse(contract.TemplateFieldValuesJson);
+
+        return Ok(new ContractPartyDetailDto(
+            contract.NationalId,
+            contract.FirstName,
+            contract.LastName,
+            contract.Phone,
+            contract.SubjectPersonName,
+            contract.Title,
+            contract.ContractTypeId,
+            templateValues));
+    }
+
     [HttpGet("types")]
     [Authorize(Policy = "contracts.read")]
     public async Task<IActionResult> ActiveTypes(CancellationToken ct)
@@ -53,10 +173,10 @@ public class AdminContractsController(
         [FromQuery] bool? archived,
         CancellationToken ct)
     {
-        var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        Guid.TryParse(currentUserId, out var currentUserGuid);
+        if (!TryGetCurrentUserId(out var currentUserGuid))
+            return Unauthorized();
 
-        var query = db.Contracts.Include(x => x.ContractType).AsQueryable();
+        var query = ScopeVisibleContracts(db.Contracts.Include(x => x.ContractType), currentUserGuid);
         if (archived == true)
             query = query.Where(x => x.IsArchived);
         else if (archived != true)
@@ -120,6 +240,7 @@ public class AdminContractsController(
                 x.FilePath,
                 !string.IsNullOrWhiteSpace(x.FilePath),
                 HasSignedDocument(x.FilePath, x.StepsJson),
+                HasOriginalDocument(x),
                 !string.IsNullOrWhiteSpace(x.PdfFilePath),
                 x.CurrentVersionNumber,
                 x.IsArchived,
@@ -134,6 +255,7 @@ public class AdminContractsController(
                 x.WorkflowScheduledStartAtUtc,
                 CanStartWorkflow(x),
                 CanAssignWorkflow(x),
+                CanUnassignWorkflow(x),
                 x.ContractDocumentTemplateId,
                 x.ContractDocumentTemplateVersionId,
                 steps);
@@ -162,6 +284,9 @@ public class AdminContractsController(
         x = await db.Contracts.Include(c => c.ContractType).FirstOrDefaultAsync(c => c.Id == id, ct);
         if (x is null) return NotFound(new { message = "قرارداد یافت نشد" });
 
+        var accessDenied = DenyIfNoContractAccess(x);
+        if (accessDenied is not null) return accessDenied;
+
         var steps = DeserializeSteps(x.StepsJson);
         var map = new Dictionary<Guid, List<AppApprovalStepDto>> { [x.Id] = steps };
         await EnrichApproverNamesAsync(map, ct);
@@ -187,6 +312,7 @@ public class AdminContractsController(
             x.FilePath,
             !string.IsNullOrWhiteSpace(x.FilePath),
             HasSignedDocument(x.FilePath, x.StepsJson),
+            HasOriginalDocument(x),
             !string.IsNullOrWhiteSpace(x.PdfFilePath),
             x.CurrentVersionNumber,
             x.IsArchived,
@@ -201,6 +327,7 @@ public class AdminContractsController(
             x.WorkflowScheduledStartAtUtc,
             CanStartWorkflow(x),
             CanAssignWorkflow(x),
+            CanUnassignWorkflow(x),
             x.ContractDocumentTemplateId,
             x.ContractDocumentTemplateVersionId,
             steps));
@@ -210,8 +337,11 @@ public class AdminContractsController(
     [Authorize(Policy = "contracts.read")]
     public async Task<IActionResult> ListVersions(Guid id, CancellationToken ct)
     {
-        var exists = await db.Contracts.AnyAsync(x => x.Id == id, ct);
-        if (!exists) return NotFound(new { message = "قرارداد یافت نشد" });
+        var contract = await db.Contracts.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (contract is null) return NotFound(new { message = "قرارداد یافت نشد" });
+
+        var accessDenied = DenyIfNoContractAccess(contract);
+        if (accessDenied is not null) return accessDenied;
 
         var versions = await db.ContractVersions
             .Where(x => x.ContractId == id)
@@ -417,16 +547,8 @@ public class AdminContractsController(
         var creatorName = await ResolveUserDisplayNameAsync(userId, ct);
         var stored = await contractFiles.SaveAsync(nationalId, versionNumber, contractNumber, file, ct);
 
+        // تبدیل PDF هنگام ثبت غیرفعال — فقط DOCX ذخیره می‌شود؛ پیش‌نمایش PDF با ?format=pdf
         string? pdfRelativePath = null;
-        var wantPdf = ParseBool(req.ExportPdf);
-        if (wantPdf && creationMode == "template")
-        {
-            var docxFull = contractFiles.ResolveFullPath(stored.relativePath);
-            var generatedPdf = pdfConverter.TryConvert(docxFull);
-            if (generatedPdf is not null)
-                pdfRelativePath = await contractFiles.SavePdfCompanionAsync(
-                    nationalId, versionNumber, contractNumber, generatedPdf, ct);
-        }
 
         var hasWorkflow = workflowTemplate is not null;
         var steps = hasWorkflow
@@ -503,7 +625,7 @@ public class AdminContractsController(
             workflowName = contract.WorkflowName,
             needsWorkflowStart = hasWorkflow,
             pdfGenerated = pdfRelativePath is not null,
-            pdfRequested = wantPdf,
+            pdfRequested = false,
             message = hasWorkflow
                 ? $"قرارداد {contract.ContractNumber} ثبت شد. برای شروع گردش «{contract.WorkflowName}» دکمه شروع را بزنید."
                 : $"قرارداد با شماره سند {contract.ContractNumber} توسط {contract.CreatedByName} ثبت شد"
@@ -517,7 +639,7 @@ public class AdminContractsController(
         if (!Guid.TryParse(req.WorkflowTemplateId, out var templateId))
             return BadRequest(new { message = "گردش انتخاب‌شده نامعتبر است" });
 
-        var contract = await db.Contracts.FirstOrDefaultAsync(x => x.Id == id, ct);
+        var contract = await GetAccessibleContractAsync(id, ct);
         if (contract is null) return NotFound(new { message = "قرارداد یافت نشد" });
         if (!CanAssignWorkflow(contract))
             return BadRequest(new { message = "در وضعیت فعلی امکان انتصاب گردش وجود ندارد" });
@@ -588,11 +710,41 @@ public class AdminContractsController(
         });
     }
 
+    [HttpPost("{id:guid}/unassign-workflow")]
+    [Authorize(Policy = "contracts.update")]
+    public async Task<IActionResult> UnassignWorkflow(Guid id, CancellationToken ct)
+    {
+        var contract = await GetAccessibleContractAsync(id, ct);
+        if (contract is null)
+            return NotFound(new { message = "قرارداد یافت نشد" });
+
+        if (!CanUnassignWorkflow(contract))
+            return BadRequest(new { message = "در وضعیت فعلی امکان حذف گردش وجود ندارد" });
+
+        contract.WorkflowTemplateId = null;
+        contract.WorkflowName = null;
+        contract.WorkflowStartedAtUtc = null;
+        contract.WorkflowScheduledStartAtUtc = null;
+        contract.StepsJson = "[]";
+        contract.Status = ContractStatus.Pending;
+        contract.CurrentStepOrder = 1;
+
+        var links = await db.ContractApprovalLinks
+            .Where(x => x.ContractId == id && x.IsActive)
+            .ToListAsync(ct);
+        foreach (var link in links)
+            link.IsActive = false;
+
+        await db.SaveChangesAsync(ct);
+
+        return Ok(new { message = "گردش از قرارداد حذف شد" });
+    }
+
     [HttpPost("{id:guid}/start-workflow")]
     [Authorize(Policy = "contracts.update")]
     public async Task<IActionResult> StartWorkflow(Guid id, CancellationToken ct)
     {
-        var contract = await db.Contracts.FirstOrDefaultAsync(x => x.Id == id, ct);
+        var contract = await GetAccessibleContractAsync(id, ct);
         if (contract is null) return NotFound(new { message = "قرارداد یافت نشد" });
         if (contract.IsArchived)
             return BadRequest(new { message = "قرارداد بایگانی‌شده قابل شروع گردش نیست" });
@@ -613,6 +765,9 @@ public class AdminContractsController(
     [Authorize(Policy = "contracts.update")]
     public async Task<IActionResult> ResendApprovalSms(Guid id, CancellationToken ct)
     {
+        if (await GetAccessibleContractAsync(id, ct) is null)
+            return NotFound(new { message = "قرارداد یافت نشد" });
+
         var result = await workflowProcessor.ResendPendingApprovalSmsAsync(id, ct);
         if (!result.Success)
         {
@@ -636,7 +791,7 @@ public class AdminContractsController(
         if (!Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
             return Unauthorized();
 
-        var contract = await db.Contracts.FirstOrDefaultAsync(x => x.Id == id, ct);
+        var contract = await GetAccessibleContractAsync(id, ct);
         if (contract is null) return NotFound(new { message = "قرارداد یافت نشد" });
         if (contract.IsArchived)
             return BadRequest(new { message = "قرارداد بایگانی‌شده قابل ویرایش نیست" });
@@ -684,7 +839,7 @@ public class AdminContractsController(
     [Authorize(Policy = "contracts.update")]
     public async Task<IActionResult> Archive(Guid id, CancellationToken ct)
     {
-        var contract = await db.Contracts.FirstOrDefaultAsync(x => x.Id == id, ct);
+        var contract = await GetAccessibleContractAsync(id, ct);
         if (contract is null) return NotFound(new { message = "قرارداد یافت نشد" });
         contract.IsArchived = true;
         await db.SaveChangesAsync(ct);
@@ -695,7 +850,7 @@ public class AdminContractsController(
     [Authorize(Policy = "contracts.update")]
     public async Task<IActionResult> Unarchive(Guid id, CancellationToken ct)
     {
-        var contract = await db.Contracts.FirstOrDefaultAsync(x => x.Id == id, ct);
+        var contract = await GetAccessibleContractAsync(id, ct);
         if (contract is null) return NotFound(new { message = "قرارداد یافت نشد" });
         contract.IsArchived = false;
         await db.SaveChangesAsync(ct);
@@ -719,15 +874,14 @@ public class AdminContractsController(
         [FromQuery] Guid? versionId,
         [FromQuery] bool inline = false,
         [FromQuery] string? format = null,
+        [FromQuery] string? source = null,
         CancellationToken ct = default)
     {
-        var contract = await db.Contracts.FirstOrDefaultAsync(x => x.Id == id, ct);
+        var contract = await GetAccessibleContractAsync(id, ct);
         if (contract is null) return NotFound(new { message = "قرارداد یافت نشد" });
 
-        if (!await CanAccessContractFileAsync(contract, ct))
-            return Forbid();
-
         var wantPdf = string.Equals(format, "pdf", StringComparison.OrdinalIgnoreCase);
+        var wantOriginal = string.Equals(source, "original", StringComparison.OrdinalIgnoreCase);
 
         ContractVersion? versionEntity = null;
         string? sourceRelative;
@@ -742,6 +896,18 @@ public class AdminContractsController(
             sourceRelative = versionEntity.FilePath;
             storedPdfRelative = versionEntity.PdfFilePath;
             displayName = versionEntity.FileName;
+        }
+        else if (wantOriginal)
+        {
+            sourceRelative = await ContractWorkflowProcessor.ResolveOriginalFilePathAsync(contract, db, ct);
+            storedPdfRelative = null;
+            displayName = contract.FileName;
+            if (!string.IsNullOrWhiteSpace(sourceRelative))
+            {
+                var baseName = Path.GetFileName(sourceRelative);
+                if (!string.IsNullOrWhiteSpace(baseName))
+                    displayName = baseName;
+            }
         }
         else
         {
@@ -871,6 +1037,9 @@ public class AdminContractsController(
         if (!Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var currentUserGuid))
             return Unauthorized();
 
+        if (await GetAccessibleContractAsync(id, ct) is null)
+            return NotFound(new { message = "قرارداد یافت نشد" });
+
         var result = await workflowProcessor.ProcessActionAsync(id, currentUserGuid, approve, comment, ct);
         if (!result.Success)
         {
@@ -894,14 +1063,15 @@ public class AdminContractsController(
             .Any(s => s.Status is "approved");
     }
 
-    private async Task<bool> CanAccessContractFileAsync(Contract contract, CancellationToken ct)
+    private static bool HasOriginalDocument(Contract contract) =>
+        !string.IsNullOrWhiteSpace(contract.OriginalFilePath);
+
+    private async Task<Contract?> GetAccessibleContractAsync(Guid id, CancellationToken ct)
     {
-        if (User.IsInRole("Admin")) return true;
-        if (!Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
-            return false;
-        if (contract.CreatedByUserId == userId) return true;
-        var steps = DeserializeSteps(contract.StepsJson);
-        return steps.Any(s => s.UserId == userId);
+        var contract = await db.Contracts.FirstOrDefaultAsync(c => c.Id == id, ct);
+        if (contract is null) return null;
+        if (!TryGetCurrentUserId(out var userId)) return null;
+        return UserCanAccessContract(contract, userId) ? contract : null;
     }
 
     private async Task<string> ResolveUserDisplayNameAsync(Guid userId, CancellationToken ct)
@@ -985,10 +1155,21 @@ public class AdminContractsController(
     private Task<(bool Ok, string? Error)> TryStartWorkflowAsync(Contract contract, CancellationToken ct)
         => workflowProcessor.TryStartWorkflowAsync(contract, ct);
 
+    private static bool HasAssignedWorkflow(Contract contract) =>
+        contract.WorkflowTemplateId is not null
+        || (!string.IsNullOrWhiteSpace(contract.StepsJson) && contract.StepsJson.Trim() != "[]");
+
     private static bool CanAssignWorkflow(Contract contract) =>
         !contract.IsArchived
         && contract.WorkflowStartedAtUtc is null
-        && contract.Status is not ContractStatus.InProgress;
+        && contract.Status is not ContractStatus.InProgress
+        && !HasAssignedWorkflow(contract);
+
+    private static bool CanUnassignWorkflow(Contract contract) =>
+        !contract.IsArchived
+        && contract.WorkflowStartedAtUtc is null
+        && contract.Status is not ContractStatus.InProgress
+        && HasAssignedWorkflow(contract);
 
     private static bool CanStartWorkflow(Contract contract) =>
         contract.Status == ContractStatus.Pending
@@ -1067,6 +1248,7 @@ public record ContractListItemDto(
     string? FilePath,
     bool HasFile,
     bool HasSignedDocument,
+    bool HasOriginalDocument,
     bool HasPdf,
     int CurrentVersionNumber,
     bool IsArchived,
@@ -1081,6 +1263,7 @@ public record ContractListItemDto(
     DateTime? WorkflowScheduledStartAtUtc,
     bool CanStartWorkflow,
     bool CanAssignWorkflow,
+    bool CanUnassignWorkflow,
     Guid? ContractDocumentTemplateId,
     Guid? ContractDocumentTemplateVersionId,
     List<PorslineClone.Application.Contracts.ApprovalStepDto> Steps);
@@ -1102,6 +1285,7 @@ public record ContractDetailDto(
     string? FilePath,
     bool HasFile,
     bool HasSignedDocument,
+    bool HasOriginalDocument,
     bool HasPdf,
     int CurrentVersionNumber,
     bool IsArchived,
@@ -1116,6 +1300,7 @@ public record ContractDetailDto(
     DateTime? WorkflowScheduledStartAtUtc,
     bool CanStartWorkflow,
     bool CanAssignWorkflow,
+    bool CanUnassignWorkflow,
     Guid? ContractDocumentTemplateId,
     Guid? ContractDocumentTemplateVersionId,
     List<PorslineClone.Application.Contracts.ApprovalStepDto> Steps);

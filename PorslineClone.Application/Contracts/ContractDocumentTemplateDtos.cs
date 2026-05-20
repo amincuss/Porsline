@@ -29,6 +29,7 @@ public record ContractDocumentTemplateVersionDto(
     string? ChangeNote,
     DateTime CreatedAtUtc,
     bool IsActive,
+    long? FileSizeBytes,
     IReadOnlyList<ContractTemplateFieldDto> Fields);
 
 public record ContractTemplateFieldDto(

@@ -39,6 +39,19 @@ public static class ContractTemplateSystemFields
         return !string.IsNullOrWhiteSpace(norm) && ImageKeys.Contains(norm);
     }
 
+    /// <summary>کلیدهای رایج placeholder تاریخ (date، date1، tarikh، …)</summary>
+    public static bool IsDateKey(string key)
+    {
+        var norm = NormalizeKey(key);
+        if (string.IsNullOrWhiteSpace(norm))
+            return false;
+        if (norm is "date" or "tarikh" or "birth_date" or "start_date" or "end_date")
+            return true;
+        if (norm.StartsWith("date", StringComparison.Ordinal) && norm.Length > 4 && norm[4..].All(char.IsDigit))
+            return true;
+        return norm.EndsWith("_date", StringComparison.Ordinal);
+    }
+
     public static bool IsSystemFieldType(ContractTemplateFieldType fieldType) =>
         fieldType is ContractTemplateFieldType.Signature or ContractTemplateFieldType.ContractNumber;
 

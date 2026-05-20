@@ -19,7 +19,11 @@ public record SecuritySettingsDto(
     [Range(1, 20)] int MaxFailedOtpAttempts,
     [Range(1, 120)] int LockoutMinutes,
     bool MaskAuthErrors,
-    PorslineClone.Domain.Entities.LoginMethod LoginMethod = PorslineClone.Domain.Entities.LoginMethod.OtpOnly);
+    PorslineClone.Domain.Entities.LoginMethod LoginMethod,
+    [Range(1, 365)] int AnonymousLinkExpiryDays,
+    bool DispatchLinkRequireOtp,
+    [Range(5, 1440)] int AccessTokenLifetimeMinutes,
+    [Range(1, 90)] int RefreshTokenLifetimeDays);
 public record LoginConfigDto(string LoginMethod);
 public record PasswordLoginDto(
     [Required, RegularExpression(@"^09\d{9}$", ErrorMessage = "شماره موبایل نامعتبر است.")] string MobileNumber,
@@ -34,7 +38,16 @@ public record SmsSettingsDto(
 public record SiteSettingsDto(string? PublicBaseUrl, string? AdminPanelBaseUrl);
 public record ProfileDto(string FirstName, string LastName, string MobileNumber, string NationalCode, string? AboutMe, string? AvatarUrl);
 public record UpdateProfileDto([MaxLength(1000)] string? AboutMe);
-public record InboxMessageDto(Guid Id, string Title, string Body, bool IsRead, DateTime CreatedAtUtc);
+public record InboxMessageDto(
+    Guid Id,
+    string Title,
+    string Body,
+    bool IsRead,
+    bool IsArchived,
+    DateTime CreatedAtUtc,
+    DateTime? ReadAtUtc);
+
+public record InboxStatsDto(int Total, int Unread, int Archived);
 public record SmsRequest(string MobileNumber, string Message);
 public record CreateUserDto(
     [Required, MinLength(2), MaxLength(100)] string FirstName,
@@ -42,7 +55,29 @@ public record CreateUserDto(
     [Required, RegularExpression(@"^09\d{9}$")] string MobileNumber,
     [Required, RegularExpression(@"^\d{10}$")] string NationalCode,
     List<Guid>? GroupIds = null,
-    Guid? UserPositionId = null);
+    Guid? UserPositionId = null,
+    string? PersonnelCode = null,
+    string? Gender = null);
+
+public record ContractPartyLookupItemDto(
+    string NationalId,
+    string FirstName,
+    string LastName,
+    string Phone,
+    string SubjectPersonName,
+    string? Title,
+    Guid? ContractTypeId,
+    int ContractCount);
+
+public record ContractPartyDetailDto(
+    string NationalId,
+    string FirstName,
+    string LastName,
+    string Phone,
+    string SubjectPersonName,
+    string? Title,
+    Guid? ContractTypeId,
+    Dictionary<string, string>? TemplateFieldValues);
 public record UpdateUserRoleDto([Required, MinLength(2), MaxLength(50)] string RoleName);
 public record UpdateUserDto(
     [Required, MinLength(2), MaxLength(100)] string FirstName,
@@ -50,7 +85,9 @@ public record UpdateUserDto(
     [Required, RegularExpression(@"^09\d{9}$")] string MobileNumber,
     [Required, RegularExpression(@"^\d{10}$")] string NationalCode,
     List<Guid>? GroupIds = null,
-    Guid? UserPositionId = null);
+    Guid? UserPositionId = null,
+    string? PersonnelCode = null,
+    string? Gender = null);
 public record SetUserRolesDto([Required] List<string> RoleNames);
 public record UpdateUserStatusDto(bool IsActive);
 public record RoleItemDto(Guid Id, string Name, string DisplayName);

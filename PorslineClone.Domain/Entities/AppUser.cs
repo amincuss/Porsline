@@ -7,6 +7,9 @@ public class AppUser : IdentityUser<Guid>
     public string FirstName { get; set; } = string.Empty;
     public string LastName { get; set; } = string.Empty;
     public string NationalCode { get; set; } = string.Empty;
+    /// <summary>کد پرسنلی (اختیاری)</summary>
+    public string? PersonnelCode { get; set; }
+    public UserGender? Gender { get; set; }
     public Guid? CreatedByUserId { get; set; }
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
     public bool IsActive { get; set; } = true;

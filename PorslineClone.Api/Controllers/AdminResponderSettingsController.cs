@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using PorslineClone.Infrastructure.Persistence;
+using PorslineClone.Infrastructure.Services;
 
 namespace PorslineClone.Api.Controllers;
 
@@ -13,10 +14,11 @@ public class AdminResponderSettingsController(AppDbContext db) : ControllerBase
     [Authorize(Policy = "settings.read")]
     public async Task<IActionResult> GetResponderSettings(CancellationToken cancellationToken)
     {
-        var settings = await db.SmsSettings.FirstOrDefaultAsync(cancellationToken);
+        var security = await db.SecuritySettings.AsNoTracking().FirstOrDefaultAsync(cancellationToken);
+        var sms = await db.SmsSettings.AsNoTracking().FirstOrDefaultAsync(cancellationToken);
         return Ok(new
         {
-            publicFormRequireOtp = settings?.PublicFormRequireOtp ?? false
+            publicFormRequireOtp = SecuritySettingsHelper.DispatchLinkRequiresOtp(security ?? new Domain.Entities.SecuritySettings(), sms)
         });
     }
 
@@ -24,14 +26,19 @@ public class AdminResponderSettingsController(AppDbContext db) : ControllerBase
     [Authorize(Policy = "settings.update")]
     public async Task<IActionResult> UpdateResponderSettings([FromBody] ResponderPublicSettingsDto dto, CancellationToken cancellationToken)
     {
-        var settings = await db.SmsSettings.FirstOrDefaultAsync(cancellationToken);
-        if (settings is null)
+        var security = await db.SecuritySettings.FirstOrDefaultAsync(cancellationToken);
+        if (security is null)
         {
-            settings = new Domain.Entities.SmsSettings();
-            db.SmsSettings.Add(settings);
+            security = new Domain.Entities.SecuritySettings();
+            db.SecuritySettings.Add(security);
         }
 
-        settings.PublicFormRequireOtp = dto.PublicFormRequireOtp;
+        security.DispatchLinkRequireOtp = dto.PublicFormRequireOtp;
+
+        var sms = await db.SmsSettings.FirstOrDefaultAsync(cancellationToken);
+        if (sms is not null)
+            sms.PublicFormRequireOtp = dto.PublicFormRequireOtp;
+
         await db.SaveChangesAsync(cancellationToken);
         return Ok(new { message = "تنظیمات پاسخگو ذخیره شد" });
     }

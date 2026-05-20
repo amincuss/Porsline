@@ -28,6 +28,7 @@ public static class DependencyInjection
             .AddDefaultTokenProviders();
 
         services.AddHttpClient<ISmsSender, SmsSender>();
+        services.AddScoped<IInboxMessageService, InboxMessageService>();
         services.AddScoped<IAuthService, AuthService>();
         services.AddScoped<IFrontendUrlResolver, FrontendUrlResolver>();
         services.AddScoped<ContractFileStorageService>();
@@ -35,6 +36,8 @@ public static class DependencyInjection
         services.AddScoped<ContractApprovalStampService>();
         services.AddScoped<ContractApprovalLinkService>();
         services.AddScoped<ContractWorkflowProcessor>();
+        services.AddScoped<FormWorkflowProcessor>();
+        services.AddScoped<FormSubmissionApprovalLinkService>();
         services.AddSingleton<IDocxToPdfConverter, DocxToPdfConverterService>();
         services.AddScoped<IContractDocumentGenerator, ContractDocumentGeneratorService>();
         services.AddScoped<ContractTemplateFileStorageService>();

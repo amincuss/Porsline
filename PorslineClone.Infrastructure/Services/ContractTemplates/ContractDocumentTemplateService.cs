@@ -403,18 +403,21 @@ public class ContractDocumentTemplateService(
 
             var isContractNumber = ContractTemplateSystemFields.IsContractNumberKey(key);
             var isImage = ContractTemplateSystemFields.IsImageKey(key);
+            var isDate = ContractTemplateSystemFields.IsDateKey(key);
             db.ContractDocumentTemplateFields.Add(new ContractDocumentTemplateField
             {
                 Id = Guid.NewGuid(),
                 TemplateId = templateId,
                 VersionId = versionId,
                 Key = key,
-                Label = isContractNumber ? "شماره قرارداد" : isImage ? "تصویر" : key.Replace('_', ' '),
+                Label = isContractNumber ? "شماره قرارداد" : isImage ? "تصویر" : isDate ? "تاریخ" : key.Replace('_', ' '),
                 FieldType = isContractNumber
                     ? ContractTemplateFieldType.ContractNumber
                     : isImage
                         ? ContractTemplateFieldType.Image
-                        : ContractTemplateFieldType.Text,
+                        : isDate
+                            ? ContractTemplateFieldType.Date
+                            : ContractTemplateFieldType.Text,
                 IsRequired = !isContractNumber && !isImage,
                 SortOrder = order++
             });
@@ -424,10 +427,26 @@ public class ContractDocumentTemplateService(
         await db.SaveChangesAsync(ct);
     }
 
-    private static ContractDocumentTemplateVersionDto MapVersionDto(
+    private ContractDocumentTemplateVersionDto MapVersionDto(
         ContractDocumentTemplateVersion v,
-        Guid? activeVersionId) =>
-        new(
+        Guid? activeVersionId)
+    {
+        long? fileSize = null;
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(v.FilePath))
+            {
+                var full = templateFiles.ResolveFullPath(v.FilePath);
+                if (File.Exists(full))
+                    fileSize = new FileInfo(full).Length;
+            }
+        }
+        catch
+        {
+            /* ignore */
+        }
+
+        return new ContractDocumentTemplateVersionDto(
             v.Id,
             v.VersionNumber,
             v.FileName,
@@ -435,7 +454,9 @@ public class ContractDocumentTemplateService(
             v.ChangeNote,
             v.CreatedAtUtc,
             v.Id == activeVersionId,
+            fileSize,
             v.Fields.OrderBy(f => f.SortOrder).Select(MapField).ToList());
+    }
 
     private static Dictionary<string, string> NormalizeFieldValues(IReadOnlyDictionary<string, string> fieldValues)
     {
@@ -644,6 +665,10 @@ public class ContractDocumentTemplateService(
                 .OrderByDescending(v => v.VersionNumber)
                 .FirstOrDefault();
             template.ActiveVersionId = replacement?.Id;
+            template.ActiveVersion = replacement;
+            template.UpdatedAtUtc = DateTime.UtcNow;
+            // شکستن FK دایره‌ای ActiveVersionId ↔ TemplateId قبل از حذف نسخه
+            await db.SaveChangesAsync(ct);
         }
 
         TryDeleteFile(templateFiles.ResolveFullPath(version.FilePath));
@@ -669,7 +694,12 @@ public class ContractDocumentTemplateService(
         foreach (var v in template.Versions)
             TryDeleteFile(templateFiles.ResolveFullPath(v.FilePath));
 
+        // شکستن وابستگی دایره‌ای Template.ActiveVersionId ↔ Version.TemplateId
         template.ActiveVersionId = null;
+        template.ActiveVersion = null;
+        template.UpdatedAtUtc = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+
         db.ContractDocumentTemplates.Remove(template);
         await db.SaveChangesAsync(ct);
         templateFiles.TryDeleteTemplateStorage(id);

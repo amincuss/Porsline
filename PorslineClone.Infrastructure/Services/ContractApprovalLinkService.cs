@@ -16,6 +16,7 @@ public class ContractApprovalLinkService(AppDbContext db)
         foreach (var link in existing)
             link.IsActive = false;
 
+        var security = await SecuritySettingsHelper.GetAsync(db, ct);
         var code = await GenerateUniqueCodeAsync(ct);
         db.ContractApprovalLinks.Add(new ContractApprovalLink
         {
@@ -24,7 +25,7 @@ public class ContractApprovalLinkService(AppDbContext db)
             AssigneeUserId = assigneeUserId,
             Code = code,
             IsActive = true,
-            ExpiresAtUtc = DateTime.UtcNow.AddDays(30),
+            ExpiresAtUtc = SecuritySettingsHelper.LinkExpiresAtUtc(security),
             CreatedAtUtc = DateTime.UtcNow
         });
         await db.SaveChangesAsync(ct);
@@ -33,11 +34,19 @@ public class ContractApprovalLinkService(AppDbContext db)
 
     public async Task<ContractApprovalLink?> ResolveValidAsync(string code, CancellationToken ct = default)
     {
+        var link = await ResolveByCodeAsync(code, ct);
+        if (link is null || !link.IsActive) return null;
+        return link;
+    }
+
+    /// <summary>لینک معتبر (فعال یا پس از تأیید) برای مشاهده گردش و فایل — تا انقضا.</summary>
+    public async Task<ContractApprovalLink?> ResolveByCodeAsync(string code, CancellationToken ct = default)
+    {
         if (string.IsNullOrWhiteSpace(code)) return null;
         var normalized = code.Trim();
         var link = await db.ContractApprovalLinks
             .Include(x => x.Contract)
-            .FirstOrDefaultAsync(x => x.Code == normalized && x.IsActive, ct);
+            .FirstOrDefaultAsync(x => x.Code == normalized, ct);
         if (link is null || link.ExpiresAtUtc < DateTime.UtcNow) return null;
         return link;
     }

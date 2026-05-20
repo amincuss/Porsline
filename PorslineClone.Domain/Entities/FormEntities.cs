@@ -33,6 +33,10 @@ public class Form
     public string QuestionDisplayMode { get; set; } = "all";
     public bool ApprovalEnabled { get; set; }
     public string? ApprovalWorkflowJson { get; set; }
+    /// <summary>قالب گردش تأیید (مثل قرارداد) — در صورت تنظیم، مراحل از قالب کپی می‌شود</summary>
+    public Guid? WorkflowTemplateId { get; set; }
+    public FormWorkflowTemplate? WorkflowTemplate { get; set; }
+    public string? WorkflowName { get; set; }
     public ICollection<FormField> Fields { get; set; } = new List<FormField>();
     public ICollection<FormSubmission> Submissions { get; set; } = new List<FormSubmission>();
 }
@@ -58,12 +62,26 @@ public class FormField
     public int? UploadMaxSizeMb { get; set; }
 }
 
+/// <summary>قالب گردش تأیید فرم (با نام یکتا)</summary>
+public class FormWorkflowTemplate
+{
+    public Guid Id { get; set; }
+    public string Name { get; set; } = "";
+    public string StepsJson { get; set; } = "[]";
+    public bool IsActive { get; set; } = true;
+    public Guid? CreatedByUserId { get; set; }
+    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+}
+
 public enum FormSubmissionStatus
 {
+    /// <summary>گردش انتصاب شده ولی هنوز شروع نشده</summary>
     Pending = 1,
     InProgress = 2,
     Approved = 3,
-    Rejected = 4
+    Rejected = 4,
+    /// <summary>فرم ثبت شده؛ گردش هنوز برای این شخص ایجاد/انتصاب نشده</summary>
+    Submitted = 5
 }
 
 public class FormSubmission
@@ -73,11 +91,31 @@ public class FormSubmission
     public Form Form { get; set; } = null!;
     public string? SubmitterName { get; set; }
     public string? SubmitterEmail { get; set; }
+    public Guid? ResponderId { get; set; }
+    public Guid? DispatchLinkId { get; set; }
     public DateTime SubmittedAtUtc { get; set; } = DateTime.UtcNow;
     public int CurrentStepOrder { get; set; } = 1;
     public FormSubmissionStatus Status { get; set; } = FormSubmissionStatus.Pending;
     public string? FieldsJson { get; set; }
     public string? StepsJson { get; set; }
+    public Guid? WorkflowTemplateId { get; set; }
+    public FormWorkflowTemplate? WorkflowTemplate { get; set; }
+    public string? WorkflowName { get; set; }
+    public DateTime? WorkflowStartedAtUtc { get; set; }
+    public DateTime? WorkflowScheduledStartAtUtc { get; set; }
+}
+
+/// <summary>لینک تأیید عمومی برای پاسخ فرم (مثل قرارداد)</summary>
+public class FormSubmissionApprovalLink
+{
+    public Guid Id { get; set; }
+    public Guid FormSubmissionId { get; set; }
+    public FormSubmission FormSubmission { get; set; } = null!;
+    public Guid AssigneeUserId { get; set; }
+    public string Code { get; set; } = "";
+    public bool IsActive { get; set; } = true;
+    public DateTime ExpiresAtUtc { get; set; }
+    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
 }
 
 public class FormDispatchLink

@@ -29,6 +29,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<FormSubmission> FormSubmissions => Set<FormSubmission>();
     public DbSet<FormDispatchLink> FormDispatchLinks => Set<FormDispatchLink>();
     public DbSet<FormUserAccess> FormUserAccesses => Set<FormUserAccess>();
+    public DbSet<FormWorkflowTemplate> FormWorkflowTemplates => Set<FormWorkflowTemplate>();
+    public DbSet<FormSubmissionApprovalLink> FormSubmissionApprovalLinks => Set<FormSubmissionApprovalLink>();
     public DbSet<ContractType> ContractTypes => Set<ContractType>();
     public DbSet<ContractSettings> ContractSettings => Set<ContractSettings>();
     public DbSet<ContractWorkflowTemplate> ContractWorkflowTemplates => Set<ContractWorkflowTemplate>();
@@ -54,6 +56,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.AvatarUrl).HasMaxLength(500);
             entity.Property(x => x.AboutMe).HasMaxLength(1000);
             entity.Property(x => x.SignatureImagePath).HasMaxLength(500);
+            entity.Property(x => x.PersonnelCode).HasMaxLength(30);
+            entity.HasIndex(x => x.PersonnelCode)
+                .IsUnique()
+                .HasFilter("[PersonnelCode] IS NOT NULL AND [PersonnelCode] <> ''");
             entity.HasIndex(x => x.CreatedByUserId);
             entity.HasIndex(x => x.NationalCode).IsUnique();
             entity.HasIndex(x => x.PhoneNumber).IsUnique();
@@ -145,6 +151,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.LockoutMinutes).HasDefaultValue(15);
             entity.Property(x => x.MaskAuthErrors).HasDefaultValue(true);
             entity.Property(x => x.EnableRateLimiting).HasDefaultValue(true);
+            entity.Property(x => x.AnonymousLinkExpiryDays).HasDefaultValue(7);
+            entity.Property(x => x.DispatchLinkRequireOtp).HasDefaultValue(false);
+            entity.Property(x => x.AccessTokenLifetimeMinutes).HasDefaultValue(180);
+            entity.Property(x => x.RefreshTokenLifetimeDays).HasDefaultValue(7);
         });
 
         builder.Entity<LoginAttempt>(entity =>
@@ -251,7 +261,20 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.QuestionDisplayMode).HasMaxLength(20).HasDefaultValue("all");
             entity.Property(x => x.ApprovalEnabled).HasDefaultValue(false);
             entity.Property(x => x.ApprovalWorkflowJson).HasMaxLength(20000);
+            entity.Property(x => x.WorkflowName).HasMaxLength(200);
+            entity.HasOne(x => x.WorkflowTemplate)
+                .WithMany()
+                .HasForeignKey(x => x.WorkflowTemplateId)
+                .OnDelete(DeleteBehavior.SetNull);
             entity.HasIndex(x => new { x.UserId, x.IsDeleted });
+        });
+
+        builder.Entity<FormWorkflowTemplate>(entity =>
+        {
+            entity.Property(x => x.Name).HasMaxLength(200).IsRequired();
+            entity.Property(x => x.StepsJson).HasMaxLength(20000);
+            entity.HasIndex(x => x.Name).IsUnique();
+            entity.HasIndex(x => new { x.IsActive, x.CreatedAtUtc });
         });
 
         builder.Entity<FormField>(entity =>
@@ -276,15 +299,33 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         {
             entity.Property(x => x.SubmitterName).HasMaxLength(200);
             entity.Property(x => x.SubmitterEmail).HasMaxLength(300);
+            entity.HasIndex(x => x.ResponderId);
+            entity.HasIndex(x => x.DispatchLinkId);
             entity.Property(x => x.FieldsJson).HasMaxLength(20000);
             entity.Property(x => x.StepsJson).HasMaxLength(20000);
+            entity.Property(x => x.WorkflowName).HasMaxLength(200);
             entity.Property(x => x.Status).HasConversion<int>();
             entity.HasOne(x => x.Form)
                 .WithMany(x => x.Submissions)
                 .HasForeignKey(x => x.FormId)
                 .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(x => x.WorkflowTemplate)
+                .WithMany()
+                .HasForeignKey(x => x.WorkflowTemplateId)
+                .OnDelete(DeleteBehavior.SetNull);
             entity.HasIndex(x => new { x.FormId, x.SubmittedAtUtc });
             entity.HasIndex(x => new { x.Status, x.CurrentStepOrder });
+        });
+
+        builder.Entity<FormSubmissionApprovalLink>(entity =>
+        {
+            entity.Property(x => x.Code).HasMaxLength(32).IsRequired();
+            entity.HasOne(x => x.FormSubmission)
+                .WithMany()
+                .HasForeignKey(x => x.FormSubmissionId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(x => x.Code).IsUnique();
+            entity.HasIndex(x => new { x.FormSubmissionId, x.AssigneeUserId, x.IsActive });
         });
 
         builder.Entity<FormDispatchLink>(entity =>
@@ -385,7 +426,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         {
             entity.Property(x => x.FilePath).HasMaxLength(500).IsRequired();
             entity.Property(x => x.FileName).HasMaxLength(260).IsRequired();
-            entity.Property(x => x.DetectedPlaceholdersJson).HasMaxLength(8000);
+            entity.Property(x => x.DetectedPlaceholdersJson).HasColumnType("nvarchar(max)");
             entity.Property(x => x.ChangeNote).HasMaxLength(500);
             entity.HasOne(x => x.Template)
                 .WithMany(t => t.Versions)
@@ -552,8 +593,12 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         {
             Id = 1,
             EnableRateLimiting = true, MaxRequestsPerMinutePerIp = 20,
-            MaxFailedOtpAttempts = 5,  LockoutMinutes = 15, MaskAuthErrors = true,
-            LoginMethod = LoginMethod.OtpOnly
+            MaxFailedOtpAttempts = 5, LockoutMinutes = 15, MaskAuthErrors = true,
+            LoginMethod = LoginMethod.OtpOnly,
+            AnonymousLinkExpiryDays = 7,
+            DispatchLinkRequireOtp = false,
+            AccessTokenLifetimeMinutes = 180,
+            RefreshTokenLifetimeDays = 7
         });
 
         builder.Entity<SmsSettings>().HasData(new SmsSettings

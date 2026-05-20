@@ -78,6 +78,14 @@ public class SecuritySettings
     public int LockoutMinutes { get; set; } = 15;
     public bool MaskAuthErrors { get; set; } = true;
     public LoginMethod LoginMethod { get; set; } = LoginMethod.OtpOnly;
+    /// <summary>مدت اعتبار لینک‌های عمومی بدون ورود (فرم، تأیید قرارداد/فرم) — روز</summary>
+    public int AnonymousLinkExpiryDays { get; set; } = 7;
+    /// <summary>الزام OTP برای باز کردن لینک ارسالی فرم</summary>
+    public bool DispatchLinkRequireOtp { get; set; }
+    /// <summary>مدت اعتبار توکن دسترسی (JWT) — دقیقه</summary>
+    public int AccessTokenLifetimeMinutes { get; set; } = 180;
+    /// <summary>مدت نگه‌داری نشست (رفرش‌توکن / کوکی) — روز؛ پس از آن کاربر باید دوباره وارد شود</summary>
+    public int RefreshTokenLifetimeDays { get; set; } = 7;
 }
 
 public class LoginAttempt
@@ -110,6 +118,8 @@ public class InboxMessage
     public string Title { get; set; } = string.Empty;
     public string Body { get; set; } = string.Empty;
     public bool IsRead { get; set; }
+    public bool IsArchived { get; set; }
+    public DateTime? ReadAtUtc { get; set; }
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
 }
 

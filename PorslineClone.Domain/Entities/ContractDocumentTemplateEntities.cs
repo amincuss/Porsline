@@ -11,7 +11,7 @@ public enum ContractTemplateFieldType
     NationalId = 6,
     /// <summary>جایگاه امضای تأییدکننده در Word — هنگام تأیید پر می‌شود</summary>
     Signature = 7,
-    /// <summary>شماره قرارداد — هنگام ثبت به‌صورت خودکار (مثلاً EN-1404-0042)</summary>
+    /// <summary>شماره قرارداد — هنگام ثبت به‌صورت خودکار (مثلاً EN14040042)</summary>
     ContractNumber = 8,
     /// <summary>تصویر آپلودی کاربر — در Word جایگزین می‌شود</summary>
     Image = 9

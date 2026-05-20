@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
+using PorslineClone.Infrastructure.Services;
 
 namespace PorslineClone.Api.Controllers;
 
@@ -19,6 +20,7 @@ public class AdminContractWorkflowsController(AppDbContext db) : ControllerBase
     public async Task<IActionResult> List(CancellationToken ct)
     {
         var rows = await db.ContractWorkflowTemplates
+            .Where(x => x.IsActive)
             .OrderByDescending(x => x.CreatedAtUtc)
             .ToListAsync(ct);
         var items = rows.Select(x => new ContractWorkflowTemplateListItemDto(
@@ -52,7 +54,7 @@ public class AdminContractWorkflowsController(AppDbContext db) : ControllerBase
     public async Task<IActionResult> Get(Guid id, CancellationToken ct)
     {
         var x = await db.ContractWorkflowTemplates.FirstOrDefaultAsync(t => t.Id == id, ct);
-        if (x is null) return NotFound(new { message = "گردش یافت نشد" });
+        if (x is null || !x.IsActive) return NotFound(new { message = "گردش یافت نشد یا حذف شده است" });
 
         var steps = DeserializeSteps(x.StepsJson);
         return Ok(new ContractWorkflowTemplateDetailDto(x.Id, x.Name, x.IsActive, steps));
@@ -65,7 +67,7 @@ public class AdminContractWorkflowsController(AppDbContext db) : ControllerBase
         var name = (req.Name ?? "").Trim();
         if (string.IsNullOrWhiteSpace(name))
             return BadRequest(new { message = "نام گردش الزامی است" });
-        if (await db.ContractWorkflowTemplates.AnyAsync(x => x.Name == name, ct))
+        if (await db.ContractWorkflowTemplates.AnyAsync(x => x.Name == name && x.IsActive, ct))
             return BadRequest(new { message = "این نام گردش قبلاً ثبت شده است" });
 
         var cleaned = CleanSteps(req.Steps);
@@ -96,11 +98,12 @@ public class AdminContractWorkflowsController(AppDbContext db) : ControllerBase
     {
         var entity = await db.ContractWorkflowTemplates.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (entity is null) return NotFound(new { message = "گردش یافت نشد" });
+        if (!entity.IsActive) return BadRequest(new { message = "این گردش حذف شده و قابل ویرایش نیست" });
 
         var name = (req.Name ?? "").Trim();
         if (string.IsNullOrWhiteSpace(name))
             return BadRequest(new { message = "نام گردش الزامی است" });
-        if (await db.ContractWorkflowTemplates.AnyAsync(x => x.Name == name && x.Id != id, ct))
+        if (await db.ContractWorkflowTemplates.AnyAsync(x => x.Name == name && x.Id != id && x.IsActive, ct))
             return BadRequest(new { message = "این نام گردش قبلاً ثبت شده است" });
 
         var cleaned = CleanSteps(req.Steps);
@@ -119,9 +122,17 @@ public class AdminContractWorkflowsController(AppDbContext db) : ControllerBase
     {
         var entity = await db.ContractWorkflowTemplates.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (entity is null) return NotFound(new { message = "گردش یافت نشد" });
-        entity.IsActive = false;
-        await db.SaveChangesAsync(ct);
-        return Ok(new { message = "گردش غیرفعال شد" });
+
+        var contractUsage = await WorkflowTemplateSoftDelete.CountContractUsageAsync(db, id, ct);
+        if (entity.IsActive)
+        {
+            entity.IsActive = false;
+            await db.SaveChangesAsync(ct);
+        }
+
+        var usage = new WorkflowTemplateSoftDelete.UsageCounts(contractUsage, 0, 0);
+        var message = WorkflowTemplateSoftDelete.BuildDeleteMessage(entity.Name, usage, isFormWorkflow: false);
+        return Ok(new { message, contractUsage, isActive = false });
     }
 
     private static List<PorslineClone.Application.Contracts.WorkflowStepDto> CleanSteps(List<PorslineClone.Application.Contracts.WorkflowStepDto> steps) =>

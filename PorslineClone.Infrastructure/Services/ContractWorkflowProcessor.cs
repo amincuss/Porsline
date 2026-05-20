@@ -2,10 +2,13 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Hosting;
 using PorslineClone.Application.Abstractions;
 using PorslineClone.Application.Contracts;
+using PorslineClone.Application.ContractTemplates;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
+using PorslineClone.Infrastructure.Services.ContractTemplates;
 
 namespace PorslineClone.Infrastructure.Services;
 
@@ -21,7 +24,9 @@ public class ContractWorkflowProcessor(
     ContractApprovalStampService approvalStamp,
     ContractApprovalLinkService approvalLinks,
     ISmsSender smsSender,
-    IFrontendUrlResolver frontendUrls)
+    IInboxMessageService inbox,
+    IFrontendUrlResolver frontendUrls,
+    IHostEnvironment hostEnvironment)
 {
     public async Task<WorkflowActionResult> ProcessActionAsync(
         Guid contractId,
@@ -47,6 +52,18 @@ public class ContractWorkflowProcessor(
 
         if (approve)
         {
+            var signatureKeyCount = await ContractWorkflowSignatureValidator.CountSignatureFieldsAsync(
+                db,
+                contract.ContractDocumentTemplateId,
+                contract.ContractDocumentTemplateVersionId,
+                ct);
+            if (signatureKeyCount > 0
+                && string.IsNullOrWhiteSpace(currentUser?.SignatureImagePath))
+            {
+                return WorkflowActionResult.Fail(
+                    "تصویر امضا در پروفایل شما ثبت نشده است. از منوی پروفایل امضا را آپلود کنید.");
+            }
+
             current.Status = "approved";
             current.Comment = comment;
             current.ActionAt = DateTime.UtcNow;
@@ -169,43 +186,134 @@ public class ContractWorkflowProcessor(
 
     public async Task RebuildSignedDocumentAsync(Contract contract, List<ApprovalStepDto> steps, CancellationToken ct)
     {
-        var original = await ResolveOriginalFilePathAsync(contract, ct);
-        if (string.IsNullOrWhiteSpace(original)) return;
-
-        var approved = steps.Where(s => s.Status == "approved").OrderBy(s => s.Order).ToList();
-        if (approved.Count == 0) return;
-
-        var signatories = new List<ContractSignatoryStamp>();
-        foreach (var step in approved)
-        {
-            var user = await db.Users
-                .Include(u => u.UserPosition)
-                .FirstOrDefaultAsync(u => u.Id == step.UserId, ct);
-            if (user is null || string.IsNullOrWhiteSpace(user.SignatureImagePath)) continue;
-            var fullName = $"{user.FirstName} {user.LastName}".Trim();
-            if (string.IsNullOrWhiteSpace(fullName)) continue;
-            signatories.Add(new ContractSignatoryStamp(user.SignatureImagePath, fullName, user.UserPosition?.Name));
-        }
-
-        if (signatories.Count == 0) return;
-        if (!approvalStamp.TryRebuildSignedPdf(original, signatories, out var newPath)
-            || string.IsNullOrWhiteSpace(newPath))
+        var pristinePath = await ResolvePristineSourcePathAsync(contract, ct);
+        if (string.IsNullOrWhiteSpace(pristinePath))
             return;
 
-        contract.FilePath = newPath;
-        if (!string.IsNullOrWhiteSpace(contract.FileName) && newPath.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
-            contract.FileName = Path.ChangeExtension(contract.FileName, ".pdf");
+        var workPath = ResolveWorkFilePath(contract, pristinePath);
 
-        var latest = await db.ContractVersions
+        var signatureKeys = await ContractWorkflowSignatureValidator.GetOrderedSignatureFieldKeysAsync(
+            db,
+            contract.ContractDocumentTemplateId,
+            contract.ContractDocumentTemplateVersionId,
+            ct);
+
+        var pristineFull = UserSignatureStorageService.ResolveFullPath(
+            hostEnvironment, pristinePath);
+        var keysInDoc = File.Exists(pristineFull)
+            ? ContractSignatureDocumentWriter.ScanPlaceholderKeys(pristineFull)
+            : [];
+
+        var slots = await BuildSignatureSlotsAsync(steps, signatureKeys, keysInDoc, ct);
+        if (slots.Count == 0)
+            return;
+
+        if (!approvalStamp.TryRewriteContractFile(workPath, pristinePath, slots, out _))
+            return;
+
+        contract.FilePath = workPath;
+    }
+
+    /// <summary>نسخهٔ بدون امضا — اول ContractVersions نسخه ۱ (هرگز با امضا عوض نمی‌شود).</summary>
+    private async Task<string?> ResolvePristineSourcePathAsync(Contract contract, CancellationToken ct)
+    {
+        var v1 = await db.ContractVersions
+            .AsNoTracking()
             .Where(v => v.ContractId == contract.Id)
-            .OrderByDescending(v => v.VersionNumber)
+            .OrderBy(v => v.VersionNumber)
+            .Select(v => v.FilePath)
             .FirstOrDefaultAsync(ct);
-        if (latest is not null)
+
+        string? source = null;
+        if (!string.IsNullOrWhiteSpace(v1) && !ContractApprovalStampService.IsSignedDocumentPath(v1))
+            source = v1;
+        else if (!string.IsNullOrWhiteSpace(contract.OriginalFilePath)
+                 && !ContractApprovalStampService.IsSignedDocumentPath(contract.OriginalFilePath))
+            source = contract.OriginalFilePath;
+        else
+            source = await ResolveOriginalFilePathAsync(contract, ct);
+
+        if (string.IsNullOrWhiteSpace(source))
+            return null;
+
+        return approvalStamp.EnsurePristineBackupRelative(source);
+    }
+
+    private static string ResolveWorkFilePath(Contract contract, string pristinePath)
+    {
+        var work = contract.FilePath;
+        if (string.IsNullOrWhiteSpace(work)
+            || ContractApprovalStampService.IsSignedDocumentPath(work)
+            || work.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+            return pristinePath;
+
+        return work;
+    }
+
+    /// <summary>
+    /// برای هر مرحلهٔ تأییدشده: کلید امضا = فیلد امضای (Order-1) در قالب.
+    /// </summary>
+    private async Task<List<ContractSignatureSlot>> BuildSignatureSlotsAsync(
+        List<ApprovalStepDto> steps,
+        IReadOnlyList<string> signatureKeys,
+        IReadOnlyList<string> keysInPristineDoc,
+        CancellationToken ct)
+    {
+        var slots = new List<ContractSignatureSlot>();
+        var docKeySet = new HashSet<string>(
+            keysInPristineDoc.Select(ContractTemplateSystemFields.NormalizeKey),
+            StringComparer.OrdinalIgnoreCase);
+
+        foreach (var step in steps.Where(s => s.Status == "approved").OrderBy(s => s.Order))
         {
-            latest.FilePath = newPath;
-            if (!string.IsNullOrWhiteSpace(latest.FileName) && newPath.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
-                latest.FileName = Path.ChangeExtension(latest.FileName, ".pdf");
+            var keyIndex = step.Order - 1;
+            var placeholderKey = ResolvePlaceholderKeyForStep(
+                keyIndex, step.Order, signatureKeys, keysInPristineDoc, docKeySet);
+
+            var user = await db.Users
+                .Include(u => u.UserPosition)
+                .AsNoTracking()
+                .FirstOrDefaultAsync(u => u.Id == step.UserId, ct);
+            if (user is null || string.IsNullOrWhiteSpace(user.SignatureImagePath))
+                continue;
+
+            var fullName = $"{user.FirstName} {user.LastName}".Trim();
+            if (string.IsNullOrWhiteSpace(fullName))
+                fullName = step.UserName?.Trim() ?? user.UserName?.Trim() ?? "";
+
+            var sigFull = UserSignatureStorageService.ResolveFullPath(hostEnvironment, user.SignatureImagePath);
+            if (!File.Exists(sigFull))
+                continue;
+
+            var ext = Path.GetExtension(sigFull);
+            if (string.IsNullOrWhiteSpace(ext))
+                ext = ".png";
+
+            slots.Add(new ContractSignatureSlot(
+                WorkflowOrder: step.Order,
+                PlaceholderKey: placeholderKey,
+                ImageBytes: await File.ReadAllBytesAsync(sigFull, ct),
+                ImageExtension: ext,
+                ApproverFullName: fullName,
+                PositionTitle: user.UserPosition?.Name));
         }
+
+        return slots;
+    }
+
+    /// <summary>کلید فیلد امضای همان مرحله در طراح قالب (همان کلید باید در Word باشد: {{key}}).</summary>
+    private static string ResolvePlaceholderKeyForStep(
+        int keyIndex,
+        int workflowOrder,
+        IReadOnlyList<string> templateSignatureKeys,
+        IReadOnlyList<string> _keysInPristineDoc,
+        HashSet<string> _docKeySet)
+    {
+        if (keyIndex >= 0 && keyIndex < templateSignatureKeys.Count
+            && !string.IsNullOrWhiteSpace(templateSignatureKeys[keyIndex]))
+            return templateSignatureKeys[keyIndex].Trim();
+
+        return $"sign_{workflowOrder}";
     }
 
     public static async Task<string?> ResolveOriginalFilePathAsync(Contract contract, AppDbContext dbContext, CancellationToken ct)
@@ -238,10 +346,9 @@ public class ContractWorkflowProcessor(
         bool isReminder = false)
     {
         var smsSettings = await db.SmsSettings.FirstOrDefaultAsync(ct) ?? new SmsSettings();
-        if (!smsSettings.ApprovalReferralSmsEnabled) return false;
 
         var user = await userManager.FindByIdAsync(userId.ToString());
-        if (user is null || string.IsNullOrWhiteSpace(user.PhoneNumber)) return false;
+        if (user is null) return false;
 
         var sender = !string.IsNullOrWhiteSpace(approverDisplayName) ? approverDisplayName : fallbackApproverName;
         if (string.IsNullOrWhiteSpace(sender)) sender = "سیستم";
@@ -259,6 +366,10 @@ public class ContractWorkflowProcessor(
               $"ارجاع‌دهنده: {sender}\n" +
               $"لینک تأیید (بدون نیاز به ورود):\n{linkPath}";
 
+        var inboxTitle = isReminder ? "یادآوری تأیید قرارداد" : "قرارداد برای تأیید";
+        await inbox.SendToUserAsync(userId, inboxTitle, msg, ct);
+
+        if (!smsSettings.ApprovalReferralSmsEnabled || string.IsNullOrWhiteSpace(user.PhoneNumber)) return false;
         return await smsSender.SendSmsAsync(new SmsRequest(user.PhoneNumber, msg), ct);
     }
 
@@ -269,21 +380,16 @@ public class ContractWorkflowProcessor(
         CancellationToken ct)
     {
         var smsSettings = await db.SmsSettings.FirstOrDefaultAsync(ct) ?? new SmsSettings();
-        if (!smsSettings.ContractCreatorApprovalNotifySmsEnabled) return;
 
         var creator = await db.Users
             .AsNoTracking()
             .FirstOrDefaultAsync(u => u.Id == contract.CreatedByUserId, ct);
-        if (creator is null || string.IsNullOrWhiteSpace(creator.PhoneNumber)) return;
+        if (creator is null) return;
 
         var approverLabel = FormatPersonLabel(approver, null);
         var subject = ResolveContractSubjectLabel(contract);
 
-        var tehran = TimeZoneInfo.ConvertTimeFromUtc(
-            DateTime.UtcNow,
-            TimeZoneInfo.FindSystemTimeZoneById("Iran Standard Time"));
-        var dateStr = tehran.ToString("yyyy/MM/dd");
-        var timeStr = tehran.ToString("HH:mm");
+        var (dateStr, timeStr) = SmsDateTimeFormatter.FormatUtcNowTehran();
 
         string statusTail;
         if (nextStep is not null)
@@ -308,6 +414,8 @@ public class ContractWorkflowProcessor(
             $"{approverLabel} در تاریخ {dateStr} ساعت {timeStr} تأیید کرد.\n" +
             statusTail;
 
+        await inbox.SendToUserAsync(contract.CreatedByUserId, "به‌روزرسانی قرارداد", msg, ct);
+        if (!smsSettings.ContractCreatorApprovalNotifySmsEnabled || string.IsNullOrWhiteSpace(creator.PhoneNumber)) return;
         await smsSender.SendSmsAsync(new SmsRequest(creator.PhoneNumber, msg), ct);
     }
 
@@ -335,14 +443,11 @@ public class ContractWorkflowProcessor(
         var phone = NormalizeDigits(contract.Phone ?? "");
         if (!Regex.IsMatch(phone, @"^09\d{9}$")) return;
 
-        var tehran = TimeZoneInfo.ConvertTimeFromUtc(
-            DateTime.UtcNow,
-            TimeZoneInfo.FindSystemTimeZoneById("Iran Standard Time"));
-        var dateStr = tehran.ToString("yyyy/MM/dd");
-        var timeStr = tehran.ToString("HH:mm");
+        var (dateStr, timeStr) = SmsDateTimeFormatter.FormatUtcNowTehran();
 
         var msg =
             $"قرارداد شما با شماره سند «{contract.ContractNumber}» در تاریخ {dateStr} ساعت {timeStr} تأیید شد.";
+        await inbox.SendToMobileAsync(phone, "تأیید نهایی قرارداد", msg, ct);
         await smsSender.SendSmsAsync(new SmsRequest(phone, msg), ct);
     }
 

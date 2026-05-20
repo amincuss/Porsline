@@ -1,3 +1,4 @@
+using System.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using PorslineClone.Infrastructure.Persistence;
@@ -7,11 +8,59 @@ namespace PorslineClone.Infrastructure.Services;
 /// <summary>پچ ایمن schema برای سرورهایی که قبلاً دیتابیس دارند (بدون CreateTable کل پروژه)</summary>
 public static class DatabaseSchemaPatcher
 {
+    /// <summary>اجرای SQL بدون پارس‌کردن نام ستون‌ها توسط EF (جلوگیری از خطای پارامتر ۸۰۰۰).</summary>
+    private static async Task ExecuteScriptAsync(AppDbContext db, string sql, CancellationToken ct = default)
+    {
+        var connection = db.Database.GetDbConnection();
+        if (connection.State != ConnectionState.Open)
+            await db.Database.OpenConnectionAsync(ct);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        command.CommandTimeout = 180;
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    public static async Task ApplySecuritySettingsColumnsAsync(AppDbContext db, CancellationToken ct = default)
+    {
+        await ExecuteScriptAsync(db,
+            """
+            IF COL_LENGTH('dbo.SecuritySettings', 'AnonymousLinkExpiryDays') IS NULL
+                ALTER TABLE [dbo].[SecuritySettings] ADD [AnonymousLinkExpiryDays] int NOT NULL
+                    CONSTRAINT [DF_SecuritySettings_AnonymousLinkExpiryDays] DEFAULT (7);
+
+            IF COL_LENGTH('dbo.SecuritySettings', 'DispatchLinkRequireOtp') IS NULL
+                ALTER TABLE [dbo].[SecuritySettings] ADD [DispatchLinkRequireOtp] bit NOT NULL
+                    CONSTRAINT [DF_SecuritySettings_DispatchLinkRequireOtp] DEFAULT (0);
+
+            IF COL_LENGTH('dbo.SecuritySettings', 'AccessTokenLifetimeMinutes') IS NULL
+                ALTER TABLE [dbo].[SecuritySettings] ADD [AccessTokenLifetimeMinutes] int NOT NULL
+                    CONSTRAINT [DF_SecuritySettings_AccessTokenLifetimeMinutes] DEFAULT (180);
+
+            IF COL_LENGTH('dbo.SecuritySettings', 'RefreshTokenLifetimeDays') IS NULL
+                ALTER TABLE [dbo].[SecuritySettings] ADD [RefreshTokenLifetimeDays] int NOT NULL
+                    CONSTRAINT [DF_SecuritySettings_RefreshTokenLifetimeDays] DEFAULT (7);
+            """, ct);
+    }
+
     public static async Task ApplyAsync(AppDbContext db, ILogger logger, CancellationToken ct = default)
     {
-        logger.LogInformation("Applying database schema patch (UserPositions, signatures, contract columns)...");
+        logger.LogInformation("Applying database schema patch (security settings, UserPositions, signatures, contract columns)...");
 
-        await db.Database.ExecuteSqlRawAsync(
+        await ApplySecuritySettingsColumnsAsync(db, ct);
+        logger.LogInformation("SecuritySettings columns ensured.");
+
+        await ExecuteScriptAsync(db,
+            """
+            IF COL_LENGTH('dbo.FormWorkflowTemplates', 'ActionAssigneeUserIdsJson') IS NULL
+                ALTER TABLE [dbo].[FormWorkflowTemplates] ADD [ActionAssigneeUserIdsJson] nvarchar(max) NOT NULL
+                    CONSTRAINT [DF_FormWorkflowTemplates_ActionAssigneeUserIdsJson] DEFAULT ('[]');
+            IF COL_LENGTH('dbo.FormSubmissions', 'PostApprovalJson') IS NULL
+                ALTER TABLE [dbo].[FormSubmissions] ADD [PostApprovalJson] nvarchar(max) NULL;
+            """, ct);
+        logger.LogInformation("Form post-approval columns ensured.");
+
+        await ExecuteScriptAsync(db,
             """
             IF OBJECT_ID(N'[dbo].[UserPositions]', N'U') IS NULL
             BEGIN
@@ -28,16 +77,22 @@ public static class DatabaseSchemaPatcher
             END
             """, ct);
 
-        await db.Database.ExecuteSqlRawAsync(
+        await ExecuteScriptAsync(db,
             """
             IF COL_LENGTH('dbo.AspNetUsers', 'UserPositionId') IS NULL
                 ALTER TABLE [dbo].[AspNetUsers] ADD [UserPositionId] uniqueidentifier NULL;
 
             IF COL_LENGTH('dbo.AspNetUsers', 'SignatureImagePath') IS NULL
                 ALTER TABLE [dbo].[AspNetUsers] ADD [SignatureImagePath] nvarchar(500) NULL;
+
+            IF COL_LENGTH('dbo.AspNetUsers', 'PersonnelCode') IS NULL
+                ALTER TABLE [dbo].[AspNetUsers] ADD [PersonnelCode] nvarchar(30) NULL;
+
+            IF COL_LENGTH('dbo.AspNetUsers', 'Gender') IS NULL
+                ALTER TABLE [dbo].[AspNetUsers] ADD [Gender] int NULL;
             """, ct);
 
-        await db.Database.ExecuteSqlRawAsync(
+        await ExecuteScriptAsync(db,
             """
             IF NOT EXISTS (
                 SELECT 1 FROM sys.foreign_keys
@@ -51,7 +106,7 @@ public static class DatabaseSchemaPatcher
             END
             """, ct);
 
-        await db.Database.ExecuteSqlRawAsync(
+        await ExecuteScriptAsync(db,
             """
             IF COL_LENGTH('dbo.Contracts', 'WorkflowScheduledStartAtUtc') IS NULL
                 ALTER TABLE [dbo].[Contracts] ADD [WorkflowScheduledStartAtUtc] datetime2 NULL;
@@ -60,7 +115,7 @@ public static class DatabaseSchemaPatcher
                 ALTER TABLE [dbo].[Contracts] ADD [OriginalFilePath] nvarchar(500) NULL;
             """, ct);
 
-        await db.Database.ExecuteSqlRawAsync(
+        await ExecuteScriptAsync(db,
             """
             IF OBJECT_ID(N'[dbo].[ContractApprovalLinks]', N'U') IS NULL
             BEGIN
@@ -82,7 +137,7 @@ public static class DatabaseSchemaPatcher
             END
             """, ct);
 
-        await db.Database.ExecuteSqlRawAsync(
+        await ExecuteScriptAsync(db,
             """
             UPDATE [dbo].[Contracts]
             SET [OriginalFilePath] = [FilePath]
@@ -91,14 +146,14 @@ public static class DatabaseSchemaPatcher
               AND [FilePath] NOT LIKE '%_signed_%';
             """, ct);
 
-        await db.Database.ExecuteSqlRawAsync(
+        await ExecuteScriptAsync(db,
             """
             IF COL_LENGTH('dbo.SmsSettings', 'ContractCreatorApprovalNotifySmsEnabled') IS NULL
                 ALTER TABLE [dbo].[SmsSettings] ADD [ContractCreatorApprovalNotifySmsEnabled] bit NOT NULL
                     CONSTRAINT [DF_SmsSettings_ContractCreatorApprovalNotifySmsEnabled] DEFAULT (1);
             """, ct);
 
-        await db.Database.ExecuteSqlRawAsync(
+        await ExecuteScriptAsync(db,
             """
             IF OBJECT_ID(N'[dbo].[ContractDocumentTemplates]', N'U') IS NULL
             BEGIN
@@ -118,7 +173,7 @@ public static class DatabaseSchemaPatcher
             END
             """, ct);
 
-        await db.Database.ExecuteSqlRawAsync(
+        await ExecuteScriptAsync(db,
             """
             IF OBJECT_ID(N'[dbo].[ContractDocumentTemplateVersions]', N'U') IS NULL
             BEGIN
@@ -128,7 +183,7 @@ public static class DatabaseSchemaPatcher
                     [VersionNumber] int NOT NULL,
                     [FilePath] nvarchar(500) NOT NULL,
                     [FileName] nvarchar(260) NOT NULL,
-                    [DetectedPlaceholdersJson] nvarchar(8000) NOT NULL,
+                    [DetectedPlaceholdersJson] nvarchar(max) NOT NULL,
                     [ChangeNote] nvarchar(500) NULL,
                     [CreatedByUserId] uniqueidentifier NOT NULL,
                     [CreatedAtUtc] datetime2 NOT NULL,
@@ -141,7 +196,19 @@ public static class DatabaseSchemaPatcher
             END
             """, ct);
 
-        await db.Database.ExecuteSqlRawAsync(
+        await ExecuteScriptAsync(db,
+            """
+            IF COL_LENGTH('dbo.ContractDocumentTemplateVersions', 'DetectedPlaceholdersJson') IS NOT NULL
+               AND (SELECT max_length FROM sys.columns
+                    WHERE object_id = OBJECT_ID(N'dbo.ContractDocumentTemplateVersions')
+                      AND name = N'DetectedPlaceholdersJson') > 0
+            BEGIN
+                ALTER TABLE [dbo].[ContractDocumentTemplateVersions]
+                    ALTER COLUMN [DetectedPlaceholdersJson] nvarchar(max) NOT NULL;
+            END
+            """, ct);
+
+        await ExecuteScriptAsync(db,
             """
             IF OBJECT_ID(N'[dbo].[ContractDocumentTemplateFields]', N'U') IS NULL
             BEGIN
@@ -167,7 +234,7 @@ public static class DatabaseSchemaPatcher
             END
             """, ct);
 
-        await db.Database.ExecuteSqlRawAsync(
+        await ExecuteScriptAsync(db,
             """
             IF EXISTS (
                 SELECT 1 FROM sys.foreign_keys
@@ -176,7 +243,7 @@ public static class DatabaseSchemaPatcher
                 ALTER TABLE [dbo].[ContractDocumentTemplates] DROP CONSTRAINT [FK_ContractDocumentTemplates_ContractDocumentTemplateVersions_ActiveVersionId];
             """, ct);
 
-        await db.Database.ExecuteSqlRawAsync(
+        await ExecuteScriptAsync(db,
             """
             IF NOT EXISTS (
                 SELECT 1 FROM sys.foreign_keys
@@ -190,7 +257,7 @@ public static class DatabaseSchemaPatcher
             END
             """, ct);
 
-        await db.Database.ExecuteSqlRawAsync(
+        await ExecuteScriptAsync(db,
             """
             IF COL_LENGTH('dbo.Contracts', 'ContractDocumentTemplateId') IS NULL
                 ALTER TABLE [dbo].[Contracts] ADD [ContractDocumentTemplateId] uniqueidentifier NULL;
@@ -208,7 +275,7 @@ public static class DatabaseSchemaPatcher
                 ALTER TABLE [dbo].[ContractVersions] ADD [PdfFilePath] nvarchar(500) NULL;
             """, ct);
 
-        await db.Database.ExecuteSqlRawAsync(
+        await ExecuteScriptAsync(db,
             """
             IF NOT EXISTS (
                 SELECT 1 FROM sys.foreign_keys
@@ -222,7 +289,7 @@ public static class DatabaseSchemaPatcher
             END
             """, ct);
 
-        await db.Database.ExecuteSqlRawAsync(
+        await ExecuteScriptAsync(db,
             """
             IF COL_LENGTH('dbo.ContractDocumentTemplateFields', 'VersionId') IS NULL
             BEGIN
@@ -239,7 +306,7 @@ public static class DatabaseSchemaPatcher
             END
             """, ct);
 
-        await db.Database.ExecuteSqlRawAsync(
+        await ExecuteScriptAsync(db,
             """
             UPDATE f
             SET f.[VersionId] = COALESCE(
@@ -253,7 +320,7 @@ public static class DatabaseSchemaPatcher
                OR f.[VersionId] = '00000000-0000-0000-0000-000000000000';
             """, ct);
 
-        await db.Database.ExecuteSqlRawAsync(
+        await ExecuteScriptAsync(db,
             """
             DELETE FROM [dbo].[ContractDocumentTemplateFields]
             WHERE [VersionId] IS NULL
@@ -268,7 +335,7 @@ public static class DatabaseSchemaPatcher
             END
             """, ct);
 
-        await db.Database.ExecuteSqlRawAsync(
+        await ExecuteScriptAsync(db,
             """
             IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_ContractDocumentTemplateFields_TemplateId_Key'
                        AND object_id = OBJECT_ID(N'[dbo].[ContractDocumentTemplateFields]'))
@@ -293,6 +360,70 @@ public static class DatabaseSchemaPatcher
                     CONSTRAINT [FK_ContractDocumentTemplateFields_ContractDocumentTemplateVersions_VersionId]
                     FOREIGN KEY([VersionId]) REFERENCES [dbo].[ContractDocumentTemplateVersions]([Id]) ON DELETE CASCADE;
             END
+            """, ct);
+
+        await ExecuteScriptAsync(db,
+            """
+            IF OBJECT_ID(N'[dbo].[FormWorkflowTemplates]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[FormWorkflowTemplates] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [Name] nvarchar(200) NOT NULL,
+                    [StepsJson] nvarchar(max) NOT NULL,
+                    [IsActive] bit NOT NULL,
+                    [CreatedByUserId] uniqueidentifier NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    CONSTRAINT [PK_FormWorkflowTemplates] PRIMARY KEY ([Id])
+                );
+                CREATE UNIQUE INDEX [IX_FormWorkflowTemplates_Name] ON [dbo].[FormWorkflowTemplates]([Name]);
+                CREATE INDEX [IX_FormWorkflowTemplates_IsActive_CreatedAtUtc] ON [dbo].[FormWorkflowTemplates]([IsActive], [CreatedAtUtc]);
+            END
+
+            IF COL_LENGTH('dbo.Forms', 'WorkflowTemplateId') IS NULL
+                ALTER TABLE [dbo].[Forms] ADD [WorkflowTemplateId] uniqueidentifier NULL;
+            IF COL_LENGTH('dbo.Forms', 'WorkflowName') IS NULL
+                ALTER TABLE [dbo].[Forms] ADD [WorkflowName] nvarchar(200) NULL;
+
+            IF COL_LENGTH('dbo.FormSubmissions', 'WorkflowTemplateId') IS NULL
+                ALTER TABLE [dbo].[FormSubmissions] ADD [WorkflowTemplateId] uniqueidentifier NULL;
+            IF COL_LENGTH('dbo.FormSubmissions', 'WorkflowName') IS NULL
+                ALTER TABLE [dbo].[FormSubmissions] ADD [WorkflowName] nvarchar(200) NULL;
+            IF COL_LENGTH('dbo.FormSubmissions', 'WorkflowStartedAtUtc') IS NULL
+                ALTER TABLE [dbo].[FormSubmissions] ADD [WorkflowStartedAtUtc] datetime2 NULL;
+            IF COL_LENGTH('dbo.FormSubmissions', 'WorkflowScheduledStartAtUtc') IS NULL
+                ALTER TABLE [dbo].[FormSubmissions] ADD [WorkflowScheduledStartAtUtc] datetime2 NULL;
+
+            IF COL_LENGTH('dbo.FormSubmissions', 'ResponderId') IS NULL
+                ALTER TABLE [dbo].[FormSubmissions] ADD [ResponderId] uniqueidentifier NULL;
+            IF COL_LENGTH('dbo.FormSubmissions', 'DispatchLinkId') IS NULL
+                ALTER TABLE [dbo].[FormSubmissions] ADD [DispatchLinkId] uniqueidentifier NULL;
+
+            IF OBJECT_ID(N'[dbo].[FormSubmissionApprovalLinks]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[FormSubmissionApprovalLinks] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [FormSubmissionId] uniqueidentifier NOT NULL,
+                    [AssigneeUserId] uniqueidentifier NOT NULL,
+                    [Code] nvarchar(32) NOT NULL,
+                    [IsActive] bit NOT NULL,
+                    [ExpiresAtUtc] datetime2 NOT NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    CONSTRAINT [PK_FormSubmissionApprovalLinks] PRIMARY KEY ([Id]),
+                    CONSTRAINT [FK_FormSubmissionApprovalLinks_FormSubmissions_FormSubmissionId]
+                        FOREIGN KEY ([FormSubmissionId]) REFERENCES [dbo].[FormSubmissions]([Id]) ON DELETE CASCADE
+                );
+                CREATE UNIQUE INDEX [IX_FormSubmissionApprovalLinks_Code] ON [dbo].[FormSubmissionApprovalLinks]([Code]);
+                CREATE INDEX [IX_FormSubmissionApprovalLinks_FormSubmissionId_AssigneeUserId_IsActive]
+                    ON [dbo].[FormSubmissionApprovalLinks]([FormSubmissionId], [AssigneeUserId], [IsActive]);
+            END
+            """, ct);
+
+        await ExecuteScriptAsync(db,
+            """
+            IF COL_LENGTH('dbo.InboxMessages', 'IsArchived') IS NULL
+                ALTER TABLE [dbo].[InboxMessages] ADD [IsArchived] bit NOT NULL CONSTRAINT DF_InboxMessages_IsArchived DEFAULT(0);
+            IF COL_LENGTH('dbo.InboxMessages', 'ReadAtUtc') IS NULL
+                ALTER TABLE [dbo].[InboxMessages] ADD [ReadAtUtc] datetime2 NULL;
             """, ct);
 
         logger.LogInformation("Database schema patch completed.");

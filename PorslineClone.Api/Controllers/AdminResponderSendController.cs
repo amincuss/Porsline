@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using PorslineClone.Application.Abstractions;
 using PorslineClone.Application.Contracts;
 using PorslineClone.Infrastructure.Persistence;
+using PorslineClone.Infrastructure.Services;
 
 namespace PorslineClone.Api.Controllers;
 
@@ -145,7 +146,8 @@ public class AdminResponderSendController(
         {
             if (string.IsNullOrWhiteSpace(r.MobileNumber)) { failed++; continue; }
             var code = await GenerateUniqueCodeAsync(ct);
-            var defaultExpiry = DateTime.UtcNow.AddDays(7);
+            var security = await db.SecuritySettings.AsNoTracking().FirstOrDefaultAsync(ct);
+            var defaultExpiry = SecuritySettingsHelper.LinkExpiresAtUtc(security ?? new Domain.Entities.SecuritySettings());
             var linkExpiry = form.ExpiresAtUtc.HasValue && form.ExpiresAtUtc.Value < defaultExpiry
                 ? form.ExpiresAtUtc.Value
                 : defaultExpiry;

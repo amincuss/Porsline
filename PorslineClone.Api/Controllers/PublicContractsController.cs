@@ -21,7 +21,7 @@ public class PublicContractsController(
     [HttpGet("approve")]
     public async Task<IActionResult> ApproveAccess([FromQuery] string c, CancellationToken ct)
     {
-        var link = await approvalLinks.ResolveValidAsync(c, ct);
+        var link = await approvalLinks.ResolveByCodeAsync(c, ct);
         if (link is null) return BadRequest(new { message = "لینک تأیید نامعتبر یا منقضی شده است" });
 
         var contract = link.Contract;
@@ -29,18 +29,33 @@ public class PublicContractsController(
             return BadRequest(new { message = "این قرارداد بایگانی شده است" });
 
         var steps = ContractWorkflowProcessor.DeserializeSteps(contract.StepsJson);
-        var current = steps.FirstOrDefault(s => s.Order == contract.CurrentStepOrder && s.Status == "pending");
-        if (current is null)
-            return BadRequest(new { message = "در حال حاضر مرحله‌ای برای تأیید شما فعال نیست" });
+        if (steps.Count == 0)
+            return BadRequest(new { message = "گردش تأیید برای این قرارداد تعریف نشده است" });
 
-        if (current.UserId != link.AssigneeUserId)
-            return BadRequest(new { message = "این لینک برای مرحله فعلی معتبر نیست" });
+        var assigneeId = link.AssigneeUserId;
+        var assigneeStep = steps.FirstOrDefault(s => s.UserId == assigneeId);
+        if (assigneeStep is null)
+            return BadRequest(new { message = "این لینک به تأییدکنندهٔ این قرارداد تعلق ندارد" });
+
+        var current = steps.FirstOrDefault(s => s.Order == contract.CurrentStepOrder && s.Status == "pending");
+        var canAct = link.IsActive
+            && current is not null
+            && current.UserId == assigneeId;
+
+        var participated = assigneeStep.Status is "approved" or "rejected";
+        if (!canAct && !participated && (current is null || current.UserId != assigneeId))
+            return BadRequest(new { message = "در حال حاضر نوبت تأیید شما نیست" });
 
         await EnrichStepNamesAsync(steps, ct);
 
         var originalPath = await ContractWorkflowProcessor.ResolveOriginalFilePathAsync(contract, db, ct);
         var previewPath = !string.IsNullOrWhiteSpace(contract.FilePath) ? contract.FilePath : originalPath;
+        var hasFile = !string.IsNullOrWhiteSpace(previewPath);
         var hasPdf = previewPath?.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) == true;
+
+        var assigneeName = assigneeStep.UserName;
+        if (string.IsNullOrWhiteSpace(assigneeName) && current?.UserId == assigneeId)
+            assigneeName = current.UserName;
 
         return Ok(new
         {
@@ -57,8 +72,11 @@ public class PublicContractsController(
             contract.WorkflowName,
             contract.Status,
             contract.CurrentStepOrder,
-            canAct = true,
+            canAct,
             hasPdfPreview = hasPdf,
+            hasFilePreview = hasFile,
+            viewOnly = !canAct,
+            participated,
             steps = steps.Select(s => new
             {
                 s.Id,
@@ -74,8 +92,8 @@ public class PublicContractsController(
             }),
             assignee = new
             {
-                userId = link.AssigneeUserId,
-                userName = current.UserName
+                userId = assigneeId,
+                userName = assigneeName ?? ""
             }
         });
     }
@@ -83,13 +101,12 @@ public class PublicContractsController(
     [HttpGet("approve/file")]
     public async Task<IActionResult> ApproveFile([FromQuery] string c, CancellationToken ct)
     {
-        var link = await approvalLinks.ResolveValidAsync(c, ct);
+        var link = await approvalLinks.ResolveByCodeAsync(c, ct);
         if (link is null) return BadRequest(new { message = "لینک نامعتبر است" });
 
         var contract = link.Contract;
         var steps = ContractWorkflowProcessor.DeserializeSteps(contract.StepsJson);
-        var current = steps.FirstOrDefault(s => s.Order == contract.CurrentStepOrder && s.Status == "pending");
-        if (current is null || current.UserId != link.AssigneeUserId)
+        if (!steps.Any(s => s.UserId == link.AssigneeUserId))
             return Forbid();
 
         var relative = contract.FilePath;

@@ -4,7 +4,12 @@ public record WorkflowStepDto(string Id, int Order, Guid UserId, string? Note, s
 
 public record SaveWorkflowRequest(bool Enabled, List<WorkflowStepDto> Steps);
 
-public record WorkflowSettingsDto(bool Enabled, List<WorkflowStepDto> Steps);
+public record WorkflowSettingsDto(
+    bool Enabled,
+    List<WorkflowStepDto> Steps,
+    Guid? WorkflowTemplateId = null,
+    string? WorkflowName = null,
+    bool UseTemplate = false);
 
 public record SaveWorkflowTemplateRequest(string Name, List<WorkflowStepDto> Steps);
 
@@ -20,6 +25,23 @@ public record ContractWorkflowTemplateDetailDto(
     string Name,
     bool IsActive,
     List<WorkflowStepDto> Steps);
+
+public record FormWorkflowTemplateListItemDto(
+    Guid Id,
+    string Name,
+    int StepCount,
+    bool IsActive,
+    DateTime CreatedAtUtc);
+
+public record FormWorkflowTemplateDetailDto(
+    Guid Id,
+    string Name,
+    bool IsActive,
+    List<WorkflowStepDto> Steps);
+
+public record SaveFormWorkflowLinkRequest(string? WorkflowTemplateId, bool ConnectWorkflow);
+
+public record FormFieldValueDto(string Label, string Value);
 
 public class ApprovalStepDto
 {
