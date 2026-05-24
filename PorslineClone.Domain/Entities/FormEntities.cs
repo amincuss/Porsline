@@ -68,6 +68,10 @@ public class FormWorkflowTemplate
     public Guid Id { get; set; }
     public string Name { get; set; } = "";
     public string StepsJson { get; set; } = "[]";
+    public string? ActionDirectionKey { get; set; }
+    public string? ActionDirectionLabel { get; set; }
+    public string ActionAssigneeUserIdsJson { get; set; } = "[]";
+    public string? CanvasLayoutJson { get; set; }
     public bool IsActive { get; set; } = true;
     public Guid? CreatedByUserId { get; set; }
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
@@ -103,6 +107,8 @@ public class FormSubmission
     public string? WorkflowName { get; set; }
     public DateTime? WorkflowStartedAtUtc { get; set; }
     public DateTime? WorkflowScheduledStartAtUtc { get; set; }
+    /// <summary>وضعیت اقدام پس از تأیید (JSON) — فقط در صورت فعال‌سازی فاز اقدام</summary>
+    public string? PostApprovalJson { get; set; }
 }
 
 /// <summary>لینک تأیید عمومی برای پاسخ فرم (مثل قرارداد)</summary>
@@ -116,6 +122,7 @@ public class FormSubmissionApprovalLink
     public bool IsActive { get; set; } = true;
     public DateTime ExpiresAtUtc { get; set; }
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+    public DateTime? ReminderSmsSentAtUtc { get; set; }
 }
 
 public class FormDispatchLink

@@ -108,6 +108,23 @@ public class SmsSettings
     public bool ApprovalReferralSmsEnabled { get; set; } = true;
     /// <summary>پس از هر تأیید در گردش قرارداد، پیامک به کاربر ثبت‌کننده قرارداد</summary>
     public bool ContractCreatorApprovalNotifySmsEnabled { get; set; } = true;
+    /// <summary>پیامک به مسئول اصلاحیه پس از رد (ایجادکننده یا تأییدکننده اول)</summary>
+    public bool ContractAmendmentAssigneeSmsEnabled { get; set; } = true;
+    /// <summary>پیامک به تأییدکننده‌ای که رد کرده، پس از «انجام شد» اصلاحیه</summary>
+    public bool ContractAmendmentReturnToRejecterSmsEnabled { get; set; } = true;
+    /// <summary>پیامک اطلاع رد به ثبت‌کننده و طرف‌های مرتبط</summary>
+    public bool ContractRejectionNotifySmsEnabled { get; set; } = true;
+    /// <summary>ارسال خودکار یادآوری پس از اولین پیامک ارجاع تأیید</summary>
+    public bool ApprovalReminderSmsEnabled { get; set; } = false;
+    /// <summary>تأخیر یادآوری بر حسب روز (پس از اولین پیامک)</summary>
+    public int ApprovalReminderDelayDays { get; set; } = 0;
+    /// <summary>تأخیر یادآوری بر حسب ساعت (پس از اولین پیامک)</summary>
+    public int ApprovalReminderDelayHours { get; set; } = 24;
+    /// <summary>یادآوری پس از اتمام «اعتبار کل گردش» قرارداد (امضا نکرده‌اید)</summary>
+    public bool WorkflowValidityReminderSmsEnabled { get; set; } = false;
+    /// <summary>مهلت پس از یادآوری اعتبار گردش تا تعلیق خودکار (روز)</summary>
+    public int WorkflowValiditySuspensionDelayDays { get; set; } = 0;
+    public int WorkflowValiditySuspensionDelayHours { get; set; } = 24;
     public bool PublicFormRequireOtp { get; set; } = false;
 }
 

@@ -22,7 +22,16 @@ public class AdminSmsSettingsController(AppDbContext db) : ControllerBase
             settings.SurveyCompletedNotificationEnabled,
             settings.UserCreateSmsEnabled,
             settings.ApprovalReferralSmsEnabled,
-            settings.ContractCreatorApprovalNotifySmsEnabled));
+            settings.ContractCreatorApprovalNotifySmsEnabled,
+            settings.ContractAmendmentAssigneeSmsEnabled,
+            settings.ContractAmendmentReturnToRejecterSmsEnabled,
+            settings.ContractRejectionNotifySmsEnabled,
+            settings.ApprovalReminderSmsEnabled,
+            settings.ApprovalReminderDelayDays,
+            settings.ApprovalReminderDelayHours,
+            settings.WorkflowValidityReminderSmsEnabled,
+            settings.WorkflowValiditySuspensionDelayDays,
+            settings.WorkflowValiditySuspensionDelayHours));
     }
 
     [HttpPut("sms")]
@@ -42,6 +51,19 @@ public class AdminSmsSettingsController(AppDbContext db) : ControllerBase
         settings.UserCreateSmsEnabled = dto.UserCreateSmsEnabled;
         settings.ApprovalReferralSmsEnabled = dto.ApprovalReferralSmsEnabled;
         settings.ContractCreatorApprovalNotifySmsEnabled = dto.ContractCreatorApprovalNotifySmsEnabled;
+        settings.ContractAmendmentAssigneeSmsEnabled = dto.ContractAmendmentAssigneeSmsEnabled;
+        settings.ContractAmendmentReturnToRejecterSmsEnabled = dto.ContractAmendmentReturnToRejecterSmsEnabled;
+        settings.ContractRejectionNotifySmsEnabled = dto.ContractRejectionNotifySmsEnabled;
+        settings.ApprovalReminderSmsEnabled = dto.ApprovalReminderSmsEnabled;
+        settings.ApprovalReminderDelayDays = Math.Max(0, dto.ApprovalReminderDelayDays);
+        settings.ApprovalReminderDelayHours = Math.Max(0, dto.ApprovalReminderDelayHours);
+        if (settings.ApprovalReminderDelayDays == 0 && settings.ApprovalReminderDelayHours == 0)
+            settings.ApprovalReminderDelayHours = 24;
+        settings.WorkflowValidityReminderSmsEnabled = dto.WorkflowValidityReminderSmsEnabled;
+        settings.WorkflowValiditySuspensionDelayDays = Math.Max(0, dto.WorkflowValiditySuspensionDelayDays);
+        settings.WorkflowValiditySuspensionDelayHours = Math.Max(0, dto.WorkflowValiditySuspensionDelayHours);
+        if (settings.WorkflowValiditySuspensionDelayDays == 0 && settings.WorkflowValiditySuspensionDelayHours == 0)
+            settings.WorkflowValiditySuspensionDelayHours = 24;
 
         await db.SaveChangesAsync(cancellationToken);
         return Ok(new { message = "تنظیمات پیامک ذخیره شد" });

@@ -217,6 +217,12 @@ public class AdminContractsController(
 
         var stepsByContract = list.ToDictionary(x => x.Id, x => DeserializeSteps(x.StepsJson));
         await EnrichApproverNamesAsync(stepsByContract, ct);
+        var amendedVersionLookup = await ResolveCurrentVersionIsAmendedAsync(list, ct);
+        var workflowTemplates = await LoadWorkflowTemplatesAsync(list.Select(x => x.WorkflowTemplateId), ct);
+        var actionPhaseNameLookup = await ResolveActionPhaseUserNamesAsync(list, workflowTemplates, ct);
+        var suspendedUserLookup = await ResolveUserNamesByIdsAsync(
+            list.Where(c => c.SuspendedPendingUserId.HasValue).Select(c => c.SuspendedPendingUserId!.Value).Distinct(),
+            ct);
 
         var result = list.Select(x =>
         {
@@ -248,7 +254,7 @@ public class AdminContractsController(
                 creatorName ?? "",
                 x.CreatedAtUtc,
                 x.CurrentStepOrder,
-                ToClientStatus(x.Status),
+                ToClientStatus(x),
                 x.WorkflowTemplateId,
                 x.WorkflowName,
                 x.WorkflowStartedAtUtc,
@@ -258,7 +264,20 @@ public class AdminContractsController(
                 CanUnassignWorkflow(x),
                 x.ContractDocumentTemplateId,
                 x.ContractDocumentTemplateVersionId,
-                steps);
+                steps,
+                BuildAmendmentView(x, currentUserGuid),
+                WorkflowEventHelper.ToViews(x.WorkflowEventsJson),
+                amendedVersionLookup.GetValueOrDefault(x.Id),
+                BuildActionPhaseView(x, workflowTemplates, actionPhaseNameLookup),
+                BuildCanAmendContract(x, currentUserGuid),
+                BuildCanAmendContractDocument(x, currentUserGuid),
+                x.WorkflowValidityEndsAtUtc,
+                x.SuspendedPendingUserId,
+                x.SuspendedPendingUserId.HasValue
+                    ? suspendedUserLookup.GetValueOrDefault(x.SuspendedPendingUserId.Value)
+                    : null,
+                x.WorkflowIncompleteNote,
+                x.WorkflowIncompleteTerminatedAtUtc);
         });
 
         result = (status ?? "all").ToLowerInvariant() switch
@@ -267,6 +286,12 @@ public class AdminContractsController(
             "approved" => result.Where(x => x.OverallStatus == "approved"),
             "rejected" => result.Where(x => x.OverallStatus == "rejected"),
             "in_progress" => result.Where(x => x.OverallStatus == "in_progress"),
+            "suspended" => result.Where(x => x.OverallStatus == "suspended"),
+            "incomplete" => result.Where(x => x.OverallStatus == "incomplete"),
+            "action" => result.Where(x =>
+                x.OverallStatus == "approved"
+                && x.ActionPhase is not null
+                && !string.Equals(x.ActionPhase.Status, "completed", StringComparison.OrdinalIgnoreCase)),
             _ => result
         };
 
@@ -295,6 +320,15 @@ public class AdminContractsController(
             ? x.CreatedByName
             : await ResolveUserDisplayNameAsync(x.CreatedByUserId, ct);
 
+        var currentIsAmended = await db.ContractVersions.AsNoTracking()
+            .AnyAsync(v => v.ContractId == id && v.VersionNumber == x.CurrentVersionNumber && v.IsAmendedVersion, ct);
+
+        var workflowTemplates = await LoadWorkflowTemplatesAsync([x.WorkflowTemplateId], ct);
+        var actionPhaseNameLookup = await ResolveActionPhaseUserNamesAsync([x], workflowTemplates, ct);
+        TryGetCurrentUserId(out var currentUserGuid);
+        var amendmentView = BuildAmendmentView(x, currentUserGuid);
+        var templateFieldValues = ParseTemplateFieldValues(x.TemplateFieldValuesJson);
+
         return Ok(new ContractDetailDto(
             x.Id,
             x.ContractNumber,
@@ -320,7 +354,7 @@ public class AdminContractsController(
             creatorName,
             x.CreatedAtUtc,
             x.CurrentStepOrder,
-            ToClientStatus(x.Status),
+            ToClientStatus(x),
             x.WorkflowTemplateId,
             x.WorkflowName,
             x.WorkflowStartedAtUtc,
@@ -330,7 +364,71 @@ public class AdminContractsController(
             CanUnassignWorkflow(x),
             x.ContractDocumentTemplateId,
             x.ContractDocumentTemplateVersionId,
-            steps));
+            steps,
+            amendmentView,
+            WorkflowEventHelper.ToViews(x.WorkflowEventsJson),
+            currentIsAmended,
+            BuildActionPhaseView(x, workflowTemplates, actionPhaseNameLookup),
+            BuildCanAmendContract(x, currentUserGuid),
+            BuildCanAmendContractDocument(x, currentUserGuid),
+            templateFieldValues,
+            x.WorkflowValidityEndsAtUtc,
+            x.SuspendedPendingUserId,
+            x.SuspendedPendingUserId.HasValue
+                ? await ResolveUserDisplayNameAsync(x.SuspendedPendingUserId.Value, ct)
+                : null,
+            x.WorkflowIncompleteNote,
+            x.WorkflowIncompleteTerminatedAtUtc,
+            BuildCanTerminateIncomplete(x, currentUserGuid)));
+    }
+
+    [HttpPost("{id:guid}/terminate-incomplete")]
+    [Authorize(Policy = "contracts.update")]
+    public async Task<IActionResult> TerminateIncomplete(
+        Guid id,
+        [FromBody] TerminateWorkflowIncompleteRequest? req,
+        CancellationToken ct)
+    {
+        if (!TryGetCurrentUserId(out var currentUserId))
+            return Unauthorized();
+
+        var contract = await db.Contracts.FirstOrDefaultAsync(c => c.Id == id, ct);
+        if (contract is null) return NotFound(new { message = "قرارداد یافت نشد" });
+
+        var accessDenied = DenyIfNoContractAccess(contract);
+        if (accessDenied is not null) return accessDenied;
+
+        if (contract.CreatedByUserId != currentUserId)
+            return StatusCode(403, new { message = "فقط ایجادکننده قرارداد می‌تواند اتمام ناتمام ثبت کند" });
+
+        if (contract.Status is not (ContractStatus.InProgress or ContractStatus.Suspended))
+            return BadRequest(new { message = "فقط گردش در جریان یا معلق قابل اتمام ناتمام است" });
+
+        if (!contract.WorkflowStartedAtUtc.HasValue)
+            return BadRequest(new { message = "گردش هنوز شروع نشده است" });
+
+        var now = DateTime.UtcNow;
+        var note = req?.Note?.Trim();
+        contract.Status = ContractStatus.Incomplete;
+        contract.WorkflowIncompleteTerminatedAtUtc = now;
+        contract.WorkflowIncompleteNote = string.IsNullOrWhiteSpace(note) ? null : note;
+        contract.SuspendedPendingUserId = null;
+
+        var steps = DeserializeSteps(contract.StepsJson);
+        var pending = steps.FirstOrDefault(s => s.Order == contract.CurrentStepOrder && s.Status == "pending");
+        var actorName = await ResolveUserDisplayNameAsync(currentUserId, ct);
+        WorkflowEventHelper.Append(contract, new WorkflowEventDto
+        {
+            Kind = "workflow_incomplete",
+            StepOrder = pending?.Order ?? contract.CurrentStepOrder,
+            ActorUserId = currentUserId,
+            ActorName = actorName,
+            Comment = note ?? "اتمام گردش ناتمام توسط ایجادکننده",
+            AtUtc = now
+        });
+
+        await db.SaveChangesAsync(ct);
+        return Ok(new { message = "اتمام گردش ناتمام ثبت شد" });
     }
 
     [HttpGet("{id:guid}/versions")]
@@ -369,7 +467,8 @@ public class AdminContractsController(
             !string.IsNullOrWhiteSpace(v.CreatedByName)
                 ? v.CreatedByName
                 : names.GetValueOrDefault(v.CreatedByUserId, ""),
-            v.ChangeNote));
+            v.ChangeNote,
+            v.IsAmendedVersion));
         return Ok(items);
     }
 
@@ -796,6 +895,9 @@ public class AdminContractsController(
         if (contract.IsArchived)
             return BadRequest(new { message = "قرارداد بایگانی‌شده قابل ویرایش نیست" });
 
+        if (contract.WorkflowStartedAtUtc is not null && contract.Status == ContractStatus.InProgress)
+            return BadRequest(new { message = "در جریان گردش تأیید امکان آپلود نسخه عادی وجود ندارد. در فاز اصلاحیه، از «آپلود نسخه اصلاح‌شده» استفاده کنید." });
+
         if (file is null || file.Length == 0)
             return BadRequest(new { message = "فایل الزامی است" });
 
@@ -841,6 +943,8 @@ public class AdminContractsController(
     {
         var contract = await GetAccessibleContractAsync(id, ct);
         if (contract is null) return NotFound(new { message = "قرارداد یافت نشد" });
+        if (!CanManuallyArchive(contract))
+            return BadRequest(new { message = "تا پایان گردش تأیید، امکان بایگانی دستی وجود ندارد. پس از اتمام گردش (تأیید یا رد قطعی) می‌توانید بایگانی کنید." });
         contract.IsArchived = true;
         await db.SaveChangesAsync(ct);
         return Ok(new { message = "قرارداد به بایگانی منتقل شد" });
@@ -860,12 +964,224 @@ public class AdminContractsController(
     [HttpPost("{id:guid}/approve")]
     [Authorize(Policy = "contracts.update")]
     public async Task<IActionResult> Approve(Guid id, [FromBody] ContractActionRequest req, CancellationToken ct)
-        => await ProcessActionAsync(id, approve: true, req.Comment, ct);
+        => await ProcessActionAsync(id, approve: true, req.Comment, null, ct);
 
     [HttpPost("{id:guid}/reject")]
     [Authorize(Policy = "contracts.update")]
     public async Task<IActionResult> Reject(Guid id, [FromBody] ContractActionRequest req, CancellationToken ct)
-        => await ProcessActionAsync(id, approve: false, req.Comment, ct);
+        => await ProcessActionAsync(id, approve: false, req.Comment, req.RejectionType, ct);
+
+    [HttpPost("{id:guid}/amendment")]
+    [Authorize(Policy = "contracts.read")]
+    public async Task<IActionResult> UpdateAmendment(Guid id, [FromBody] ContractAmendmentUpdateRequest req, CancellationToken ct)
+    {
+        if (!Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var currentUserGuid))
+            return Unauthorized();
+
+        if (await GetAccessibleContractAsync(id, ct) is null)
+            return NotFound(new { message = "قرارداد یافت نشد" });
+
+        var result = await workflowProcessor.UpdateAmendmentAsync(
+            id,
+            currentUserGuid,
+            req.AmendmentStatus,
+            req.Note,
+            ct);
+        if (!result.Success)
+        {
+            var status = result.HttpStatus ?? 400;
+            if (status == 403) return StatusCode(403, new { message = result.Message });
+            if (status == 404) return NotFound(new { message = result.Message });
+            return BadRequest(new { message = result.Message });
+        }
+
+        return Ok(new { message = result.Message });
+    }
+
+    [HttpPost("{id:guid}/amendment-file")]
+    [Authorize(Policy = "contracts.read")]
+    [RequestSizeLimit(25 * 1024 * 1024)]
+    public async Task<IActionResult> UploadAmendedVersion(Guid id, IFormFile? file, CancellationToken ct)
+    {
+        if (!Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
+            return Unauthorized();
+
+        var contract = await GetAccessibleContractAsync(id, ct);
+        if (contract is null) return NotFound(new { message = "قرارداد یافت نشد" });
+        if (contract.IsArchived)
+            return BadRequest(new { message = "قرارداد بایگانی‌شده قابل ویرایش نیست" });
+
+        if (file is null || file.Length == 0)
+            return BadRequest(new { message = "فایل الزامی است" });
+
+        var ext = Path.GetExtension(file.FileName);
+        if (!AllowedExtensions.Contains(ext))
+            return BadRequest(new { message = "فقط فایل PDF یا Word مجاز است" });
+        if (file.Length > 20 * 1024 * 1024)
+            return BadRequest(new { message = "حداکثر حجم فایل ۲۰ مگابایت است" });
+
+        var amendState = ContractAmendmentHelper.Deserialize(contract.AmendmentJson);
+        if (!ContractAmendmentHelper.IsActive(amendState))
+            return BadRequest(new { message = "فاز اصلاحیه فعالی برای این قرارداد وجود ندارد" });
+        if (contract.CreatedByUserId != userId)
+            return Forbid();
+
+        var nextVersion = contract.CurrentVersionNumber + 1;
+        var uploaderName = await ResolveUserDisplayNameAsync(userId, ct);
+        var stored = await contractFiles.SaveAsync(contract.NationalId, nextVersion, contract.ContractNumber, file, ct);
+
+        contract.FilePath = stored.relativePath;
+        contract.OriginalFilePath = stored.relativePath;
+        contract.FileName = stored.originalFileName;
+        contract.PdfFilePath = null;
+        contract.CurrentVersionNumber = nextVersion;
+
+        db.ContractVersions.Add(new ContractVersion
+        {
+            Id = Guid.NewGuid(),
+            ContractId = id,
+            VersionNumber = nextVersion,
+            FilePath = stored.relativePath,
+            FileName = stored.originalFileName,
+            CreatedByUserId = userId,
+            CreatedByName = uploaderName,
+            CreatedAtUtc = DateTime.UtcNow,
+            ChangeNote = "نسخه اصلاح‌شده",
+            IsAmendedVersion = true
+        });
+        await db.SaveChangesAsync(ct);
+
+        var result = await workflowProcessor.RegisterAmendedVersionAsync(id, userId, nextVersion, ct);
+        if (!result.Success)
+            return BadRequest(new { message = result.Message });
+
+        return Ok(new
+        {
+            versionNumber = nextVersion,
+            currentVersionIsAmended = true,
+            message = result.Message
+        });
+    }
+
+    [HttpPost("{id:guid}/amendment-regenerate")]
+    [Authorize(Policy = "contracts.read")]
+    public async Task<IActionResult> RegenerateAmendedFromTemplate(
+        Guid id,
+        [FromBody] ContractAmendmentRegenerateRequest req,
+        CancellationToken ct)
+    {
+        if (!TryGetCurrentUserId(out var userId))
+            return Unauthorized();
+
+        var contract = await GetAccessibleContractAsync(id, ct);
+        if (contract is null) return NotFound(new { message = "قرارداد یافت نشد" });
+        if (contract.IsArchived)
+            return BadRequest(new { message = "قرارداد بایگانی‌شده قابل ویرایش نیست" });
+
+        var amendState = ContractAmendmentHelper.Deserialize(contract.AmendmentJson);
+        if (!ContractAmendmentHelper.IsActive(amendState))
+            return BadRequest(new { message = "فاز اصلاحیه فعالی برای این قرارداد وجود ندارد" });
+        if (contract.CreatedByUserId != userId)
+            return Forbid();
+        if (contract.ContractDocumentTemplateId is null || contract.ContractDocumentTemplateId == Guid.Empty)
+            return BadRequest(new { message = "این قرارداد از قالب ساخته نشده است" });
+
+        Dictionary<string, string> fieldValues;
+        try
+        {
+            fieldValues = ContractTemplateFieldValuesParser.Parse(req.FieldValuesJson);
+        }
+        catch (JsonException)
+        {
+            return BadRequest(new { message = "مقادیر فیلد قالب نامعتبر است" });
+        }
+
+        try
+        {
+            var (tempPath, generatedName, versionId) = await documentTemplates.GenerateForContractAsync(
+                contract.ContractDocumentTemplateId.Value,
+                contract.ContractDocumentTemplateVersionId,
+                fieldValues,
+                contract.ContractNumber,
+                ct);
+            try
+            {
+                await using var fs = new FileStream(tempPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                var mem = new MemoryStream();
+                await fs.CopyToAsync(mem, ct);
+                mem.Position = 0;
+                var outName = string.IsNullOrWhiteSpace(generatedName)
+                    ? "contract.docx"
+                    : Path.ChangeExtension(generatedName, ".docx");
+                var file = new StreamFormFile(
+                    mem,
+                    outName,
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+
+                var nextVersion = contract.CurrentVersionNumber + 1;
+                var uploaderName = await ResolveUserDisplayNameAsync(userId, ct);
+                var stored = await contractFiles.SaveAsync(contract.NationalId, nextVersion, contract.ContractNumber, file, ct);
+
+                contract.TemplateFieldValuesJson = req.FieldValuesJson;
+                contract.ContractDocumentTemplateVersionId = versionId;
+                contract.FilePath = stored.relativePath;
+                contract.OriginalFilePath = stored.relativePath;
+                contract.FileName = stored.originalFileName;
+                contract.PdfFilePath = null;
+                contract.CurrentVersionNumber = nextVersion;
+
+                db.ContractVersions.Add(new ContractVersion
+                {
+                    Id = Guid.NewGuid(),
+                    ContractId = id,
+                    VersionNumber = nextVersion,
+                    FilePath = stored.relativePath,
+                    FileName = stored.originalFileName,
+                    CreatedByUserId = userId,
+                    CreatedByName = uploaderName,
+                    CreatedAtUtc = DateTime.UtcNow,
+                    ChangeNote = "نسخه اصلاح‌شده از قالب",
+                    IsAmendedVersion = true
+                });
+                await db.SaveChangesAsync(ct);
+
+                var registerResult = await workflowProcessor.RegisterAmendedVersionAsync(id, userId, nextVersion, ct);
+                if (!registerResult.Success)
+                    return BadRequest(new { message = registerResult.Message });
+
+                string message = registerResult.Message ?? "نسخه اصلاح‌شده از قالب تولید شد";
+                if (req.AutoSubmitToWorkflow && amendState!.Phase == "creator_amendment")
+                {
+                    var submitResult = await workflowProcessor.UpdateAmendmentAsync(
+                        id,
+                        userId,
+                        "done",
+                        amendState.AmendmentNote,
+                        ct);
+                    if (!submitResult.Success)
+                        return BadRequest(new { message = submitResult.Message });
+                    message = submitResult.Message ?? message;
+                }
+
+                return Ok(new
+                {
+                    versionNumber = nextVersion,
+                    currentVersionIsAmended = true,
+                    submittedToWorkflow = req.AutoSubmitToWorkflow && amendState!.Phase == "creator_amendment",
+                    message
+                });
+            }
+            finally
+            {
+                if (System.IO.File.Exists(tempPath))
+                    System.IO.File.Delete(tempPath);
+            }
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
 
     [HttpGet("{id:guid}/file")]
     [Authorize(Policy = "contracts.read")]
@@ -882,6 +1198,7 @@ public class AdminContractsController(
 
         var wantPdf = string.Equals(format, "pdf", StringComparison.OrdinalIgnoreCase);
         var wantOriginal = string.Equals(source, "original", StringComparison.OrdinalIgnoreCase);
+        var wantAmended = string.Equals(source, "amended", StringComparison.OrdinalIgnoreCase);
 
         ContractVersion? versionEntity = null;
         string? sourceRelative;
@@ -893,6 +1210,30 @@ public class AdminContractsController(
             versionEntity = await db.ContractVersions
                 .FirstOrDefaultAsync(x => x.Id == versionId && x.ContractId == id, ct);
             if (versionEntity is null) return NotFound(new { message = "نسخه یافت نشد" });
+            sourceRelative = versionEntity.FilePath;
+            storedPdfRelative = versionEntity.PdfFilePath;
+            displayName = versionEntity.FileName;
+        }
+        else if (wantAmended)
+        {
+            var amendState = ContractAmendmentHelper.Deserialize(contract.AmendmentJson);
+            int? amendedVersionNumber = amendState?.AmendedVersionNumber;
+            if (amendedVersionNumber is null)
+            {
+                amendedVersionNumber = await db.ContractVersions.AsNoTracking()
+                    .Where(v => v.ContractId == id && v.IsAmendedVersion)
+                    .OrderByDescending(v => v.VersionNumber)
+                    .Select(v => (int?)v.VersionNumber)
+                    .FirstOrDefaultAsync(ct);
+            }
+
+            if (amendedVersionNumber is null or < 1)
+                return NotFound(new { message = "نسخه اصلاح‌شده یافت نشد" });
+
+            versionEntity = await db.ContractVersions
+                .FirstOrDefaultAsync(x => x.ContractId == id && x.VersionNumber == amendedVersionNumber.Value, ct);
+            if (versionEntity is null)
+                return NotFound(new { message = "نسخه اصلاح‌شده یافت نشد" });
             sourceRelative = versionEntity.FilePath;
             storedPdfRelative = versionEntity.PdfFilePath;
             displayName = versionEntity.FileName;
@@ -1032,7 +1373,7 @@ public class AdminContractsController(
             null);
     }
 
-    private async Task<IActionResult> ProcessActionAsync(Guid id, bool approve, string? comment, CancellationToken ct)
+    private async Task<IActionResult> ProcessActionAsync(Guid id, bool approve, string? comment, string? rejectionType, CancellationToken ct)
     {
         if (!Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var currentUserGuid))
             return Unauthorized();
@@ -1040,7 +1381,7 @@ public class AdminContractsController(
         if (await GetAccessibleContractAsync(id, ct) is null)
             return NotFound(new { message = "قرارداد یافت نشد" });
 
-        var result = await workflowProcessor.ProcessActionAsync(id, currentUserGuid, approve, comment, ct);
+        var result = await workflowProcessor.ProcessActionAsync(id, currentUserGuid, approve, comment, rejectionType, ct);
         if (!result.Success)
         {
             var status = result.HttpStatus ?? 400;
@@ -1114,6 +1455,97 @@ public class AdminContractsController(
         }
     }
 
+    private async Task<IReadOnlyDictionary<Guid, ContractWorkflowTemplate>> LoadWorkflowTemplatesAsync(
+        IEnumerable<Guid?> templateIds,
+        CancellationToken ct)
+    {
+        var ids = templateIds.Where(x => x.HasValue).Select(x => x!.Value).Distinct().ToList();
+        if (ids.Count == 0) return new Dictionary<Guid, ContractWorkflowTemplate>();
+
+        return await db.ContractWorkflowTemplates.AsNoTracking()
+            .Where(t => ids.Contains(t.Id))
+            .ToDictionaryAsync(t => t.Id, ct);
+    }
+
+    private async Task<IReadOnlyDictionary<Guid, string>> ResolveActionPhaseUserNamesAsync(
+        IEnumerable<Contract> contracts,
+        IReadOnlyDictionary<Guid, ContractWorkflowTemplate> templates,
+        CancellationToken ct)
+    {
+        var assigneeIds = new List<Guid>();
+        foreach (var contract in contracts)
+        {
+            var source = ResolveActionPhaseSource(contract, templates);
+            if (source is null) continue;
+            assigneeIds.AddRange(source.Value.AssigneeIds);
+        }
+
+        var ids = assigneeIds.Where(id => id != Guid.Empty).Distinct().ToList();
+        if (ids.Count == 0) return new Dictionary<Guid, string>();
+
+        return await userManager.Users
+            .Where(u => ids.Contains(u.Id))
+            .Select(u => new { u.Id, u.FirstName, u.LastName, u.UserName })
+            .ToDictionaryAsync(
+                u => u.Id,
+                u =>
+                {
+                    var full = $"{u.FirstName} {u.LastName}".Trim();
+                    return string.IsNullOrWhiteSpace(full) ? (u.UserName ?? "") : full;
+                },
+                ct);
+    }
+
+    private static (string Label, List<Guid> AssigneeIds, string? Status, string? UpdatedByUserName, DateTime? UpdatedAtUtc)?
+        ResolveActionPhaseSource(Contract contract, IReadOnlyDictionary<Guid, ContractWorkflowTemplate> templates)
+    {
+        var state = PostApprovalJsonHelper.DeserializeState(contract.PostApprovalJson);
+        if (state is not null && state.AssigneeUserIds.Count > 0)
+        {
+            return (
+                state.ActionDirectionLabel,
+                state.AssigneeUserIds,
+                state.Status,
+                state.UpdatedByUserName,
+                state.UpdatedAtUtc);
+        }
+
+        if (contract.WorkflowTemplateId is null
+            || !templates.TryGetValue(contract.WorkflowTemplateId.Value, out var template))
+            return null;
+
+        var assigneeIds = PostApprovalJsonHelper.ParseUserIds(template.ActionAssigneeUserIdsJson);
+        if (assigneeIds.Count == 0) return null;
+
+        var label = !string.IsNullOrWhiteSpace(template.ActionDirectionLabel)
+            ? template.ActionDirectionLabel!
+            : PostApprovalDirections.LabelFor(template.ActionDirectionKey) ?? template.ActionDirectionKey ?? "جهت اقدام";
+
+        return (label, assigneeIds, null, null, null);
+    }
+
+    private static ContractActionPhaseViewDto? BuildActionPhaseView(
+        Contract contract,
+        IReadOnlyDictionary<Guid, ContractWorkflowTemplate> templates,
+        IReadOnlyDictionary<Guid, string> userNames)
+    {
+        var source = ResolveActionPhaseSource(contract, templates);
+        if (source is null) return null;
+
+        var (label, assigneeIds, status, updatedByUserName, updatedAtUtc) = source.Value;
+        var assignees = assigneeIds
+            .Select(id => new ContractActionPhaseAssigneeDto(id, userNames.GetValueOrDefault(id, "")))
+            .ToList();
+
+        return new ContractActionPhaseViewDto(
+            label,
+            status,
+            status is null ? null : PostApprovalJsonHelper.StatusLabel(status),
+            assignees,
+            updatedByUserName,
+            updatedAtUtc);
+    }
+
     private static string NormalizeDigits(string value)
         => value
             .Replace("۰", "0").Replace("۱", "1").Replace("۲", "2").Replace("۳", "3").Replace("۴", "4")
@@ -1133,7 +1565,9 @@ public class AdminContractsController(
                 UserId = x.UserId,
                 Status = startImmediately && i == 0 ? "pending" : "waiting",
                 OnReject = x.OnReject is "continue" ? "continue" : "stop",
-                Note = x.Note
+                Note = x.Note,
+                ApprovalDeadlineDays = Math.Max(0, x.ApprovalDeadlineDays ?? 0),
+                ApprovalDeadlineHours = Math.Max(0, x.ApprovalDeadlineHours ?? 0),
             })
             .ToList();
     }
@@ -1178,8 +1612,25 @@ public class AdminContractsController(
         && !string.IsNullOrWhiteSpace(contract.StepsJson)
         && (contract.WorkflowScheduledStartAtUtc is null || contract.WorkflowScheduledStartAtUtc <= DateTime.UtcNow);
 
+    /// <summary>بایگانی دستی فقط وقتی گردش شروع نشده یا به پایان رسیده (تأیید/رد قطعی) مجاز است.</summary>
+    private static bool CanManuallyArchive(Contract contract)
+    {
+        if (contract.IsArchived) return false;
+        if (contract.WorkflowStartedAtUtc is null) return true;
+        if (ContractAmendmentHelper.IsActive(ContractAmendmentHelper.Deserialize(contract.AmendmentJson)))
+            return false;
+        return contract.Status is ContractStatus.Approved or ContractStatus.Rejected;
+    }
+
     private static List<PorslineClone.Application.Contracts.ApprovalStepDto> DeserializeSteps(string? json)
         => ContractWorkflowProcessor.DeserializeSteps(json);
+
+    private static string ToClientStatus(Contract contract)
+    {
+        if (ContractAmendmentHelper.IsActive(ContractAmendmentHelper.Deserialize(contract.AmendmentJson)))
+            return "amendment";
+        return ToClientStatus(contract.Status);
+    }
 
     private static string ToClientStatus(ContractStatus status) => status switch
     {
@@ -1187,8 +1638,87 @@ public class AdminContractsController(
         ContractStatus.InProgress => "in_progress",
         ContractStatus.Approved => "approved",
         ContractStatus.Rejected => "rejected",
+        ContractStatus.Suspended => "suspended",
+        ContractStatus.Incomplete => "incomplete",
         _ => "pending"
     };
+
+    private static bool BuildCanTerminateIncomplete(Contract contract, Guid currentUserId) =>
+        currentUserId != Guid.Empty
+        && contract.CreatedByUserId == currentUserId
+        && contract.WorkflowStartedAtUtc is not null
+        && contract.Status is ContractStatus.InProgress or ContractStatus.Suspended;
+
+    private async Task<Dictionary<Guid, string>> ResolveUserNamesByIdsAsync(
+        IEnumerable<Guid> userIds,
+        CancellationToken ct)
+    {
+        var ids = userIds.Distinct().ToList();
+        if (ids.Count == 0) return [];
+        return await userManager.Users.AsNoTracking()
+            .Where(u => ids.Contains(u.Id))
+            .Select(u => new { u.Id, u.FirstName, u.LastName, u.UserName })
+            .ToDictionaryAsync(
+                u => u.Id,
+                u =>
+                {
+                    var full = $"{u.FirstName} {u.LastName}".Trim();
+                    return string.IsNullOrWhiteSpace(full) ? (u.UserName ?? "") : full;
+                },
+                ct);
+    }
+
+    private static ContractAmendmentViewDto? BuildAmendmentView(Contract contract, Guid currentUserId)
+        => ContractAmendmentHelper.ToView(
+            ContractAmendmentHelper.Deserialize(contract.AmendmentJson),
+            currentUserId,
+            contract.CreatedByUserId);
+
+    private static bool BuildCanAmendContract(Contract contract, Guid currentUserId)
+    {
+        var state = ContractAmendmentHelper.Deserialize(contract.AmendmentJson);
+        if (!ContractAmendmentHelper.IsActive(state) || currentUserId == Guid.Empty)
+            return false;
+        return ContractAmendmentHelper.CanUserActOnAmendment(state!, currentUserId, contract.CreatedByUserId);
+    }
+
+    private static bool BuildCanAmendContractDocument(Contract contract, Guid currentUserId)
+    {
+        var state = ContractAmendmentHelper.Deserialize(contract.AmendmentJson);
+        if (!ContractAmendmentHelper.IsActive(state) || currentUserId == Guid.Empty)
+            return false;
+        if (contract.ContractDocumentTemplateId is null || contract.ContractDocumentTemplateId == Guid.Empty)
+            return false;
+        return contract.CreatedByUserId == currentUserId;
+    }
+
+    private static Dictionary<string, string>? ParseTemplateFieldValues(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try
+        {
+            return ContractTemplateFieldValuesParser.Parse(json);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task<Dictionary<Guid, bool>> ResolveCurrentVersionIsAmendedAsync(
+        IReadOnlyList<Contract> contracts,
+        CancellationToken ct)
+    {
+        if (contracts.Count == 0) return [];
+        var ids = contracts.Select(c => c.Id).ToList();
+        var amended = await db.ContractVersions.AsNoTracking()
+            .Where(v => ids.Contains(v.ContractId) && v.IsAmendedVersion)
+            .Select(v => new { v.ContractId, v.VersionNumber })
+            .ToListAsync(ct);
+        return contracts.ToDictionary(
+            c => c.Id,
+            c => amended.Any(v => v.ContractId == c.Id && v.VersionNumber == c.CurrentVersionNumber));
+    }
 
     private static bool ParseBool(string? value)
     {
@@ -1219,7 +1749,7 @@ public class CreateContractFormRequest
     public IFormFile? File { get; set; }
 }
 
-public record ContractActionRequest(string? Comment);
+public record ContractActionRequest(string? Comment, string? RejectionType);
 
 public record AssignWorkflowRequest(string WorkflowTemplateId, string? StartMode, string? ScheduledStartAtUtc);
 
@@ -1229,7 +1759,8 @@ public record ContractVersionDto(
     string FileName,
     DateTime CreatedAtUtc,
     string CreatedByName,
-    string? ChangeNote);
+    string? ChangeNote,
+    bool IsAmendedVersion);
 
 public record ContractListItemDto(
     Guid Id,
@@ -1266,7 +1797,18 @@ public record ContractListItemDto(
     bool CanUnassignWorkflow,
     Guid? ContractDocumentTemplateId,
     Guid? ContractDocumentTemplateVersionId,
-    List<PorslineClone.Application.Contracts.ApprovalStepDto> Steps);
+    List<PorslineClone.Application.Contracts.ApprovalStepDto> Steps,
+    ContractAmendmentViewDto? Amendment,
+    IReadOnlyList<WorkflowEventViewDto> WorkflowEvents,
+    bool CurrentVersionIsAmended,
+    ContractActionPhaseViewDto? ActionPhase,
+    bool CanAmendContract,
+    bool CanAmendContractDocument,
+    DateTime? WorkflowValidityEndsAtUtc,
+    Guid? SuspendedPendingUserId,
+    string? SuspendedPendingUserName,
+    string? WorkflowIncompleteNote,
+    DateTime? WorkflowIncompleteTerminatedAtUtc);
 
 public record ContractDetailDto(
     Guid Id,
@@ -1303,4 +1845,19 @@ public record ContractDetailDto(
     bool CanUnassignWorkflow,
     Guid? ContractDocumentTemplateId,
     Guid? ContractDocumentTemplateVersionId,
-    List<PorslineClone.Application.Contracts.ApprovalStepDto> Steps);
+    List<PorslineClone.Application.Contracts.ApprovalStepDto> Steps,
+    ContractAmendmentViewDto? Amendment,
+    IReadOnlyList<WorkflowEventViewDto> WorkflowEvents,
+    bool CurrentVersionIsAmended,
+    ContractActionPhaseViewDto? ActionPhase,
+    bool CanAmendContract,
+    bool CanAmendContractDocument,
+    Dictionary<string, string>? TemplateFieldValues,
+    DateTime? WorkflowValidityEndsAtUtc,
+    Guid? SuspendedPendingUserId,
+    string? SuspendedPendingUserName,
+    string? WorkflowIncompleteNote,
+    DateTime? WorkflowIncompleteTerminatedAtUtc,
+    bool CanTerminateIncomplete);
+
+public record TerminateWorkflowIncompleteRequest(string? Note);

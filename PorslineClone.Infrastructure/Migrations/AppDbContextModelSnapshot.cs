@@ -316,6 +316,9 @@ namespace PorslineClone.Infrastructure.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<string>("AmendmentJson")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<Guid?>("ContractDocumentTemplateId")
                         .HasColumnType("uniqueidentifier");
 
@@ -392,6 +395,9 @@ namespace PorslineClone.Infrastructure.Migrations
                         .HasMaxLength(11)
                         .HasColumnType("nvarchar(11)");
 
+                    b.Property<string>("PostApprovalJson")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<int>("Status")
                         .HasColumnType("int");
 
@@ -404,6 +410,9 @@ namespace PorslineClone.Infrastructure.Migrations
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");
 
+                    b.Property<Guid?>("SuspendedPendingUserId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<string>("TemplateFieldValuesJson")
                         .HasMaxLength(20000)
                         .HasColumnType("nvarchar(max)");
@@ -412,6 +421,15 @@ namespace PorslineClone.Infrastructure.Migrations
                         .IsRequired()
                         .HasMaxLength(300)
                         .HasColumnType("nvarchar(300)");
+
+                    b.Property<string>("WorkflowEventsJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("WorkflowIncompleteNote")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("WorkflowIncompleteTerminatedAtUtc")
+                        .HasColumnType("datetime2");
 
                     b.Property<string>("WorkflowName")
                         .HasMaxLength(200)
@@ -425,6 +443,12 @@ namespace PorslineClone.Infrastructure.Migrations
 
                     b.Property<Guid?>("WorkflowTemplateId")
                         .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime?>("WorkflowValidityEndsAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("WorkflowValidityReminderSentAtUtc")
+                        .HasColumnType("datetime2");
 
                     b.HasKey("Id");
 
@@ -445,9 +469,50 @@ namespace PorslineClone.Infrastructure.Migrations
 
                     b.HasIndex("WorkflowTemplateId");
 
+                    b.HasIndex("CreatedByUserId", "Status");
+
                     b.HasIndex("Status", "CurrentStepOrder");
 
+                    b.HasIndex("Status", "IsArchived")
+                        .HasFilter("[Status] = 3 AND [IsArchived] = 0 AND [PostApprovalJson] IS NOT NULL");
+
                     b.ToTable("Contracts");
+                });
+
+            modelBuilder.Entity("PorslineClone.Domain.Entities.ContractActionLink", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("AssigneeUserId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Code")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<Guid>("ContractId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime>("ExpiresAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("bit");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Code")
+                        .IsUnique();
+
+                    b.HasIndex("ContractId", "AssigneeUserId", "IsActive");
+
+                    b.ToTable("ContractActionLinks");
                 });
 
             modelBuilder.Entity("PorslineClone.Domain.Entities.ContractApprovalLink", b =>
@@ -475,6 +540,9 @@ namespace PorslineClone.Infrastructure.Migrations
 
                     b.Property<bool>("IsActive")
                         .HasColumnType("bit");
+
+                    b.Property<DateTime?>("ReminderSmsSentAtUtc")
+                        .HasColumnType("datetime2");
 
                     b.HasKey("Id");
 
@@ -734,6 +802,9 @@ namespace PorslineClone.Infrastructure.Migrations
                         .HasMaxLength(500)
                         .HasColumnType("nvarchar(500)");
 
+                    b.Property<bool>("IsAmendedVersion")
+                        .HasColumnType("bit");
+
                     b.Property<string>("PdfFilePath")
                         .HasMaxLength(500)
                         .HasColumnType("nvarchar(500)");
@@ -757,6 +828,21 @@ namespace PorslineClone.Infrastructure.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<string>("ActionAssigneeUserIdsJson")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ActionDirectionKey")
+                        .HasMaxLength(80)
+                        .HasColumnType("nvarchar(80)");
+
+                    b.Property<string>("ActionDirectionLabel")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("CanvasLayoutJson")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("datetime2");
 
@@ -775,6 +861,12 @@ namespace PorslineClone.Infrastructure.Migrations
                         .IsRequired()
                         .HasMaxLength(20000)
                         .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("WorkflowValidityDays")
+                        .HasColumnType("int");
+
+                    b.Property<int>("WorkflowValidityHours")
+                        .HasColumnType("int");
 
                     b.HasKey("Id");
 
@@ -844,7 +936,8 @@ namespace PorslineClone.Infrastructure.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("WorkflowTemplateId");
+                    b.HasIndex("WorkflowTemplateId")
+                        .HasFilter("[WorkflowTemplateId] IS NOT NULL");
 
                     b.HasIndex("UserId", "IsDeleted");
 
@@ -1033,7 +1126,8 @@ namespace PorslineClone.Infrastructure.Migrations
 
                     b.HasIndex("ResponderId");
 
-                    b.HasIndex("WorkflowTemplateId");
+                    b.HasIndex("WorkflowTemplateId")
+                        .HasFilter("[WorkflowTemplateId] IS NOT NULL");
 
                     b.HasIndex("FormId", "SubmittedAtUtc");
 
@@ -1067,6 +1161,9 @@ namespace PorslineClone.Infrastructure.Migrations
 
                     b.Property<bool>("IsActive")
                         .HasColumnType("bit");
+
+                    b.Property<DateTime?>("ReminderSmsSentAtUtc")
+                        .HasColumnType("datetime2");
 
                     b.HasKey("Id");
 
@@ -1107,6 +1204,18 @@ namespace PorslineClone.Infrastructure.Migrations
                     b.Property<string>("ActionAssigneeUserIdsJson")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ActionDirectionKey")
+                        .HasMaxLength(80)
+                        .HasColumnType("nvarchar(80)");
+
+                    b.Property<string>("ActionDirectionLabel")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("CanvasLayoutJson")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
 
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("datetime2");
@@ -1171,6 +1280,8 @@ namespace PorslineClone.Infrastructure.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("UserId", "IsRead", "CreatedAtUtc");
+
+                    b.HasIndex("UserId", "IsArchived", "IsRead", "CreatedAtUtc");
 
                     b.ToTable("InboxMessages");
                 });
@@ -1897,7 +2008,25 @@ namespace PorslineClone.Infrastructure.Migrations
                     b.Property<bool>("ApprovalReferralSmsEnabled")
                         .HasColumnType("bit");
 
+                    b.Property<int>("ApprovalReminderDelayDays")
+                        .HasColumnType("int");
+
+                    b.Property<int>("ApprovalReminderDelayHours")
+                        .HasColumnType("int");
+
+                    b.Property<bool>("ApprovalReminderSmsEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("ContractAmendmentAssigneeSmsEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("ContractAmendmentReturnToRejecterSmsEnabled")
+                        .HasColumnType("bit");
+
                     b.Property<bool>("ContractCreatorApprovalNotifySmsEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("ContractRejectionNotifySmsEnabled")
                         .HasColumnType("bit");
 
                     b.Property<bool>("OtpEnabled")
@@ -1925,6 +2054,15 @@ namespace PorslineClone.Infrastructure.Migrations
                         .HasColumnType("bit")
                         .HasDefaultValue(true);
 
+                    b.Property<bool>("WorkflowValidityReminderSmsEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<int>("WorkflowValiditySuspensionDelayDays")
+                        .HasColumnType("int");
+
+                    b.Property<int>("WorkflowValiditySuspensionDelayHours")
+                        .HasColumnType("int");
+
                     b.HasKey("Id");
 
                     b.ToTable("SmsSettings");
@@ -1934,12 +2072,21 @@ namespace PorslineClone.Infrastructure.Migrations
                         {
                             Id = 1,
                             ApprovalReferralSmsEnabled = true,
+                            ApprovalReminderDelayDays = 0,
+                            ApprovalReminderDelayHours = 24,
+                            ApprovalReminderSmsEnabled = false,
+                            ContractAmendmentAssigneeSmsEnabled = true,
+                            ContractAmendmentReturnToRejecterSmsEnabled = true,
                             ContractCreatorApprovalNotifySmsEnabled = true,
+                            ContractRejectionNotifySmsEnabled = true,
                             OtpEnabled = true,
                             PublicFormRequireOtp = false,
                             SurveyCompletedNotificationEnabled = true,
                             SurveySendEnabled = true,
-                            UserCreateSmsEnabled = true
+                            UserCreateSmsEnabled = true,
+                            WorkflowValidityReminderSmsEnabled = false,
+                            WorkflowValiditySuspensionDelayDays = 0,
+                            WorkflowValiditySuspensionDelayHours = 24
                         });
                 });
 
@@ -2115,6 +2262,17 @@ namespace PorslineClone.Infrastructure.Migrations
                     b.Navigation("ContractType");
 
                     b.Navigation("WorkflowTemplate");
+                });
+
+            modelBuilder.Entity("PorslineClone.Domain.Entities.ContractActionLink", b =>
+                {
+                    b.HasOne("PorslineClone.Domain.Entities.Contract", "Contract")
+                        .WithMany()
+                        .HasForeignKey("ContractId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Contract");
                 });
 
             modelBuilder.Entity("PorslineClone.Domain.Entities.ContractApprovalLink", b =>

@@ -5,7 +5,11 @@ public enum ContractStatus
     Pending = 1,
     InProgress = 2,
     Approved = 3,
-    Rejected = 4
+    Rejected = 4,
+    /// <summary>گردش به‌دلیل عدم امضا پس از اتمام اعتبار و مهلت تعلیق متوقف شده</summary>
+    Suspended = 5,
+    /// <summary>اتمام گردش به‌صورت ناتمام توسط ایجادکننده</summary>
+    Incomplete = 6
 }
 
 /// <summary>قالب گردش تأیید قرارداد (با نام یکتا)</summary>
@@ -14,6 +18,17 @@ public class ContractWorkflowTemplate
     public Guid Id { get; set; }
     public string Name { get; set; } = "";
     public string StepsJson { get; set; } = "[]";
+    /// <summary>کلید جهت اقدام پس از تأیید کامل</summary>
+    public string? ActionDirectionKey { get; set; }
+    public string? ActionDirectionLabel { get; set; }
+    /// <summary>JSON آرایه Guid کاربران اقدام‌کننده</summary>
+    public string ActionAssigneeUserIdsJson { get; set; } = "[]";
+    /// <summary>موقعیت نودهای شروع و جهت اقدام روی بوم — JSON</summary>
+    public string? CanvasLayoutJson { get; set; }
+    /// <summary>مدت اعتبار کل گردش از زمان شروع (روز) — ۰ یعنی بدون سقف اعتبار</summary>
+    public int WorkflowValidityDays { get; set; }
+    /// <summary>مدت اعتبار کل گردش از زمان شروع (ساعت)</summary>
+    public int WorkflowValidityHours { get; set; }
     public bool IsActive { get; set; } = true;
     public Guid? CreatedByUserId { get; set; }
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
@@ -54,6 +69,8 @@ public class ContractVersion
     public string CreatedByName { get; set; } = "";
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
     public string? ChangeNote { get; set; }
+    /// <summary>نسخه آپلودشده در فاز اصلاحیه ایجادکننده</summary>
+    public bool IsAmendedVersion { get; set; }
 }
 
 public class Contract
@@ -81,6 +98,13 @@ public class Contract
     public DateTime? WorkflowStartedAtUtc { get; set; }
     /// <summary>زمان برنامه‌ریزی‌شده برای شروع خودکار گردش (UTC)</summary>
     public DateTime? WorkflowScheduledStartAtUtc { get; set; }
+    /// <summary>پایان اعتبار کل گردش (UTC) — از قالب هنگام شروع</summary>
+    public DateTime? WorkflowValidityEndsAtUtc { get; set; }
+    public DateTime? WorkflowValidityReminderSentAtUtc { get; set; }
+    /// <summary>تأییدکننده‌ای که در زمان تعلیق در نوبت بود</summary>
+    public Guid? SuspendedPendingUserId { get; set; }
+    public DateTime? WorkflowIncompleteTerminatedAtUtc { get; set; }
+    public string? WorkflowIncompleteNote { get; set; }
     /// <summary>نام شخص موضوع قرارداد</summary>
     public string SubjectPersonName { get; set; } = "";
     public DateTime DateFromUtc { get; set; }
@@ -101,6 +125,25 @@ public class Contract
     public int CurrentStepOrder { get; set; } = 1;
     public ContractStatus Status { get; set; } = ContractStatus.Pending;
     public string? StepsJson { get; set; }
+    /// <summary>اصلاحیه پس از رد (JSON — ContractAmendmentStateDto)</summary>
+    public string? AmendmentJson { get; set; }
+    /// <summary>تاریخچه رویدادهای گردش (برگشت اصلاحیه، رد قطعی و …)</summary>
+    public string? WorkflowEventsJson { get; set; }
+    /// <summary>وضعیت و یادداشت فاز اقدام پس از تأیید (JSON)</summary>
+    public string? PostApprovalJson { get; set; }
+}
+
+/// <summary>لینک سریع اقدام پس از تأیید کامل قرارداد</summary>
+public class ContractActionLink
+{
+    public Guid Id { get; set; }
+    public Guid ContractId { get; set; }
+    public Contract Contract { get; set; } = null!;
+    public Guid AssigneeUserId { get; set; }
+    public string Code { get; set; } = "";
+    public bool IsActive { get; set; } = true;
+    public DateTime ExpiresAtUtc { get; set; }
+    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
 }
 
 /// <summary>لینک یک‌بار مصرف تأیید قرارداد بدون OTP (موبایل)</summary>
@@ -114,4 +157,5 @@ public class ContractApprovalLink
     public bool IsActive { get; set; } = true;
     public DateTime ExpiresAtUtc { get; set; }
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+    public DateTime? ReminderSmsSentAtUtc { get; set; }
 }

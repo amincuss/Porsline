@@ -37,6 +37,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<Contract> Contracts => Set<Contract>();
     public DbSet<ContractVersion> ContractVersions => Set<ContractVersion>();
     public DbSet<ContractApprovalLink> ContractApprovalLinks => Set<ContractApprovalLink>();
+    public DbSet<ContractActionLink> ContractActionLinks => Set<ContractActionLink>();
     public DbSet<ContractDocumentTemplate> ContractDocumentTemplates => Set<ContractDocumentTemplate>();
     public DbSet<ContractDocumentTemplateVersion> ContractDocumentTemplateVersions => Set<ContractDocumentTemplateVersion>();
     public DbSet<ContractDocumentTemplateField> ContractDocumentTemplateFields => Set<ContractDocumentTemplateField>();
@@ -189,6 +190,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.Title).HasMaxLength(200).IsRequired();
             entity.Property(x => x.Body).HasMaxLength(2000).IsRequired();
             entity.HasIndex(x => new { x.UserId, x.IsRead, x.CreatedAtUtc });
+            entity.HasIndex(x => new { x.UserId, x.IsArchived, x.IsRead, x.CreatedAtUtc });
             entity.HasOne<AppUser>()
                 .WithMany()
                 .HasForeignKey(x => x.UserId)
@@ -267,12 +269,18 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
                 .HasForeignKey(x => x.WorkflowTemplateId)
                 .OnDelete(DeleteBehavior.SetNull);
             entity.HasIndex(x => new { x.UserId, x.IsDeleted });
+            entity.HasIndex(x => x.WorkflowTemplateId)
+                .HasFilter("[WorkflowTemplateId] IS NOT NULL");
         });
 
         builder.Entity<FormWorkflowTemplate>(entity =>
         {
             entity.Property(x => x.Name).HasMaxLength(200).IsRequired();
             entity.Property(x => x.StepsJson).HasMaxLength(20000);
+            entity.Property(x => x.ActionDirectionKey).HasMaxLength(80);
+            entity.Property(x => x.ActionDirectionLabel).HasMaxLength(200);
+            entity.Property(x => x.ActionAssigneeUserIdsJson).HasColumnType("nvarchar(max)");
+            entity.Property(x => x.CanvasLayoutJson).HasMaxLength(500);
             entity.HasIndex(x => x.Name).IsUnique();
             entity.HasIndex(x => new { x.IsActive, x.CreatedAtUtc });
         });
@@ -304,6 +312,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.FieldsJson).HasMaxLength(20000);
             entity.Property(x => x.StepsJson).HasMaxLength(20000);
             entity.Property(x => x.WorkflowName).HasMaxLength(200);
+            entity.Property(x => x.PostApprovalJson).HasColumnType("nvarchar(max)");
             entity.Property(x => x.Status).HasConversion<int>();
             entity.HasOne(x => x.Form)
                 .WithMany(x => x.Submissions)
@@ -314,6 +323,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
                 .HasForeignKey(x => x.WorkflowTemplateId)
                 .OnDelete(DeleteBehavior.SetNull);
             entity.HasIndex(x => new { x.FormId, x.SubmittedAtUtc });
+            entity.HasIndex(x => x.WorkflowTemplateId)
+                .HasFilter("[WorkflowTemplateId] IS NOT NULL");
             entity.HasIndex(x => new { x.Status, x.CurrentStepOrder });
         });
 
@@ -364,6 +375,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         {
             entity.Property(x => x.Name).HasMaxLength(200).IsRequired();
             entity.Property(x => x.StepsJson).HasMaxLength(20000);
+            entity.Property(x => x.ActionDirectionKey).HasMaxLength(80);
+            entity.Property(x => x.ActionDirectionLabel).HasMaxLength(200);
+            entity.Property(x => x.ActionAssigneeUserIdsJson).HasColumnType("nvarchar(max)");
             entity.HasIndex(x => x.Name).IsUnique();
             entity.HasIndex(x => new { x.IsActive, x.CreatedAtUtc });
         });
@@ -384,6 +398,17 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         });
 
         builder.Entity<ContractApprovalLink>(entity =>
+        {
+            entity.Property(x => x.Code).HasMaxLength(32).IsRequired();
+            entity.HasIndex(x => x.Code).IsUnique();
+            entity.HasIndex(x => new { x.ContractId, x.AssigneeUserId, x.IsActive });
+            entity.HasOne(x => x.Contract)
+                .WithMany()
+                .HasForeignKey(x => x.ContractId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ContractActionLink>(entity =>
         {
             entity.Property(x => x.Code).HasMaxLength(32).IsRequired();
             entity.HasIndex(x => x.Code).IsUnique();
@@ -471,6 +496,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.CreatedByName).HasMaxLength(200);
             entity.Property(x => x.WorkflowName).HasMaxLength(200);
             entity.Property(x => x.StepsJson).HasMaxLength(20000);
+            entity.Property(x => x.PostApprovalJson).HasColumnType("nvarchar(max)");
             entity.Property(x => x.TemplateFieldValuesJson).HasMaxLength(20000);
             entity.Property(x => x.Status).HasConversion<int>();
             entity.HasIndex(x => x.CreatedByUserId);
@@ -493,6 +519,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasIndex(x => new { x.Status, x.CurrentStepOrder });
             entity.HasIndex(x => x.IsArchived);
             entity.HasIndex(x => x.Title);
+            entity.HasIndex(x => new { x.Status, x.IsArchived })
+                .HasFilter("[Status] = 3 AND [IsArchived] = 0 AND [PostApprovalJson] IS NOT NULL");
+            entity.HasIndex(x => new { x.CreatedByUserId, x.Status });
         });
 
         // ── Static seed data (captured in migrations via HasData) ────────────────

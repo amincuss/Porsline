@@ -337,6 +337,7 @@ public static class DbSeeder
             "forms.rules.read","forms.rules.update",
             "forms.access.read","forms.access.read.all","forms.access.update",
             "approvals.read","approvals.update",
+            "actions.read","actions.read.all","actions.update",
             "responders.read","responders.read.all","responders.add","responders.update","responders.send",
             "usergroups.read","usergroups.read.all","usergroups.add","usergroups.update",
             "contracts.read","contracts.read.all","contracts.add","contracts.update","contracts.settings.read","contracts.settings.update"
@@ -455,9 +456,10 @@ public static class DbSeeder
             new MenuItem { Key = "responders.send", Title = "ارسال فرم", Icon = "Send", IconColor = "#4F46E5", Route = "/admin/responders/send", Order = 4, ParentId = respondersMenu.Id },
             new MenuItem { Key = "responders.userforms", Title = "فرم کاربران", Icon = "FileText", IconColor = "#0EA5E9", Route = "/admin/responders/user-forms", Order = 5, ParentId = respondersMenu.Id },
             new MenuItem { Key = "users.groups", Title = "گروه‌بندی", Icon = "Users", IconColor = "#2563EB", Route = "/admin/users/groups", Order = 3, ParentId = usersMenuForChild.Id },
-            new MenuItem { Key = "approvals", Title = "تأییدیه‌ها", Icon = "CheckCircle2", IconColor = "#10B981", Route = "/admin/approvals", Order = 5, ParentId = null },
-            new MenuItem { Key = "profile", Title = "پروفایل", Icon = "User", IconColor = "#0EA5E9", Route = "/admin/profile", Order = 6, ParentId = null },
-            new MenuItem { Key = "messages", Title = "صندوق پیام", Icon = "Mail", IconColor = "#A855F7", Route = "/admin/messages", Order = 7, ParentId = null },
+            new MenuItem { Key = "approvals", Title = "تأییدیه‌ها", Icon = "CheckCircle2", IconColor = "#10B981", Route = "/admin/approvals", Order = 4, ParentId = null },
+            new MenuItem { Key = "actions", Title = "اقدامات", Icon = "ClipboardList", IconColor = "#D97706", Route = null, Order = 7, ParentId = null },
+            new MenuItem { Key = "profile", Title = "پروفایل", Icon = "User", IconColor = "#0EA5E9", Route = "/admin/profile", Order = 5, ParentId = null },
+            new MenuItem { Key = "messages", Title = "صندوق پیام", Icon = "Mail", IconColor = "#A855F7", Route = "/admin/messages", Order = 6, ParentId = null },
         };
         foreach (var rm in extraMenus)
         {
@@ -466,58 +468,23 @@ public static class DbSeeder
         }
 
         var actionsMenu = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "actions", cancellationToken);
-        if (actionsMenu is null)
+        if (actionsMenu is not null)
         {
-            actionsMenu = new MenuItem
+            if (!await db.MenuItems.AnyAsync(x => x.Key == "actions.list", cancellationToken))
             {
-                Id = Guid.NewGuid(),
-                Key = "actions",
-                Title = "اقدامات",
-                Icon = "ClipboardList",
-                IconColor = "#0284C7",
-                Route = null,
-                Order = 4,
-            };
-            db.MenuItems.Add(actionsMenu);
-            await db.SaveChangesAsync(cancellationToken);
+                db.MenuItems.Add(new MenuItem
+                {
+                    Id = Guid.NewGuid(),
+                    Key = "actions.list",
+                    Title = "اقدامات",
+                    Icon = "ClipboardList",
+                    IconColor = "#D97706",
+                    Route = "/admin/actions",
+                    Order = 1,
+                    ParentId = actionsMenu.Id
+                });
+            }
         }
-        else
-        {
-            actionsMenu.Title = "اقدامات";
-            actionsMenu.Icon = "ClipboardList";
-            actionsMenu.IconColor = "#0284C7";
-            actionsMenu.Route = null;
-            actionsMenu.Order = 4;
-        }
-
-        actionsMenu = await db.MenuItems.FirstAsync(x => x.Key == "actions", cancellationToken);
-        var actionsChild = new MenuItem
-        {
-            Key = "actions.forms",
-            Title = "اقدامات فرم",
-            Icon = "ListChecks",
-            IconColor = "#0EA5E9",
-            Route = "/admin/form-actions",
-            Order = 1,
-            ParentId = actionsMenu.Id,
-        };
-        if (!await db.MenuItems.AnyAsync(x => x.Key == actionsChild.Key, cancellationToken))
-            db.MenuItems.Add(new MenuItem { Id = Guid.NewGuid(), Key = actionsChild.Key, Title = actionsChild.Title, Icon = actionsChild.Icon, IconColor = actionsChild.IconColor, Route = actionsChild.Route, Order = actionsChild.Order, ParentId = actionsChild.ParentId });
-        else
-        {
-            var existingAct = await db.MenuItems.FirstAsync(x => x.Key == actionsChild.Key, cancellationToken);
-            existingAct.Title = actionsChild.Title;
-            existingAct.Route = actionsChild.Route;
-            existingAct.ParentId = actionsMenu.Id;
-            existingAct.Order = 1;
-        }
-
-        var approvalsMenuRow = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "approvals", cancellationToken);
-        if (approvalsMenuRow is not null) approvalsMenuRow.Order = 5;
-        var profileMenuRow = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "profile", cancellationToken);
-        if (profileMenuRow is not null) profileMenuRow.Order = 6;
-        var messagesMenuRow = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "messages", cancellationToken);
-        if (messagesMenuRow is not null) messagesMenuRow.Order = 7;
 
         var contractsMenu = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "contracts", cancellationToken);
         if (contractsMenu is null)
@@ -597,7 +564,7 @@ public static class DbSeeder
         var menus = await db.MenuItems.ToDictionaryAsync(x => x.Key, x => x.Id, cancellationToken);
 
         var adminPerms = permissionNames;
-        var expertPerms = new[] { "menus.view", "profile.update", "messages.read", "forms.read", "forms.add", "forms.update", "approvals.read", "approvals.update", "responders.send", "contracts.read", "contracts.add", "contracts.update" };
+        var expertPerms = new[] { "menus.view", "profile.update", "messages.read", "forms.read", "forms.add", "forms.update", "approvals.read", "approvals.update", "actions.read", "actions.update", "responders.send", "contracts.read", "contracts.add", "contracts.update" };
         foreach (var p in adminPerms)
             if (perms.TryGetValue(p, out var pid) && !await db.RolePermissions.AnyAsync(x => x.RoleId == admin.Id && x.PermissionId == pid, cancellationToken))
                 db.RolePermissions.Add(new RolePermission { RoleId = admin.Id, PermissionId = pid });
@@ -605,8 +572,8 @@ public static class DbSeeder
             if (perms.TryGetValue(p, out var pid) && !await db.RolePermissions.AnyAsync(x => x.RoleId == expert.Id && x.PermissionId == pid, cancellationToken))
                 db.RolePermissions.Add(new RolePermission { RoleId = expert.Id, PermissionId = pid });
 
-        var adminMenuKeys = new[] { "dashboard", "forms", "forms.list", "forms.rules", "forms.access", "forms.workflows.list", "forms.workflows", "contracts", "contracts.list", "contracts.workflows.list", "contracts.workflows", "contracts.templates", "contracts.settings", "users", "users.list", "users.create", "users.groups", "responders", "responders.list", "responders.create", "responders.groups", "responders.send", "responders.userforms", "approvals", "settings", "settings.site", "settings.sms", "settings.security", "settings.access", "settings.responders", "settings.users", "profile", "messages" };
-        var expertMenuKeys = new[] { "dashboard", "forms", "forms.list", "forms.rules", "forms.workflows.list", "forms.workflows", "contracts", "contracts.list", "users", "users.list", "responders", "responders.list", "responders.send", "responders.userforms", "approvals", "profile", "messages" };
+        var adminMenuKeys = new[] { "dashboard", "forms", "forms.list", "forms.rules", "forms.access", "forms.workflows.list", "forms.workflows", "contracts", "contracts.list", "contracts.workflows.list", "contracts.workflows", "contracts.templates", "contracts.settings", "users", "users.list", "users.create", "users.groups", "responders", "responders.list", "responders.create", "responders.groups", "responders.send", "responders.userforms", "approvals", "actions", "actions.list", "settings", "settings.site", "settings.sms", "settings.security", "settings.access", "settings.responders", "settings.users", "profile", "messages" };
+        var expertMenuKeys = new[] { "dashboard", "forms", "forms.list", "forms.rules", "forms.workflows.list", "forms.workflows", "contracts", "contracts.list", "users", "users.list", "responders", "responders.list", "responders.send", "responders.userforms", "approvals", "actions", "actions.list", "profile", "messages" };
         foreach (var k in adminMenuKeys)
             if (menus.TryGetValue(k, out var mid) && !await db.RoleMenus.AnyAsync(x => x.RoleId == admin.Id && x.MenuId == mid, cancellationToken))
                 db.RoleMenus.Add(new RoleMenu { RoleId = admin.Id, MenuId = mid });

@@ -23,6 +23,7 @@ public class ContractWorkflowProcessor(
     UserManager<AppUser> userManager,
     ContractApprovalStampService approvalStamp,
     ContractApprovalLinkService approvalLinks,
+    ContractPostApprovalService postApproval,
     ISmsSender smsSender,
     IInboxMessageService inbox,
     IFrontendUrlResolver frontendUrls,
@@ -33,15 +34,32 @@ public class ContractWorkflowProcessor(
         Guid assigneeUserId,
         bool approve,
         string? comment,
+        string? rejectionType = null,
         CancellationToken ct = default)
     {
         var contract = await db.Contracts.FirstOrDefaultAsync(x => x.Id == contractId, ct);
         if (contract is null) return WorkflowActionResult.Fail("قرارداد یافت نشد", 404);
+        if (contract.IsArchived && contract.Status == ContractStatus.Rejected)
+            return WorkflowActionResult.Fail("گردش با رد قطعی پایان یافته و پرونده بایگانی شده است");
+        if (contract.IsArchived)
+            return WorkflowActionResult.Fail("قرارداد بایگانی شده است");
+        if (contract.Status == ContractStatus.Rejected)
+            return WorkflowActionResult.Fail("گردش با رد قطعی پایان یافته است");
+        if (contract.Status == ContractStatus.Suspended)
+            return WorkflowActionResult.Fail("گردش معلق شده است. ایجادکننده می‌تواند «اتمام گردش ناتمام» را ثبت کند", 403);
+        if (contract.Status == ContractStatus.Incomplete)
+            return WorkflowActionResult.Fail("گردش به‌صورت ناتمام پایان یافته است", 403);
+
+        var activeAmendment = ContractAmendmentHelper.Deserialize(contract.AmendmentJson);
+        if (ContractAmendmentHelper.IsActive(activeAmendment))
+            return WorkflowActionResult.Fail("قرارداد در مرحله اصلاحیه است. ابتدا وضعیت اصلاحیه را به‌روزرسانی کنید.");
 
         var steps = DeserializeSteps(contract.StepsJson);
         var current = steps.FirstOrDefault(s => s.Order == contract.CurrentStepOrder && s.Status == "pending");
         if (current is null) return WorkflowActionResult.Fail("مرحله فعالی برای این قرارداد وجود ندارد");
         if (current.UserId != assigneeUserId) return WorkflowActionResult.Fail("این مرحله به شما ارجاع نشده است", 403);
+
+        var rejType = ContractWorkflowRejectionTypes.Normalize(rejectionType);
 
         var currentUser = await db.Users
             .Include(u => u.UserPosition)
@@ -67,6 +85,16 @@ public class ContractWorkflowProcessor(
             current.Status = "approved";
             current.Comment = comment;
             current.ActionAt = DateTime.UtcNow;
+            AppendWorkflowEvent(contract, new WorkflowEventDto
+            {
+                Kind = "approved",
+                StepOrder = current.Order,
+                ActorUserId = assigneeUserId,
+                ActorName = approverName,
+                Comment = comment,
+                Cycle = current.ReviewCycle,
+                AtUtc = current.ActionAt.Value
+            });
             await RebuildSignedDocumentAsync(contract, steps, ct);
 
             var next = steps.Where(s => s.Order > current.Order).OrderBy(s => s.Order).FirstOrDefault();
@@ -74,6 +102,7 @@ public class ContractWorkflowProcessor(
             {
                 contract.Status = ContractStatus.Approved;
                 await SendPartyApprovedSmsAsync(contract, ct);
+                await postApproval.TryStartPostApprovalAsync(contract, ct);
             }
             else
             {
@@ -89,13 +118,29 @@ public class ContractWorkflowProcessor(
         {
             current.Status = "rejected";
             current.Comment = comment;
+            current.RejectionType = rejType;
             current.ActionAt = DateTime.UtcNow;
 
             if (current.OnReject == "continue")
             {
                 var next = steps.Where(s => s.Order > current.Order).OrderBy(s => s.Order).FirstOrDefault();
                 if (next is null)
+                {
                     contract.Status = ContractStatus.Rejected;
+                    contract.IsArchived = true;
+                    AppendWorkflowEvent(contract, new WorkflowEventDto
+                    {
+                        Kind = "full_rejected",
+                        StepOrder = current.Order,
+                        ActorUserId = assigneeUserId,
+                        ActorName = approverName,
+                        Comment = comment,
+                        RejectionType = rejType,
+                        Cycle = current.ReviewCycle,
+                        AtUtc = current.ActionAt.Value
+                    });
+                    await SendFullRejectionResultSmsAsync(contract, steps, current, comment, ct);
+                }
                 else
                 {
                     next.Status = "pending";
@@ -104,17 +149,397 @@ public class ContractWorkflowProcessor(
                     await SendAssigneeSmsAsync(contract, next.UserId, approverName, current.UserName, ct);
                 }
             }
+            else if (rejType == "full")
+            {
+                await HandleFullRejectTerminalAsync(
+                    contract, steps, current, assigneeUserId, approverName, comment, ct);
+            }
             else
             {
-                foreach (var later in steps.Where(s => s.Order > current.Order && s.Status == "waiting"))
-                    later.Status = "skipped";
-                contract.Status = ContractStatus.Rejected;
+                await HandleRejectStopAsync(contract, steps, current, assigneeUserId, rejType, approverName, ct);
             }
         }
 
         contract.StepsJson = JsonSerializer.Serialize(steps);
         await db.SaveChangesAsync(ct);
         return WorkflowActionResult.Ok(approve ? "تأیید شد" : "رد شد");
+    }
+
+    public async Task<WorkflowActionResult> UpdateAmendmentAsync(
+        Guid contractId,
+        Guid userId,
+        string amendmentStatus,
+        string? note,
+        CancellationToken ct = default)
+    {
+        var contract = await db.Contracts.FirstOrDefaultAsync(x => x.Id == contractId, ct);
+        if (contract is null) return WorkflowActionResult.Fail("قرارداد یافت نشد", 404);
+
+        var state = ContractAmendmentHelper.Deserialize(contract.AmendmentJson);
+        if (!ContractAmendmentHelper.IsActive(state))
+            return WorkflowActionResult.Fail("اصلاحیه فعالی برای این قرارداد وجود ندارد");
+
+        if (!ContractAmendmentHelper.CanUserActOnAmendment(state!, userId, contract.CreatedByUserId))
+            return WorkflowActionResult.Fail("به‌روزرسانی اصلاحیه فقط توسط مسئول اصلاح مجاز است", 403);
+
+        var normalized = amendmentStatus switch
+        {
+            "in_progress" => "in_progress",
+            "done" => "done",
+            _ => "waiting"
+        };
+
+        state.AmendmentStatus = normalized;
+        if (!string.IsNullOrWhiteSpace(note))
+            state.AmendmentNote = note.Trim();
+
+        if (normalized != "done")
+        {
+            contract.AmendmentJson = ContractAmendmentHelper.Serialize(state);
+            await db.SaveChangesAsync(ct);
+            return WorkflowActionResult.Ok("وضعیت اصلاحیه ذخیره شد");
+        }
+
+        if (state.Phase == "creator_amendment" && state.AmendedVersionNumber is null)
+            return WorkflowActionResult.Fail("ابتدا نسخه اصلاح‌شده قرارداد را آپلود کنید، سپس «ارسال به گردش» را بزنید");
+
+        var steps = DeserializeSteps(contract.StepsJson);
+        var rejecter = steps.FirstOrDefault(s => s.Order == state.RejectedAtStepOrder);
+        if (rejecter is null)
+            return WorkflowActionResult.Fail("مرحله ردکننده در گردش یافت نشد");
+
+        state.CompletedAtUtc = DateTime.UtcNow;
+        var cycle = state.Cycle > 0 ? state.Cycle : WorkflowEventHelper.GetNextAmendmentCycle(contract);
+        var now = DateTime.UtcNow;
+
+        AppendWorkflowEvent(contract, new WorkflowEventDto
+        {
+            Kind = "amendment_completed",
+            StepOrder = state.RejectedAtStepOrder,
+            Comment = state.AmendmentNote,
+            RejectionType = state.RejectionType,
+            Cycle = cycle,
+            AtUtc = now
+        });
+        AppendWorkflowEvent(contract, new WorkflowEventDto
+        {
+            Kind = "reapproval_requested",
+            StepOrder = rejecter.Order,
+            ActorUserId = state.AssigneeUserId,
+            Comment = state.AmendmentNote,
+            RejectionType = state.RejectionType,
+            Cycle = cycle,
+            AtUtc = now
+        });
+        if (state.AmendedVersionNumber is not null)
+        {
+            AppendWorkflowEvent(contract, new WorkflowEventDto
+            {
+                Kind = "amended_resubmitted",
+                StepOrder = rejecter.Order,
+                ActorUserId = state.AssigneeUserId,
+                Comment = state.AmendmentNote,
+                RejectionType = state.RejectionType,
+                Cycle = cycle,
+                AtUtc = now
+            });
+        }
+
+        rejecter.LastRejectionComment = rejecter.Comment;
+        rejecter.LastRejectionType = state.RejectionType;
+        rejecter.LastRejectedAtUtc = rejecter.ActionAt ?? state.StartedAtUtc;
+        rejecter.ReviewCycle = cycle;
+        rejecter.Status = "pending";
+        contract.AmendmentJson = null;
+        contract.CurrentStepOrder = rejecter.Order;
+        contract.Status = ContractStatus.InProgress;
+        contract.StepsJson = JsonSerializer.Serialize(steps);
+        await db.SaveChangesAsync(ct);
+
+        try
+        {
+            await SendAmendmentReturnToRejecterSmsAsync(contract, rejecter, state, ct);
+            await SendAssigneeSmsAsync(contract, rejecter.UserId, null, "سیستم", ct);
+        }
+        catch
+        {
+            // گردش ذخیره شده؛ خطای پیامک نباید ارسال به گردش را برای کاربر ناموفق نشان دهد
+        }
+
+        var doneMsg = state.AmendedVersionNumber is not null
+            ? $"نسخه اصلاح‌شده (v{state.AmendedVersionNumber}) ارسال شد؛ پرونده برای تأیید مجدد به کارشناس ردکننده ارجاع شد"
+            : "اصلاحیه تکمیل شد؛ پرونده برای تأیید مجدد به کارشناس ردکننده ارجاع شد";
+        return WorkflowActionResult.Ok(doneMsg);
+    }
+
+    public async Task<WorkflowActionResult> RegisterAmendedVersionAsync(
+        Guid contractId,
+        Guid userId,
+        int versionNumber,
+        CancellationToken ct = default)
+    {
+        var contract = await db.Contracts.FirstOrDefaultAsync(x => x.Id == contractId, ct);
+        if (contract is null) return WorkflowActionResult.Fail("قرارداد یافت نشد", 404);
+
+        var state = ContractAmendmentHelper.Deserialize(contract.AmendmentJson);
+        if (!ContractAmendmentHelper.IsActive(state))
+            return WorkflowActionResult.Fail("فاز اصلاحیه فعالی برای این قرارداد وجود ندارد");
+        if (contract.CreatedByUserId != userId)
+            return WorkflowActionResult.Fail("فقط ایجادکننده قرارداد می‌تواند نسخه اصلاح‌شده را ثبت کند", 403);
+
+        var version = await db.ContractVersions
+            .FirstOrDefaultAsync(v => v.ContractId == contractId && v.VersionNumber == versionNumber, ct);
+        if (version is null || !version.IsAmendedVersion)
+            return WorkflowActionResult.Fail("نسخه اصلاح‌شده یافت نشد");
+
+        var now = DateTime.UtcNow;
+        state.AmendedVersionNumber = versionNumber;
+        state.AmendedFileUploadedAtUtc = now;
+        contract.AmendmentJson = ContractAmendmentHelper.Serialize(state);
+
+        var cycle = state.Cycle > 0 ? state.Cycle : WorkflowEventHelper.GetNextAmendmentCycle(contract);
+        AppendWorkflowEvent(contract, new WorkflowEventDto
+        {
+            Kind = "amended_file_uploaded",
+            StepOrder = state.RejectedAtStepOrder,
+            ActorUserId = userId,
+            Comment = $"نسخه اصلاح‌شده v{versionNumber}",
+            RejectionType = state.RejectionType,
+            Cycle = cycle,
+            AtUtc = now
+        });
+
+        await db.SaveChangesAsync(ct);
+        return WorkflowActionResult.Ok($"نسخه اصلاح‌شده (v{versionNumber}) ثبت شد. پس از آماده‌سازی، «ارسال به گردش» را بزنید.");
+    }
+
+    private async Task HandleRejectStopAsync(
+        Contract contract,
+        List<ApprovalStepDto> steps,
+        ApprovalStepDto current,
+        Guid rejecterUserId,
+        string rejectionType,
+        string approverName,
+        CancellationToken ct)
+    {
+        var first = steps.OrderBy(s => s.Order).First();
+        var returnToCreator = current.Order == first.Order;
+
+        foreach (var s in steps.Where(x => x.Status == "pending" && x.Order != current.Order))
+            s.Status = "waiting";
+
+        var cycle = WorkflowEventHelper.GetNextAmendmentCycle(contract);
+        var amendment = new ContractAmendmentStateDto
+        {
+            Phase = returnToCreator ? "creator_amendment" : "first_approver_amendment",
+            RejectionType = rejectionType,
+            AmendmentStatus = "waiting",
+            AmendmentNote = current.Comment,
+            RejectedAtStepOrder = current.Order,
+            RejectedByUserId = rejecterUserId,
+            AssigneeUserId = returnToCreator ? contract.CreatedByUserId : first.UserId,
+            StartedAtUtc = DateTime.UtcNow,
+            Cycle = cycle
+        };
+
+        contract.AmendmentJson = ContractAmendmentHelper.Serialize(amendment);
+        contract.Status = ContractStatus.InProgress;
+        contract.CurrentStepOrder = current.Order;
+
+        var at = current.ActionAt ?? DateTime.UtcNow;
+        AppendWorkflowEvent(contract, new WorkflowEventDto
+        {
+            Kind = "rejected_for_amendment",
+            StepOrder = current.Order,
+            ActorUserId = rejecterUserId,
+            ActorName = approverName,
+            Comment = current.Comment,
+            RejectionType = rejectionType,
+            Cycle = cycle,
+            AtUtc = at
+        });
+        AppendWorkflowEvent(contract, new WorkflowEventDto
+        {
+            Kind = "amendment_started",
+            StepOrder = current.Order,
+            ActorUserId = amendment.AssigneeUserId,
+            Comment = current.Comment,
+            RejectionType = rejectionType,
+            Cycle = cycle,
+            AtUtc = at
+        });
+
+        var assigneeLinkCode = await approvalLinks.CreateOrRefreshAsync(contract.Id, amendment.AssigneeUserId, ct);
+        await SendAmendmentAssigneeSmsAsync(contract, amendment, approverName, assigneeLinkCode, ct);
+        await SendRejectionNotifySmsAsync(contract, current, amendment, approverName, ct);
+    }
+
+    private async Task HandleFullRejectTerminalAsync(
+        Contract contract,
+        List<ApprovalStepDto> steps,
+        ApprovalStepDto current,
+        Guid rejecterUserId,
+        string rejecterName,
+        string? comment,
+        CancellationToken ct)
+    {
+        foreach (var s in steps.Where(x => x.Status is "pending" or "waiting"))
+            s.Status = "skipped";
+
+        contract.Status = ContractStatus.Rejected;
+        contract.IsArchived = true;
+        contract.AmendmentJson = null;
+        contract.CurrentStepOrder = current.Order;
+
+        AppendWorkflowEvent(contract, new WorkflowEventDto
+        {
+            Kind = "full_rejected",
+            StepOrder = current.Order,
+            ActorUserId = rejecterUserId,
+            ActorName = rejecterName,
+            Comment = comment,
+            RejectionType = "full",
+            Cycle = current.ReviewCycle,
+            AtUtc = current.ActionAt ?? DateTime.UtcNow
+        });
+
+        await SendFullRejectionResultSmsAsync(contract, steps, current, comment, ct);
+    }
+
+    private async Task SendFullRejectionResultSmsAsync(
+        Contract contract,
+        List<ApprovalStepDto> steps,
+        ApprovalStepDto rejectedStep,
+        string? comment,
+        CancellationToken ct)
+    {
+        var smsSettings = await db.SmsSettings.FirstOrDefaultAsync(ct) ?? new SmsSettings();
+        if (!smsSettings.ContractRejectionNotifySmsEnabled) return;
+
+        var recipientIds = steps.Select(s => s.UserId)
+            .Append(contract.CreatedByUserId)
+            .Where(id => id != Guid.Empty)
+            .Distinct()
+            .ToList();
+
+        var users = await db.Users.AsNoTracking()
+            .Where(u => recipientIds.Contains(u.Id))
+            .ToListAsync(ct);
+
+        var publicBase = await frontendUrls.ResolvePublicBaseUrlAsync(ct);
+        var commentLine = string.IsNullOrWhiteSpace(comment)
+            ? ""
+            : $"\nیادداشت: {comment.Trim()}";
+
+        foreach (var user in users)
+        {
+            if (string.IsNullOrWhiteSpace(user.PhoneNumber)) continue;
+
+            var name = FormatPersonLabel(user, null);
+            var code = await approvalLinks.CreateOrRefreshAsync(contract.Id, user.Id, ct);
+            var linkPath = string.IsNullOrWhiteSpace(publicBase)
+                ? $"/approve/contract?c={code}"
+                : $"{publicBase.TrimEnd('/')}/approve/contract?c={code}";
+
+            var msg =
+                $"{name}\n" +
+                $"قرارداد «{contract.ContractNumber}» با **رد کامل قطعی** پایان یافت و بایگانی شد.\n" +
+                $"مرحله رد: {rejectedStep.Order} — {rejectedStep.UserName}{commentLine}\n" +
+                $"مشاهده نتیجه (لینک فوری):\n{linkPath}";
+
+            msg = msg.Replace("**", "", StringComparison.Ordinal);
+
+            await inbox.SendToUserAsync(user.Id, "رد قطعی قرارداد", msg, ct);
+            await smsSender.SendSmsAsync(new SmsRequest(user.PhoneNumber, msg), ct);
+        }
+    }
+
+    private static void AppendWorkflowEvent(Contract contract, WorkflowEventDto evt)
+        => WorkflowEventHelper.Append(contract, evt);
+
+    private async Task SendAmendmentAssigneeSmsAsync(
+        Contract contract,
+        ContractAmendmentStateDto amendment,
+        string rejecterName,
+        string approveLinkCode,
+        CancellationToken ct)
+    {
+        var smsSettings = await db.SmsSettings.FirstOrDefaultAsync(ct) ?? new SmsSettings();
+        if (!smsSettings.ContractAmendmentAssigneeSmsEnabled) return;
+
+        var assignee = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == amendment.AssigneeUserId, ct);
+        if (assignee is null || string.IsNullOrWhiteSpace(assignee.PhoneNumber)) return;
+
+        var typeLabel = ContractAmendmentHelper.RejectionTypeLabel(amendment.RejectionType);
+        var target = amendment.Phase == "creator_amendment"
+            ? "شما به‌عنوان ایجادکننده قرارداد"
+            : "شما به‌عنوان تأییدکننده اول";
+
+        var publicBase = await frontendUrls.ResolvePublicBaseUrlAsync(ct);
+        var amendPath = string.IsNullOrWhiteSpace(publicBase)
+            ? $"/approve/contract?c={approveLinkCode}"
+            : $"{publicBase.TrimEnd('/')}/approve/contract?c={approveLinkCode}";
+
+        var msg =
+            $"قرارداد «{contract.ContractNumber}» توسط {rejecterName} رد شد ({typeLabel}).\n" +
+            $"{target} باید اصلاحیه را انجام دهید.\n" +
+            $"لینک اصلاح قرارداد:\n{amendPath}";
+
+        await inbox.SendToUserAsync(amendment.AssigneeUserId, "اصلاحیه قرارداد", msg, ct);
+        await smsSender.SendSmsAsync(new SmsRequest(assignee.PhoneNumber, msg), ct);
+    }
+
+    private async Task SendAmendmentReturnToRejecterSmsAsync(
+        Contract contract,
+        ApprovalStepDto rejecterStep,
+        ContractAmendmentStateDto state,
+        CancellationToken ct)
+    {
+        var smsSettings = await db.SmsSettings.FirstOrDefaultAsync(ct) ?? new SmsSettings();
+        if (!smsSettings.ContractAmendmentReturnToRejecterSmsEnabled) return;
+
+        var user = await userManager.FindByIdAsync(rejecterStep.UserId.ToString());
+        if (user is null || string.IsNullOrWhiteSpace(user.PhoneNumber)) return;
+
+        var typeLabel = ContractAmendmentHelper.RejectionTypeLabel(state.RejectionType);
+        var versionLine = state.AmendedVersionNumber is not null
+            ? $"نسخه اصلاح‌شده (v{state.AmendedVersionNumber}) آماده بررسی است.\n"
+            : "";
+        var msg =
+            $"قرارداد «{contract.ContractNumber}» — اصلاحیه ({typeLabel}) ارسال شد.\n" +
+            versionLine +
+            "لطفاً نسخه اصلاح‌شده را بررسی و تأیید یا رد کنید.\n" +
+            "لینک تأیید در پیامک ارجاع بعدی ارسال می‌شود.";
+
+        var title = state.AmendedVersionNumber is not null ? "نسخه اصلاح‌شده — تأیید مجدد" : "بازگشت برای تأیید مجدد";
+        await inbox.SendToUserAsync(rejecterStep.UserId, title, msg, ct);
+        await smsSender.SendSmsAsync(new SmsRequest(user.PhoneNumber, msg), ct);
+    }
+
+    private async Task SendRejectionNotifySmsAsync(
+        Contract contract,
+        ApprovalStepDto rejectedStep,
+        ContractAmendmentStateDto amendment,
+        string rejecterName,
+        CancellationToken ct)
+    {
+        var smsSettings = await db.SmsSettings.FirstOrDefaultAsync(ct) ?? new SmsSettings();
+        if (!smsSettings.ContractRejectionNotifySmsEnabled) return;
+
+        if (contract.CreatedByUserId == amendment.AssigneeUserId) return;
+
+        var creator = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == contract.CreatedByUserId, ct);
+        if (creator is null || string.IsNullOrWhiteSpace(creator.PhoneNumber)) return;
+
+        var typeLabel = ContractAmendmentHelper.RejectionTypeLabel(amendment.RejectionType);
+        var msg =
+            $"قرارداد «{contract.ContractNumber}» در مرحله {rejectedStep.Order} توسط {rejecterName} رد شد.\n" +
+            $"نوع: {typeLabel}\n" +
+            (rejectedStep.Comment is { Length: > 0 } c ? $"یادداشت: {c}\n" : "") +
+            "اصلاحیه در جریان است.";
+
+        await inbox.SendToUserAsync(contract.CreatedByUserId, "رد قرارداد", msg, ct);
+        await smsSender.SendSmsAsync(new SmsRequest(creator.PhoneNumber, msg), ct);
     }
 
     public async Task<WorkflowActionResult> ResendPendingApprovalSmsAsync(Guid contractId, CancellationToken ct = default)
@@ -178,6 +603,13 @@ public class ContractWorkflowProcessor(
         contract.WorkflowStartedAtUtc = DateTime.UtcNow;
         contract.WorkflowScheduledStartAtUtc = null;
         contract.StepsJson = JsonSerializer.Serialize(steps);
+
+        ContractWorkflowTemplate? wfTemplate = null;
+        if (contract.WorkflowTemplateId is not null)
+            wfTemplate = await db.ContractWorkflowTemplates.AsNoTracking()
+                .FirstOrDefaultAsync(t => t.Id == contract.WorkflowTemplateId, ct);
+        WorkflowValidityHelper.ApplyValidityOnWorkflowStart(contract, wfTemplate);
+
         await db.SaveChangesAsync(ct);
 
         await SendAssigneeSmsAsync(contract, first.UserId, null, null, ct);
@@ -370,7 +802,10 @@ public class ContractWorkflowProcessor(
         await inbox.SendToUserAsync(userId, inboxTitle, msg, ct);
 
         if (!smsSettings.ApprovalReferralSmsEnabled || string.IsNullOrWhiteSpace(user.PhoneNumber)) return false;
-        return await smsSender.SendSmsAsync(new SmsRequest(user.PhoneNumber, msg), ct);
+        var sent = await smsSender.SendSmsAsync(new SmsRequest(user.PhoneNumber, msg), ct);
+        if (sent && isReminder)
+            await ApprovalReminderService.MarkReminderSentForContractAsync(db, contract.Id, userId, ct);
+        return sent;
     }
 
     private async Task SendCreatorApprovalNotifySmsAsync(

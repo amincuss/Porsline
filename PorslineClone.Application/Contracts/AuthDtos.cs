@@ -34,7 +34,16 @@ public record SmsSettingsDto(
     bool SurveyCompletedNotificationEnabled,
     bool UserCreateSmsEnabled,
     bool ApprovalReferralSmsEnabled,
-    bool ContractCreatorApprovalNotifySmsEnabled);
+    bool ContractCreatorApprovalNotifySmsEnabled,
+    bool ContractAmendmentAssigneeSmsEnabled,
+    bool ContractAmendmentReturnToRejecterSmsEnabled,
+    bool ContractRejectionNotifySmsEnabled,
+    bool ApprovalReminderSmsEnabled,
+    int ApprovalReminderDelayDays,
+    int ApprovalReminderDelayHours,
+    bool WorkflowValidityReminderSmsEnabled,
+    int WorkflowValiditySuspensionDelayDays,
+    int WorkflowValiditySuspensionDelayHours);
 public record SiteSettingsDto(string? PublicBaseUrl, string? AdminPanelBaseUrl);
 public record ProfileDto(string FirstName, string LastName, string MobileNumber, string NationalCode, string? AboutMe, string? AvatarUrl);
 public record UpdateProfileDto([MaxLength(1000)] string? AboutMe);

@@ -86,7 +86,6 @@ public class FormWorkflowProcessor(
 
         submission.StepsJson = JsonSerializer.Serialize(steps);
         await db.SaveChangesAsync(ct);
-
         return WorkflowActionResult.Ok(approve ? "تأیید شد" : "رد شد");
     }
 
@@ -184,7 +183,10 @@ public class FormWorkflowProcessor(
         var inboxTitle = isReminder ? "یادآوری تأیید فرم" : "فرم برای تأیید";
         await inbox.SendToUserAsync(userId, inboxTitle, msg, ct);
         if (!smsSettings.ApprovalReferralSmsEnabled || string.IsNullOrWhiteSpace(user.PhoneNumber)) return false;
-        return await smsSender.SendSmsAsync(new SmsRequest(user.PhoneNumber, msg), ct);
+        var sent = await smsSender.SendSmsAsync(new SmsRequest(user.PhoneNumber, msg), ct);
+        if (sent && isReminder)
+            await ApprovalReminderService.MarkReminderSentForFormAsync(db, submission.Id, userId, ct);
+        return sent;
     }
 
     public static List<ApprovalStepDto> DeserializeSteps(string? json)

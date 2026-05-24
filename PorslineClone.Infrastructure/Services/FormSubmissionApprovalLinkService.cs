@@ -32,6 +32,13 @@ public class FormSubmissionApprovalLinkService(AppDbContext db)
         return code;
     }
 
+    public async Task<FormSubmissionApprovalLink?> ResolveValidAsync(string code, CancellationToken ct = default)
+    {
+        var link = await ResolveByCodeAsync(code, ct);
+        if (link is null || !link.IsActive) return null;
+        return link;
+    }
+
     public async Task<FormSubmissionApprovalLink?> ResolveByCodeAsync(string code, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(code)) return null;

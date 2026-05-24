@@ -18,7 +18,9 @@ public static class WorkflowStepBuilder
                 UserId = x.UserId,
                 Status = startImmediately && i == 0 ? "pending" : "waiting",
                 OnReject = x.OnReject is "continue" ? "continue" : "stop",
-                Note = x.Note
+                Note = x.Note,
+                ApprovalDeadlineDays = Math.Max(0, x.ApprovalDeadlineDays ?? 0),
+                ApprovalDeadlineHours = Math.Max(0, x.ApprovalDeadlineHours ?? 0),
             })
             .ToList();
     }
@@ -36,7 +38,9 @@ public static class WorkflowStepBuilder
                 UserId = x.UserId,
                 Status = startImmediately && i == 0 ? "pending" : "waiting",
                 OnReject = x.OnReject is "continue" ? "continue" : "stop",
-                Note = x.Note
+                Note = x.Note,
+                ApprovalDeadlineDays = Math.Max(0, x.ApprovalDeadlineDays ?? 0),
+                ApprovalDeadlineHours = Math.Max(0, x.ApprovalDeadlineHours ?? 0),
             })
             .ToList();
     }

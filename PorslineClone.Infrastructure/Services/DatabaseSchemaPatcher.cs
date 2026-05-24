@@ -52,16 +52,6 @@ public static class DatabaseSchemaPatcher
 
         await ExecuteScriptAsync(db,
             """
-            IF COL_LENGTH('dbo.FormWorkflowTemplates', 'ActionAssigneeUserIdsJson') IS NULL
-                ALTER TABLE [dbo].[FormWorkflowTemplates] ADD [ActionAssigneeUserIdsJson] nvarchar(max) NOT NULL
-                    CONSTRAINT [DF_FormWorkflowTemplates_ActionAssigneeUserIdsJson] DEFAULT ('[]');
-            IF COL_LENGTH('dbo.FormSubmissions', 'PostApprovalJson') IS NULL
-                ALTER TABLE [dbo].[FormSubmissions] ADD [PostApprovalJson] nvarchar(max) NULL;
-            """, ct);
-        logger.LogInformation("Form post-approval columns ensured.");
-
-        await ExecuteScriptAsync(db,
-            """
             IF OBJECT_ID(N'[dbo].[UserPositions]', N'U') IS NULL
             BEGIN
                 CREATE TABLE [dbo].[UserPositions] (
@@ -151,6 +141,42 @@ public static class DatabaseSchemaPatcher
             IF COL_LENGTH('dbo.SmsSettings', 'ContractCreatorApprovalNotifySmsEnabled') IS NULL
                 ALTER TABLE [dbo].[SmsSettings] ADD [ContractCreatorApprovalNotifySmsEnabled] bit NOT NULL
                     CONSTRAINT [DF_SmsSettings_ContractCreatorApprovalNotifySmsEnabled] DEFAULT (1);
+
+            IF COL_LENGTH('dbo.SmsSettings', 'ContractAmendmentAssigneeSmsEnabled') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [ContractAmendmentAssigneeSmsEnabled] bit NOT NULL
+                    CONSTRAINT [DF_SmsSettings_ContractAmendmentAssigneeSmsEnabled] DEFAULT (1);
+
+            IF COL_LENGTH('dbo.SmsSettings', 'ContractAmendmentReturnToRejecterSmsEnabled') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [ContractAmendmentReturnToRejecterSmsEnabled] bit NOT NULL
+                    CONSTRAINT [DF_SmsSettings_ContractAmendmentReturnToRejecterSmsEnabled] DEFAULT (1);
+
+            IF COL_LENGTH('dbo.SmsSettings', 'ContractRejectionNotifySmsEnabled') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [ContractRejectionNotifySmsEnabled] bit NOT NULL
+                    CONSTRAINT [DF_SmsSettings_ContractRejectionNotifySmsEnabled] DEFAULT (1);
+
+            IF COL_LENGTH('dbo.Contracts', 'AmendmentJson') IS NULL
+                ALTER TABLE [dbo].[Contracts] ADD [AmendmentJson] nvarchar(max) NULL;
+
+            IF COL_LENGTH('dbo.Contracts', 'WorkflowEventsJson') IS NULL
+                ALTER TABLE [dbo].[Contracts] ADD [WorkflowEventsJson] nvarchar(max) NULL;
+
+            IF COL_LENGTH('dbo.SmsSettings', 'ApprovalReminderSmsEnabled') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [ApprovalReminderSmsEnabled] bit NOT NULL
+                    CONSTRAINT [DF_SmsSettings_ApprovalReminderSmsEnabled] DEFAULT (0);
+
+            IF COL_LENGTH('dbo.SmsSettings', 'ApprovalReminderDelayDays') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [ApprovalReminderDelayDays] int NOT NULL
+                    CONSTRAINT [DF_SmsSettings_ApprovalReminderDelayDays] DEFAULT (0);
+
+            IF COL_LENGTH('dbo.SmsSettings', 'ApprovalReminderDelayHours') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [ApprovalReminderDelayHours] int NOT NULL
+                    CONSTRAINT [DF_SmsSettings_ApprovalReminderDelayHours] DEFAULT (24);
+
+            IF COL_LENGTH('dbo.ContractApprovalLinks', 'ReminderSmsSentAtUtc') IS NULL
+                ALTER TABLE [dbo].[ContractApprovalLinks] ADD [ReminderSmsSentAtUtc] datetime2 NULL;
+
+            IF COL_LENGTH('dbo.FormSubmissionApprovalLinks', 'ReminderSmsSentAtUtc') IS NULL
+                ALTER TABLE [dbo].[FormSubmissionApprovalLinks] ADD [ReminderSmsSentAtUtc] datetime2 NULL;
             """, ct);
 
         await ExecuteScriptAsync(db,
@@ -273,6 +299,10 @@ public static class DatabaseSchemaPatcher
 
             IF COL_LENGTH('dbo.ContractVersions', 'PdfFilePath') IS NULL
                 ALTER TABLE [dbo].[ContractVersions] ADD [PdfFilePath] nvarchar(500) NULL;
+
+            IF COL_LENGTH('dbo.ContractVersions', 'IsAmendedVersion') IS NULL
+                ALTER TABLE [dbo].[ContractVersions] ADD [IsAmendedVersion] bit NOT NULL
+                    CONSTRAINT [DF_ContractVersions_IsAmendedVersion] DEFAULT (0);
             """, ct);
 
         await ExecuteScriptAsync(db,
@@ -426,6 +456,88 @@ public static class DatabaseSchemaPatcher
                 ALTER TABLE [dbo].[InboxMessages] ADD [ReadAtUtc] datetime2 NULL;
             """, ct);
 
+        await ApplyRedundancyCleanupAndPerformanceIndexesAsync(db, ct);
+
+        await ExecuteScriptAsync(db,
+            """
+            IF COL_LENGTH('dbo.ContractWorkflowTemplates', 'ActionDirectionKey') IS NULL
+                ALTER TABLE [dbo].[ContractWorkflowTemplates] ADD [ActionDirectionKey] nvarchar(80) NULL;
+            IF COL_LENGTH('dbo.ContractWorkflowTemplates', 'ActionDirectionLabel') IS NULL
+                ALTER TABLE [dbo].[ContractWorkflowTemplates] ADD [ActionDirectionLabel] nvarchar(200) NULL;
+            IF COL_LENGTH('dbo.ContractWorkflowTemplates', 'ActionAssigneeUserIdsJson') IS NULL
+                ALTER TABLE [dbo].[ContractWorkflowTemplates] ADD [ActionAssigneeUserIdsJson] nvarchar(max) NOT NULL
+                    CONSTRAINT [DF_ContractWorkflowTemplates_ActionAssignees] DEFAULT ('[]');
+
+            IF COL_LENGTH('dbo.ContractWorkflowTemplates', 'CanvasLayoutJson') IS NULL
+                ALTER TABLE [dbo].[ContractWorkflowTemplates] ADD [CanvasLayoutJson] nvarchar(500) NULL;
+
+            IF COL_LENGTH('dbo.FormWorkflowTemplates', 'ActionDirectionKey') IS NULL
+                ALTER TABLE [dbo].[FormWorkflowTemplates] ADD [ActionDirectionKey] nvarchar(80) NULL;
+            IF COL_LENGTH('dbo.FormWorkflowTemplates', 'ActionDirectionLabel') IS NULL
+                ALTER TABLE [dbo].[FormWorkflowTemplates] ADD [ActionDirectionLabel] nvarchar(200) NULL;
+            IF COL_LENGTH('dbo.FormWorkflowTemplates', 'ActionAssigneeUserIdsJson') IS NULL
+                ALTER TABLE [dbo].[FormWorkflowTemplates] ADD [ActionAssigneeUserIdsJson] nvarchar(max) NOT NULL
+                    CONSTRAINT [DF_FormWorkflowTemplates_ActionAssignees] DEFAULT ('[]');
+            IF COL_LENGTH('dbo.FormWorkflowTemplates', 'CanvasLayoutJson') IS NULL
+                ALTER TABLE [dbo].[FormWorkflowTemplates] ADD [CanvasLayoutJson] nvarchar(500) NULL;
+
+            IF COL_LENGTH('dbo.ContractWorkflowTemplates', 'WorkflowValidityDays') IS NULL
+                ALTER TABLE [dbo].[ContractWorkflowTemplates] ADD [WorkflowValidityDays] int NOT NULL
+                    CONSTRAINT [DF_ContractWorkflowTemplates_WorkflowValidityDays] DEFAULT (0);
+            IF COL_LENGTH('dbo.ContractWorkflowTemplates', 'WorkflowValidityHours') IS NULL
+                ALTER TABLE [dbo].[ContractWorkflowTemplates] ADD [WorkflowValidityHours] int NOT NULL
+                    CONSTRAINT [DF_ContractWorkflowTemplates_WorkflowValidityHours] DEFAULT (0);
+
+            IF COL_LENGTH('dbo.Contracts', 'WorkflowValidityEndsAtUtc') IS NULL
+                ALTER TABLE [dbo].[Contracts] ADD [WorkflowValidityEndsAtUtc] datetime2 NULL;
+            IF COL_LENGTH('dbo.Contracts', 'WorkflowValidityReminderSentAtUtc') IS NULL
+                ALTER TABLE [dbo].[Contracts] ADD [WorkflowValidityReminderSentAtUtc] datetime2 NULL;
+            IF COL_LENGTH('dbo.Contracts', 'SuspendedPendingUserId') IS NULL
+                ALTER TABLE [dbo].[Contracts] ADD [SuspendedPendingUserId] uniqueidentifier NULL;
+            IF COL_LENGTH('dbo.Contracts', 'WorkflowIncompleteTerminatedAtUtc') IS NULL
+                ALTER TABLE [dbo].[Contracts] ADD [WorkflowIncompleteTerminatedAtUtc] datetime2 NULL;
+            IF COL_LENGTH('dbo.Contracts', 'WorkflowIncompleteNote') IS NULL
+                ALTER TABLE [dbo].[Contracts] ADD [WorkflowIncompleteNote] nvarchar(2000) NULL;
+
+            IF COL_LENGTH('dbo.SmsSettings', 'WorkflowValidityReminderSmsEnabled') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [WorkflowValidityReminderSmsEnabled] bit NOT NULL
+                    CONSTRAINT [DF_SmsSettings_WorkflowValidityReminderSmsEnabled] DEFAULT (0);
+            IF COL_LENGTH('dbo.SmsSettings', 'WorkflowValiditySuspensionDelayDays') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [WorkflowValiditySuspensionDelayDays] int NOT NULL
+                    CONSTRAINT [DF_SmsSettings_WorkflowValiditySuspensionDelayDays] DEFAULT (0);
+            IF COL_LENGTH('dbo.SmsSettings', 'WorkflowValiditySuspensionDelayHours') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [WorkflowValiditySuspensionDelayHours] int NOT NULL
+                    CONSTRAINT [DF_SmsSettings_WorkflowValiditySuspensionDelayHours] DEFAULT (24);
+
+            IF COL_LENGTH('dbo.Contracts', 'PostApprovalJson') IS NULL
+                ALTER TABLE [dbo].[Contracts] ADD [PostApprovalJson] nvarchar(max) NULL;
+
+            IF OBJECT_ID(N'[dbo].[ContractActionLinks]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[ContractActionLinks] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [ContractId] uniqueidentifier NOT NULL,
+                    [AssigneeUserId] uniqueidentifier NOT NULL,
+                    [Code] nvarchar(32) NOT NULL,
+                    [IsActive] bit NOT NULL,
+                    [ExpiresAtUtc] datetime2 NOT NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    CONSTRAINT [PK_ContractActionLinks] PRIMARY KEY ([Id]),
+                    CONSTRAINT [FK_ContractActionLinks_Contracts_ContractId]
+                        FOREIGN KEY ([ContractId]) REFERENCES [dbo].[Contracts]([Id]) ON DELETE CASCADE
+                );
+                CREATE UNIQUE INDEX [IX_ContractActionLinks_Code] ON [dbo].[ContractActionLinks]([Code]);
+                CREATE INDEX [IX_ContractActionLinks_ContractId_AssigneeUserId_IsActive]
+                    ON [dbo].[ContractActionLinks]([ContractId], [AssigneeUserId], [IsActive]);
+            END
+            """, ct);
+
         logger.LogInformation("Database schema patch completed.");
+    }
+
+    /// <summary>حذف ستون‌های اشتباه و ایندکس‌های پرکاربرد (هم‌راستا با مایگریشن fix_schema_redundancy_and_indexes).</summary>
+    public static async Task ApplyRedundancyCleanupAndPerformanceIndexesAsync(AppDbContext db, CancellationToken ct = default)
+    {
+        await ExecuteScriptAsync(db, SchemaCleanupSql.CleanupAndIndexes, ct);
     }
 }

@@ -57,8 +57,13 @@ public class AdminContractWorkflowsController(AppDbContext db) : ControllerBase
         if (x is null || !x.IsActive) return NotFound(new { message = "گردش یافت نشد یا حذف شده است" });
 
         var steps = DeserializeSteps(x.StepsJson);
-        return Ok(new ContractWorkflowTemplateDetailDto(x.Id, x.Name, x.IsActive, steps));
+        return Ok(MapDetail(x, steps));
     }
+
+    [HttpGet("action-directions")]
+    [Authorize(Policy = "contracts.settings.read")]
+    public IActionResult ActionDirections() =>
+        Ok(PostApprovalDirections.Items.Select(x => new { key = x.Key, label = x.Label }));
 
     [HttpPost]
     [Authorize(Policy = "contracts.settings.update")]
@@ -78,18 +83,27 @@ public class AdminContractWorkflowsController(AppDbContext db) : ControllerBase
         if (Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var uid))
             userId = uid;
 
+        var (dirKey, dirLabel, assignees, actionErr) = ResolveActionConfig(req);
+        if (actionErr is not null) return BadRequest(new { message = actionErr });
+
         var entity = new ContractWorkflowTemplate
         {
             Id = Guid.NewGuid(),
             Name = name,
             StepsJson = JsonSerializer.Serialize(cleaned),
+            ActionDirectionKey = dirKey,
+            ActionDirectionLabel = dirLabel,
+            ActionAssigneeUserIdsJson = PostApprovalJsonHelper.SerializeUserIds(assignees),
+            CanvasLayoutJson = SerializeCanvasLayout(req.CanvasLayout),
+            WorkflowValidityDays = Math.Max(0, req.WorkflowValidityDays),
+            WorkflowValidityHours = Math.Max(0, req.WorkflowValidityHours),
             IsActive = true,
             CreatedByUserId = userId,
             CreatedAtUtc = DateTime.UtcNow
         };
         db.ContractWorkflowTemplates.Add(entity);
         await db.SaveChangesAsync(ct);
-        return Ok(new ContractWorkflowTemplateDetailDto(entity.Id, entity.Name, entity.IsActive, cleaned));
+        return Ok(MapDetail(entity, cleaned));
     }
 
     [HttpPut("{id:guid}")]
@@ -110,10 +124,19 @@ public class AdminContractWorkflowsController(AppDbContext db) : ControllerBase
         if (cleaned.Count == 0)
             return BadRequest(new { message = "حداقل یک مرحله تأیید لازم است" });
 
+        var (dirKey, dirLabel, assignees, actionErr) = ResolveActionConfig(req);
+        if (actionErr is not null) return BadRequest(new { message = actionErr });
+
         entity.Name = name;
         entity.StepsJson = JsonSerializer.Serialize(cleaned);
+        entity.ActionDirectionKey = dirKey;
+        entity.ActionDirectionLabel = dirLabel;
+        entity.ActionAssigneeUserIdsJson = PostApprovalJsonHelper.SerializeUserIds(assignees);
+        entity.CanvasLayoutJson = SerializeCanvasLayout(req.CanvasLayout);
+        entity.WorkflowValidityDays = Math.Max(0, req.WorkflowValidityDays);
+        entity.WorkflowValidityHours = Math.Max(0, req.WorkflowValidityHours);
         await db.SaveChangesAsync(ct);
-        return Ok(new ContractWorkflowTemplateDetailDto(entity.Id, entity.Name, entity.IsActive, cleaned));
+        return Ok(MapDetail(entity, cleaned));
     }
 
     [HttpDelete("{id:guid}")]
@@ -152,4 +175,48 @@ public class AdminContractWorkflowsController(AppDbContext db) : ControllerBase
             : (JsonSerializer.Deserialize<List<PorslineClone.Application.Contracts.WorkflowStepDto>>(json) ?? []);
 
     private static int CountSteps(string? json) => DeserializeSteps(json).Count;
+
+    private static ContractWorkflowTemplateDetailDto MapDetail(
+        ContractWorkflowTemplate entity,
+        List<WorkflowStepDto> steps) =>
+        new(
+            entity.Id,
+            entity.Name,
+            entity.IsActive,
+            steps,
+            entity.ActionDirectionKey,
+            entity.ActionDirectionLabel,
+            PostApprovalJsonHelper.ParseUserIds(entity.ActionAssigneeUserIdsJson),
+            DeserializeCanvasLayout(entity.CanvasLayoutJson),
+            entity.WorkflowValidityDays,
+            entity.WorkflowValidityHours);
+
+    private static string? SerializeCanvasLayout(WorkflowCanvasLayoutDto? layout) =>
+        layout is null ? null : JsonSerializer.Serialize(layout);
+
+    private static WorkflowCanvasLayoutDto? DeserializeCanvasLayout(string? json) =>
+        string.IsNullOrWhiteSpace(json)
+            ? null
+            : JsonSerializer.Deserialize<WorkflowCanvasLayoutDto>(json);
+
+    private static (string? Key, string? Label, List<Guid> Assignees, string? Error) ResolveActionConfig(
+        SaveWorkflowTemplateRequest req)
+    {
+        var assignees = (req.ActionAssigneeUserIds ?? []).Where(x => x != Guid.Empty).Distinct().ToList();
+        var key = (req.ActionDirectionKey ?? "").Trim();
+        if (assignees.Count == 0 && string.IsNullOrWhiteSpace(key))
+            return (null, null, [], null);
+
+        if (assignees.Count == 0)
+            return (null, null, [], "حداقل یک اقدام‌کننده انتخاب کنید");
+
+        if (string.IsNullOrWhiteSpace(key))
+            return (null, null, [], "جهت اقدام را انتخاب کنید");
+
+        var label = PostApprovalDirections.LabelFor(key);
+        if (label is null)
+            return (null, null, [], "جهت اقدام نامعتبر است");
+
+        return (key, label, assignees, null);
+    }
 }

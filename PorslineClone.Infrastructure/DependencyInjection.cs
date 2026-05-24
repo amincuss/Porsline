@@ -35,9 +35,13 @@ public static class DependencyInjection
         services.AddScoped<UserSignatureStorageService>();
         services.AddScoped<ContractApprovalStampService>();
         services.AddScoped<ContractApprovalLinkService>();
+        services.AddScoped<ContractActionLinkService>();
+        services.AddScoped<ContractPostApprovalService>();
         services.AddScoped<ContractWorkflowProcessor>();
         services.AddScoped<FormWorkflowProcessor>();
         services.AddScoped<FormSubmissionApprovalLinkService>();
+        services.AddScoped<ApprovalReminderService>();
+        services.AddHostedService<ApprovalReminderBackgroundService>();
         services.AddSingleton<IDocxToPdfConverter, DocxToPdfConverterService>();
         services.AddScoped<IContractDocumentGenerator, ContractDocumentGeneratorService>();
         services.AddScoped<ContractTemplateFileStorageService>();

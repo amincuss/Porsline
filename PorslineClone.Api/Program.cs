@@ -26,6 +26,7 @@ builder.Services.AddCors(options =>
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
     {
+        options.JsonSerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
         options.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
     });
 
@@ -109,6 +110,9 @@ builder.Services.AddAuthorization(options =>
         ctx.User.HasClaim("permission", "forms.access.update") || ctx.User.HasClaim("permission", "forms.update") || ctx.User.HasClaim("permission", "forms.crud")));
     options.AddPolicy("approvals.read", p => p.RequireClaim("permission", "approvals.read"));
     options.AddPolicy("approvals.update", p => p.RequireClaim("permission", "approvals.update"));
+    options.AddPolicy("actions.read", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "actions.read") || ctx.User.HasClaim("permission", "actions.read.all")));
+    options.AddPolicy("actions.update", p => p.RequireClaim("permission", "actions.update"));
     options.AddPolicy("responders.read", p => p.RequireClaim("permission", "responders.read"));
     options.AddPolicy("responders.add", p => p.RequireClaim("permission", "responders.add"));
     options.AddPolicy("responders.update", p => p.RequireClaim("permission", "responders.update"));
