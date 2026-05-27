@@ -31,6 +31,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<FormUserAccess> FormUserAccesses => Set<FormUserAccess>();
     public DbSet<FormWorkflowTemplate> FormWorkflowTemplates => Set<FormWorkflowTemplate>();
     public DbSet<FormSubmissionApprovalLink> FormSubmissionApprovalLinks => Set<FormSubmissionApprovalLink>();
+    public DbSet<FormActionLink> FormActionLinks => Set<FormActionLink>();
     public DbSet<ContractType> ContractTypes => Set<ContractType>();
     public DbSet<ContractSettings> ContractSettings => Set<ContractSettings>();
     public DbSet<ContractWorkflowTemplate> ContractWorkflowTemplates => Set<ContractWorkflowTemplate>();
@@ -346,6 +347,17 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
                 .OnDelete(DeleteBehavior.Cascade);
             entity.HasIndex(x => x.Code).IsUnique();
             entity.HasIndex(x => new { x.FormSubmissionId, x.AssigneeUserId, x.IsActive });
+        });
+
+        builder.Entity<FormActionLink>(entity =>
+        {
+            entity.Property(x => x.Code).HasMaxLength(32).IsRequired();
+            entity.HasIndex(x => x.Code).IsUnique();
+            entity.HasIndex(x => new { x.FormSubmissionId, x.AssigneeUserId, x.IsActive });
+            entity.HasOne(x => x.FormSubmission)
+                .WithMany()
+                .HasForeignKey(x => x.FormSubmissionId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<FormDispatchLink>(entity =>

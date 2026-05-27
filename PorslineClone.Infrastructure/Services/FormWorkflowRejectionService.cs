@@ -83,6 +83,7 @@ public class FormWorkflowRejectionService(
         submission.WorkflowRejectionJson = null;
         await db.SaveChangesAsync(ct);
         await dispatchNotifier.NotifyAfterWorkflowEndedBySenderAsync(submission, ct);
+        await dispatchNotifier.NotifyResponderAfterWorkflowClosedAsync(submission, ct);
         return (true, null);
     }
 }

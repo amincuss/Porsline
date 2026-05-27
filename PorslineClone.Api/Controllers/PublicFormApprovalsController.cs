@@ -71,6 +71,11 @@ public class PublicFormApprovalsController(
             s => $"/api/public/forms/approve/signature?c={Uri.EscapeDataString(c)}&stepOrder={s.Order}");
 
         var fields = DeserializeFields(submission.FieldsJson);
+        var fieldTypesByLabel = await db.FormFields.AsNoTracking()
+            .Where(ff => ff.FormId == submission.FormId)
+            .GroupBy(ff => ff.Label)
+            .Select(g => new { Label = g.Key, FieldType = (int)g.First().FieldType })
+            .ToDictionaryAsync(x => x.Label, x => x.FieldType, ct);
         var fileIndices = fields
             .Select((f, i) => (f, i))
             .Where(x => IsUploadPath(x.f.Value))
@@ -89,6 +94,7 @@ public class PublicFormApprovalsController(
             submission.Id,
             submission.FormId,
             formTitle = submission.Form.Title,
+            trackingCode = submission.TrackingCode,
             submission.SubmitterName,
             submission.SubmitterEmail,
             submission.SubmittedAtUtc,
@@ -98,7 +104,12 @@ public class PublicFormApprovalsController(
             canAct,
             viewOnly = !canAct,
             participated,
-            fields,
+            fields = fields.Select(f => new
+            {
+                f.Label,
+                f.Value,
+                fieldType = fieldTypesByLabel.GetValueOrDefault(f.Label, 0),
+            }),
             fileIndices,
             fileSizes,
             steps = steps.Select(s => new

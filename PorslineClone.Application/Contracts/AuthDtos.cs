@@ -35,6 +35,7 @@ public record SmsSettingsDto(
     bool FormSubmissionTrackingSmsEnabled,
     bool UserCreateSmsEnabled,
     bool ApprovalReferralSmsEnabled,
+    bool FormWorkflowStartedResponderSmsEnabled,
     bool FormWorkflowCompletedSenderSmsEnabled,
     bool FormActionPhaseCompletedSenderSmsEnabled,
     bool FormResponderApprovedSmsEnabled,

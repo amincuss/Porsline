@@ -10,6 +10,7 @@ namespace PorslineClone.Infrastructure.Services;
 public class FormPostApprovalService(
     AppDbContext db,
     UserManager<AppUser> userManager,
+    FormActionLinkService actionLinks,
     ISmsSender smsSender,
     IInboxMessageService inbox,
     IFrontendUrlResolver frontendUrls,
@@ -51,7 +52,39 @@ public class FormPostApprovalService(
         submission.PostApprovalJson = PostApprovalJsonHelper.SerializeState(state);
         await db.SaveChangesAsync(ct);
 
-        var formTitle = submission.Form?.Title ?? "فرم";
+        await NotifyActionAssigneesAsync(submission, assigneeIds, dirLabel, ct);
+    }
+
+    private async Task NotifyActionAssigneesAsync(
+        FormSubmission submission,
+        IReadOnlyList<Guid> assigneeIds,
+        string directionLabel,
+        CancellationToken ct)
+    {
+        var smsSettings = await db.SmsSettings.AsNoTracking().FirstOrDefaultAsync(ct) ?? new SmsSettings();
+        var smsEnabled = smsSettings.ApprovalReferralSmsEnabled;
+
+        var formTitle = submission.Form?.Title ?? await db.Forms.AsNoTracking()
+            .Where(f => f.Id == submission.FormId)
+            .Select(f => f.Title)
+            .FirstOrDefaultAsync(ct) ?? "فرم";
+
+        var responderName = submission.SubmitterName?.Trim() ?? "";
+        if (submission.DispatchLinkId is Guid linkId)
+        {
+            var link = await db.FormDispatchLinks.AsNoTracking().FirstOrDefaultAsync(x => x.Id == linkId, ct);
+            if (!string.IsNullOrWhiteSpace(link?.ResponderFullName))
+                responderName = link.ResponderFullName.Trim();
+            var responder = link is not null
+                ? await db.Responders.AsNoTracking().FirstOrDefaultAsync(x => x.Id == link.ResponderId, ct)
+                : null;
+            var honorific = ResponderHonorific.FormatFullName(responderName, responder?.Gender);
+            responderName = honorific;
+        }
+
+        var (dateStr, timeStr) = SmsDateTimeFormatter.FormatUtcNowTehran();
+        var security = await SecuritySettingsHelper.GetAsync(db, ct);
+        var linkExpiry = SecuritySettingsHelper.LinkExpiresAtUtc(security);
         var publicBase = await frontendUrls.ResolvePublicBaseUrlAsync(ct);
         var adminBase = await frontendUrls.ResolveAdminBaseUrlAsync(ct);
         var adminPath = string.IsNullOrWhiteSpace(adminBase)
@@ -60,15 +93,27 @@ public class FormPostApprovalService(
 
         foreach (var userId in assigneeIds)
         {
+            var code = await actionLinks.CreateOrRefreshAsync(submission.Id, userId, linkExpiry, ct);
+            var actionPath = string.IsNullOrWhiteSpace(publicBase)
+                ? $"/action/form?c={code}"
+                : $"{publicBase.TrimEnd('/')}/action/form?c={code}";
+
+            var user = await userManager.FindByIdAsync(userId.ToString());
+            var staffName = user is null
+                ? "کارشناس"
+                : ResponderHonorific.FormatFullName($"{user.FirstName} {user.LastName}".Trim(), user.Gender);
+
             var msg =
-                $"پاسخ فرم «{formTitle}» پس از تأیید نهایی، جهت اقدام ({dirLabel}) برای شما ارسال شد.\n" +
-                $"مشاهده و ثبت وضعیت:\n{adminPath}";
+                $"{staffName} گرامی،\n\n" +
+                $"فرم «{formTitle}» به نام {responderName} در تاریخ {dateStr} ساعت {timeStr} تأیید نهایی شد.\n" +
+                $"جهت {directionLabel} برای شما ارجاع شد.\n\n" +
+                "لینک فوری اقدام (بدون نیاز به ورود):\n" +
+                actionPath +
+                $"\n\nیا از پنل:\n{adminPath}";
 
             await inbox.SendToUserAsync(userId, "اقدام پس از تأیید فرم", msg, ct);
 
-            var user = await userManager.FindByIdAsync(userId.ToString());
-            var smsSettings = await db.SmsSettings.AsNoTracking().FirstOrDefaultAsync(ct) ?? new SmsSettings();
-            if (smsSettings.ApprovalReferralSmsEnabled && !string.IsNullOrWhiteSpace(user?.PhoneNumber))
+            if (smsEnabled && !string.IsNullOrWhiteSpace(user?.PhoneNumber))
                 await smsSender.SendSmsAsync(new SmsRequest(user.PhoneNumber, msg), ct);
         }
     }

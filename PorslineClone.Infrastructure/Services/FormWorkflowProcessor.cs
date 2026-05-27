@@ -137,8 +137,8 @@ public class FormWorkflowProcessor(
 
         if (becameFullyApproved)
         {
-            await dispatchNotifier.NotifySenderAfterFullApprovalAsync(submission, ct);
             await postApproval.TryStartPostApprovalAsync(submission, ct);
+            await dispatchNotifier.NotifySenderAfterFullApprovalAsync(submission, ct);
         }
         else if (terminalReject)
         {
@@ -203,6 +203,7 @@ public class FormWorkflowProcessor(
         await db.SaveChangesAsync(ct);
 
         await SendAssigneeSmsAsync(submission, first.UserId, null, null, ct);
+        await dispatchNotifier.NotifyResponderWorkflowStartedAsync(submission, ct);
         return (true, null);
     }
 

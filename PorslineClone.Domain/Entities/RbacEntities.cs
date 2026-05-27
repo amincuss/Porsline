@@ -106,6 +106,8 @@ public class SmsSettings
     public bool SurveyCompletedNotificationEnabled { get; set; } = true;
     /// <summary>پس از ثبت فرم در وب، پیامک کد پیگیری به موبایل پاسخگو</summary>
     public bool FormSubmissionTrackingSmsEnabled { get; set; } = true;
+    /// <summary>پس از شروع گردش تأیید، پیامک اطلاع‌رسانی به پاسخگو / ثبت‌کننده فرم</summary>
+    public bool FormWorkflowStartedResponderSmsEnabled { get; set; } = true;
     public bool UserCreateSmsEnabled { get; set; } = true;
     public bool ApprovalReferralSmsEnabled { get; set; } = true;
     /// <summary>پس از تأیید نهایی گردش فرم، پیامک به کارشناس ارسال‌کننده لینک</summary>

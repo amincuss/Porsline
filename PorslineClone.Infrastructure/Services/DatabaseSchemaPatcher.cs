@@ -184,6 +184,10 @@ public static class DatabaseSchemaPatcher
                 ALTER TABLE [dbo].[SmsSettings] ADD [FormSubmissionTrackingSmsEnabled] bit NOT NULL
                     CONSTRAINT [DF_SmsSettings_FormSubmissionTrackingSmsEnabled] DEFAULT (1);
 
+            IF COL_LENGTH('dbo.SmsSettings', 'FormWorkflowStartedResponderSmsEnabled') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [FormWorkflowStartedResponderSmsEnabled] bit NOT NULL
+                    CONSTRAINT [DF_SmsSettings_FormWorkflowStartedResponderSmsEnabled] DEFAULT (1);
+
             IF COL_LENGTH('dbo.SmsSettings', 'FormWorkflowRejectedSenderSmsEnabled') IS NULL
                 ALTER TABLE [dbo].[SmsSettings] ADD [FormWorkflowRejectedSenderSmsEnabled] bit NOT NULL
                     CONSTRAINT [DF_SmsSettings_FormWorkflowRejectedSenderSmsEnabled] DEFAULT (1);
@@ -520,6 +524,25 @@ public static class DatabaseSchemaPatcher
                 CREATE UNIQUE INDEX [IX_FormSubmissionApprovalLinks_Code] ON [dbo].[FormSubmissionApprovalLinks]([Code]);
                 CREATE INDEX [IX_FormSubmissionApprovalLinks_FormSubmissionId_AssigneeUserId_IsActive]
                     ON [dbo].[FormSubmissionApprovalLinks]([FormSubmissionId], [AssigneeUserId], [IsActive]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[FormActionLinks]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[FormActionLinks] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [FormSubmissionId] uniqueidentifier NOT NULL,
+                    [AssigneeUserId] uniqueidentifier NOT NULL,
+                    [Code] nvarchar(32) NOT NULL,
+                    [IsActive] bit NOT NULL,
+                    [ExpiresAtUtc] datetime2 NOT NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    CONSTRAINT [PK_FormActionLinks] PRIMARY KEY ([Id]),
+                    CONSTRAINT [FK_FormActionLinks_FormSubmissions_FormSubmissionId]
+                        FOREIGN KEY ([FormSubmissionId]) REFERENCES [dbo].[FormSubmissions]([Id]) ON DELETE CASCADE
+                );
+                CREATE UNIQUE INDEX [IX_FormActionLinks_Code] ON [dbo].[FormActionLinks]([Code]);
+                CREATE INDEX [IX_FormActionLinks_FormSubmissionId_AssigneeUserId_IsActive]
+                    ON [dbo].[FormActionLinks]([FormSubmissionId], [AssigneeUserId], [IsActive]);
             END
             """, ct);
 

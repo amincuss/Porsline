@@ -350,6 +350,12 @@ public class AdminWorkflowRunsController(
             ? new List<FormFieldValueDto>()
             : (JsonSerializer.Deserialize<List<FormFieldValueDto>>(submission.FieldsJson) ?? new List<FormFieldValueDto>());
 
+        var fieldTypesByLabel = await db.FormFields.AsNoTracking()
+            .Where(ff => ff.FormId == submission.FormId)
+            .GroupBy(ff => ff.Label)
+            .Select(g => new { Label = g.Key, FieldType = (int)g.First().FieldType })
+            .ToDictionaryAsync(x => x.Label, x => x.FieldType, ct);
+
         var uploadPaths = FormSubmissionUploadHelper.ListUploadPaths(values);
         var fileValues = uploadPaths
             .Select((url, i) =>
@@ -388,6 +394,7 @@ public class AdminWorkflowRunsController(
             submission.Id,
             submission.FormId,
             FormTitle = submission.Form.Title,
+            submission.TrackingCode,
             submission.SubmittedAtUtc,
             SubmitterName = submission.SubmitterName,
             SubmitterMobile = submission.SubmitterEmail,
@@ -420,6 +427,7 @@ public class AdminWorkflowRunsController(
             {
                 v.Label,
                 v.Value,
+                FieldType = fieldTypesByLabel.GetValueOrDefault(v.Label, 0),
                 IsFile = FormSubmissionUploadHelper.IsUploadPath(v.Value),
                 File = fileValues.FirstOrDefault(f =>
                     f.Url == FormSubmissionUploadHelper.NormalizeRelativePath(v.Value))

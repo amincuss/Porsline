@@ -64,6 +64,53 @@ public class FormDispatchSubmissionNotifier(
             await smsSender.SendSmsAsync(new SmsRequest(sender.PhoneNumber, body), ct);
     }
 
+    /// <summary>پس از شروع گردش تأیید (توسط کارشناس یا خودکار) — پیامک اطلاع‌رسانی به پاسخگو.</summary>
+    public async Task NotifyResponderWorkflowStartedAsync(
+        FormSubmission submission,
+        CancellationToken ct = default)
+    {
+        var smsSettings = await db.SmsSettings.AsNoTracking().FirstOrDefaultAsync(ct) ?? new SmsSettings();
+        if (!smsSettings.FormWorkflowStartedResponderSmsEnabled)
+            return;
+
+        FormDispatchLink? link = null;
+        Responder? responder = null;
+        if (submission.DispatchLinkId is Guid linkId)
+        {
+            link = await db.FormDispatchLinks.AsNoTracking().FirstOrDefaultAsync(x => x.Id == linkId, ct);
+            if (link is not null)
+                responder = await db.Responders.AsNoTracking().FirstOrDefaultAsync(x => x.Id == link.ResponderId, ct);
+        }
+
+        var mobile = (link?.ResponderMobileNumber ?? submission.SubmitterEmail ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(mobile))
+            return;
+
+        var responderName = link?.ResponderFullName?.Trim();
+        if (string.IsNullOrWhiteSpace(responderName))
+            responderName = submission.SubmitterName?.Trim();
+        var honorificName = ResponderHonorific.FormatFullName(responderName, responder?.Gender);
+
+        var formTitle = submission.Form?.Title ?? await db.Forms.AsNoTracking()
+            .Where(f => f.Id == submission.FormId)
+            .Select(f => f.Title)
+            .FirstOrDefaultAsync(ct) ?? "فرم";
+
+        var (dateStr, timeStr) = SmsDateTimeFormatter.FormatUtcNowTehran();
+        var trackingPart = string.IsNullOrWhiteSpace(submission.TrackingCode)
+            ? ""
+            : $"\nشماره پیگیری: {submission.TrackingCode}";
+
+        var body =
+            $"{honorificName} گرامی،\n\n" +
+            $"فرم «{formTitle}»{trackingPart}\n" +
+            $"در تاریخ {dateStr} ساعت {timeStr}\n" +
+            "در سیکل جریان اداری قرار گرفت.\n\n" +
+            "در صورت نیاز به پیگیری با شماره کد مراجعه فرمایید.";
+
+        await smsSender.SendSmsAsync(new SmsRequest(mobile, body), ct);
+    }
+
     /// <summary>پس از ثبت فرم در وب — پیامک کد پیگیری به پاسخگو.</summary>
     public async Task NotifyResponderTrackingCodeAsync(
         FormSubmission submission,
@@ -133,11 +180,23 @@ public class FormDispatchSubmissionNotifier(
         var (dateStr, timeStr) = SmsDateTimeFormatter.FormatUtcNowTehran();
         var viewUrl = await BuildUserFormsViewUrlAsync(submission.Id, ct);
 
+        var postState = PostApprovalJsonHelper.DeserializeState(submission.PostApprovalJson);
+        var assigneeLine = "";
+        if (postState is { AssigneeUserIds.Count: > 0 })
+        {
+            var assigneeNames = await FormatStaffHonorificsAsync(postState.AssigneeUserIds, ct);
+            var direction = string.IsNullOrWhiteSpace(postState.ActionDirectionLabel)
+                ? "اقدام"
+                : postState.ActionDirectionLabel.Trim();
+            assigneeLine =
+                $"\nجهت {direction} به کارشناس مربوطه {assigneeNames} ارجاع شد.";
+        }
+
         var body =
-            "تأیید نهایی فرم\n" +
-            $"فرم «{formTitle}» — {honorificName} در تاریخ {dateStr} ساعت {timeStr} تأیید شد.\n\n" +
-            "مشاهده فوری:\n" +
-            viewUrl;
+            "کارشناس گرامی،\n\n" +
+            $"فرم «{formTitle}» به نام {honorificName} در تاریخ {dateStr} ساعت {timeStr} تأیید نهایی شد." +
+            assigneeLine +
+            $"\n\nمشاهده پرونده:\n{viewUrl}";
 
         await inbox.SendToUserAsync(senderId, "تأیید نهایی فرم", body, ct);
 
@@ -214,12 +273,9 @@ public class FormDispatchSubmissionNotifier(
             var viewUrl = await BuildUserFormsViewUrlAsync(submission.Id, ct);
 
             var senderBody =
-                "اتمام فاز اقدام فرم\n" +
-                $"فرم «{formTitle}»\n" +
-                $"پاسخگو: {honorificName}\n" +
-                $"شماره تماس: {mobileDisplay}\n" +
-                $"کد ملی: {nationalCodeDisplay}\n\n" +
-                $"در تاریخ {dateStr} ساعت {timeStr} در مرحله اقدام «{directionLabel}» وضعیت «انجام شده» ثبت شد.\n" +
+                "کارشناس گرامی،\n\n" +
+                $"فرم «{formTitle}» (پاسخگو: {honorificName})\n" +
+                $"در تاریخ {dateStr} ساعت {timeStr} در مرحله «{directionLabel}» وضعیت «انجام شده» ثبت شد.\n" +
                 $"اقدام‌کننده: {actorLabel}" +
                 noteBlock +
                 $"\n\nمشاهده پرونده:\n{viewUrl}";
@@ -232,14 +288,38 @@ public class FormDispatchSubmissionNotifier(
 
         if (smsSettings.FormResponderApprovedSmsEnabled && !string.IsNullOrWhiteSpace(mobile))
         {
-            var responderBody =
-                $"{honorificName} محترم،\n\n" +
-                "با سلام و احترام؛\n\n" +
-                $"پاسخ شما در فرم «{formTitle}» پس از طی مراحل تأیید و اقدام، به‌طور کامل تأیید و نهایی شد.\n\n" +
-                "از همراهی و همکاری شما سپاسگزاریم.";
+            var responderBody = BuildResponderWorkflowStatusSms(
+                honorificName,
+                formTitle,
+                "در مرحله «انجام شده» قرار گرفت",
+                $"تاریخ: {dateStr} — ساعت {timeStr}");
 
             await smsSender.SendSmsAsync(new SmsRequest(mobile, responderBody), ct);
         }
+    }
+
+    /// <summary>پس از اتمام گردش توسط ارسال‌کننده (بایگانی پس از رد) — پیامک به پاسخگو.</summary>
+    public async Task NotifyResponderAfterWorkflowClosedAsync(
+        FormSubmission submission,
+        CancellationToken ct = default)
+    {
+        var smsSettings = await db.SmsSettings.AsNoTracking().FirstOrDefaultAsync(ct) ?? new SmsSettings();
+        if (!smsSettings.FormWorkflowRejectedResponderSmsEnabled)
+            return;
+
+        var formTitle = await ResolveFormTitleAsync(submission, ct);
+        var (honorificName, _, mobile) = await ResolveResponderContextAsync(submission, ct);
+        if (string.IsNullOrWhiteSpace(mobile))
+            return;
+
+        var (dateStr, timeStr) = SmsDateTimeFormatter.FormatUtcNowTehran();
+        var responderBody = BuildResponderWorkflowStatusSms(
+            honorificName,
+            formTitle,
+            "به‌طور کامل رد شد",
+            $"تاریخ: {dateStr} — ساعت {timeStr}");
+
+        await smsSender.SendSmsAsync(new SmsRequest(mobile, responderBody), ct);
     }
 
     /// <summary>پس از رد — پیامک فوری به ارسال‌کننده (درخواست مجدد / اتمام گردش) و به ردکننده</summary>
@@ -459,16 +539,44 @@ public class FormDispatchSubmissionNotifier(
 
         if (smsSettings.FormWorkflowRejectedResponderSmsEnabled && !string.IsNullOrWhiteSpace(mobile))
         {
-            var responderBody =
-                $"{honorificName} محترم،\n\n" +
-                "با سلام و احترام؛\n\n" +
-                $"پاسخ شما در فرم «{formTitle}» پس از بررسی، رد شد.\n" +
-                $"تاریخ: {dateStr} — ساعت {timeStr}" +
-                commentBlock +
-                "\n\nدر صورت نیاز با واحد مربوطه تماس بگیرید.";
+            var responderBody = BuildResponderWorkflowStatusSms(
+                honorificName,
+                formTitle,
+                "به‌طور کامل رد شد",
+                $"تاریخ: {dateStr} — ساعت {timeStr}{commentBlock}");
 
             await smsSender.SendSmsAsync(new SmsRequest(mobile, responderBody), ct);
         }
+    }
+
+    private static string BuildResponderWorkflowStatusSms(
+        string honorificName,
+        string formTitle,
+        string statusPhrase,
+        string? extraLines = null)
+    {
+        var extra = string.IsNullOrWhiteSpace(extraLines) ? "" : $"\n{extraLines.Trim()}";
+        var name = string.IsNullOrWhiteSpace(honorificName) ? "کاربر" : honorificName.Trim();
+        return
+            $"کاربر گرامی {name}،\n\n" +
+            $"گردش کاری شما {statusPhrase}.\n" +
+            $"فرم «{formTitle}»" +
+            extra +
+            "\n\nدر صورت نیاز با واحد مربوطه تماس بگیرید.";
+    }
+
+    private async Task<string> FormatStaffHonorificsAsync(IReadOnlyList<Guid> userIds, CancellationToken ct)
+    {
+        if (userIds.Count == 0) return "کارشناس";
+        var users = await db.Users.AsNoTracking()
+            .Where(u => userIds.Contains(u.Id))
+            .Select(u => new { u.FirstName, u.LastName, u.Gender })
+            .ToListAsync(ct);
+        if (users.Count == 0) return "کارشناس";
+        return string.Join(
+            " و ",
+            users.Select(u =>
+                ResponderHonorific.FormatFullName($"{u.FirstName} {u.LastName}".Trim(), u.Gender)));
     }
 
     private async Task<string> BuildFormsArchiveUrlAsync(CancellationToken ct)

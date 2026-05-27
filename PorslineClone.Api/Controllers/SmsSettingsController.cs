@@ -23,6 +23,7 @@ public class AdminSmsSettingsController(AppDbContext db) : ControllerBase
             settings.FormSubmissionTrackingSmsEnabled,
             settings.UserCreateSmsEnabled,
             settings.ApprovalReferralSmsEnabled,
+            settings.FormWorkflowStartedResponderSmsEnabled,
             settings.FormWorkflowCompletedSenderSmsEnabled,
             settings.FormActionPhaseCompletedSenderSmsEnabled,
             settings.FormResponderApprovedSmsEnabled,
@@ -58,6 +59,7 @@ public class AdminSmsSettingsController(AppDbContext db) : ControllerBase
         settings.FormSubmissionTrackingSmsEnabled = dto.FormSubmissionTrackingSmsEnabled;
         settings.UserCreateSmsEnabled = dto.UserCreateSmsEnabled;
         settings.ApprovalReferralSmsEnabled = dto.ApprovalReferralSmsEnabled;
+        settings.FormWorkflowStartedResponderSmsEnabled = dto.FormWorkflowStartedResponderSmsEnabled;
         settings.FormWorkflowCompletedSenderSmsEnabled = dto.FormWorkflowCompletedSenderSmsEnabled;
         settings.FormActionPhaseCompletedSenderSmsEnabled = dto.FormActionPhaseCompletedSenderSmsEnabled;
         settings.FormResponderApprovedSmsEnabled = dto.FormResponderApprovedSmsEnabled;

@@ -43,6 +43,7 @@ public static class DependencyInjection
         services.AddScoped<FormWorkflowRejectionService>();
         services.AddScoped<FormDispatchSubmissionNotifier>();
         services.AddScoped<FormSubmissionApprovalLinkService>();
+        services.AddScoped<FormActionLinkService>();
         services.AddScoped<ApprovalReminderService>();
         services.AddHostedService<ApprovalReminderBackgroundService>();
         services.AddSingleton<IDocxToPdfConverter, DocxToPdfConverterService>();

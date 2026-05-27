@@ -125,6 +125,19 @@ public class FormSubmission
     public string? WorkflowRejectionJson { get; set; }
 }
 
+/// <summary>لینک سریع اقدام پس از تأیید کامل پاسخ فرم (بدون OTP)</summary>
+public class FormActionLink
+{
+    public Guid Id { get; set; }
+    public Guid FormSubmissionId { get; set; }
+    public FormSubmission FormSubmission { get; set; } = null!;
+    public Guid AssigneeUserId { get; set; }
+    public string Code { get; set; } = "";
+    public bool IsActive { get; set; } = true;
+    public DateTime ExpiresAtUtc { get; set; }
+    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+}
+
 /// <summary>لینک تأیید عمومی برای پاسخ فرم (مثل قرارداد)</summary>
 public class FormSubmissionApprovalLink
 {
