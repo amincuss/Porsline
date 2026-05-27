@@ -329,10 +329,11 @@ public static class DbSeeder
         // Permissions (granular)
         var permissionNames = new[]
         {
-            "users.read","users.read.all","users.add","users.update","users.delete",
+            "users.read","users.read.all","users.add","users.import","users.update","users.delete",
+            "users.access.read","users.access.update",
             "settings.read","settings.update","settings.delete",
             "roles.read","roles.update",
-            "menus.view","profile.update","messages.read",
+            "menus.view","profile.update","messages.read","messages.read.all","messages.send",
             "forms.read","forms.read.all","forms.add","forms.update","forms.delete",
             "forms.rules.read","forms.rules.update","forms.rules.delete",
             "forms.access.read","forms.access.read.all","forms.access.update",
@@ -341,7 +342,9 @@ public static class DbSeeder
             "forms.archive.read","forms.archive.read.all",
             "contracts.archive.read","contracts.archive.read.all",
             "actions.read","actions.read.all","actions.update",
-            "responders.read","responders.read.all","responders.add","responders.update","responders.delete","responders.send",
+            "responders.read","responders.read.all","responders.add","responders.update","responders.delete","responders.send","responders.send.activation",
+            "responders.userforms.delete","responders.userforms.workflow","responders.userforms.workflow.restart",
+            "respondergroups.read","respondergroups.add","respondergroups.update","respondergroups.delete",
             "usergroups.read","usergroups.read.all","usergroups.add","usergroups.update","usergroups.delete",
             "contracts.read","contracts.read.all","contracts.add","contracts.update","contracts.delete",
             "contracts.settings.read","contracts.settings.update","contracts.settings.delete",
@@ -424,8 +427,6 @@ public static class DbSeeder
             new MenuItem { Key = "settings.sms", Title = "تنظیمات پیامک", Icon = "MessageSquare", IconColor = "#8B5CF6", Route = "/admin/settings/sms", Order = 2, ParentId = settingsMenu.Id },
             new MenuItem { Key = "settings.security", Title = "تنظیمات امنیتی", Icon = "ShieldCheck", IconColor = "#EF4444", Route = "/admin/settings/security", Order = 3, ParentId = settingsMenu.Id },
             new MenuItem { Key = "settings.access", Title = "سطح دسترسی", Icon = "Shield", IconColor = "#2563EB", Route = "/admin/access-level", Order = 4, ParentId = settingsMenu.Id },
-            new MenuItem { Key = "settings.responders", Title = "تنظیمات پاسخگو", Icon = "Phone", IconColor = "#0EA5E9", Route = "/admin/settings/responders", Order = 5, ParentId = settingsMenu.Id },
-            new MenuItem { Key = "settings.users", Title = "تنظیمات کاربران", Icon = "Users", IconColor = "#0EA5E9", Route = "/admin/settings/users", Order = 6, ParentId = settingsMenu.Id }
         };
         foreach (var rm in requiredMenus)
         {
@@ -462,6 +463,8 @@ public static class DbSeeder
             new MenuItem { Key = "responders.send", Title = "ارسال فرم", Icon = "Send", IconColor = "#4F46E5", Route = "/admin/responders/send", Order = 4, ParentId = respondersMenu.Id },
             new MenuItem { Key = "responders.userforms", Title = "فرم کاربران", Icon = "FileText", IconColor = "#0EA5E9", Route = "/admin/responders/user-forms", Order = 5, ParentId = respondersMenu.Id },
             new MenuItem { Key = "users.groups", Title = "گروه‌بندی", Icon = "Users", IconColor = "#2563EB", Route = "/admin/users/groups", Order = 3, ParentId = usersMenuForChild.Id },
+            new MenuItem { Key = "settings.users", Title = "تنظیمات کاربران", Icon = "Settings2", IconColor = "#0EA5E9", Route = "/admin/settings/users", Order = 4, ParentId = usersMenuForChild.Id },
+            new MenuItem { Key = "settings.responders", Title = "تنظیمات پاسخگو", Icon = "Settings2", IconColor = "#0EA5E9", Route = "/admin/settings/responders", Order = 6, ParentId = respondersMenu.Id },
             new MenuItem { Key = "profile", Title = "پروفایل", Icon = "User", IconColor = "#0EA5E9", Route = "/admin/profile", Order = 5, ParentId = null },
             new MenuItem { Key = "messages", Title = "صندوق پیام", Icon = "Mail", IconColor = "#A855F7", Route = "/admin/messages", Order = 6, ParentId = null },
         };
@@ -470,7 +473,8 @@ public static class DbSeeder
             var existing = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == rm.Key, cancellationToken);
             if (existing is null)
                 db.MenuItems.Add(new MenuItem { Id = Guid.NewGuid(), Key = rm.Key, Title = rm.Title, Icon = rm.Icon, IconColor = rm.IconColor, Route = rm.Route, Order = rm.Order, ParentId = rm.ParentId });
-            else if (rm.Key is "forms.workflows" or "forms.workflows.list" or "forms.workflow-runs" or "forms.archive")
+            else if (rm.Key is "forms.workflows" or "forms.workflows.list" or "forms.workflow-runs" or "forms.archive"
+                or "settings.users" or "settings.responders")
             {
                 existing.Title = rm.Title;
                 existing.Route = rm.Route;
@@ -480,6 +484,8 @@ public static class DbSeeder
                 existing.ParentId = rm.ParentId;
             }
         }
+
+        await ReparentUserAndResponderSettingsMenusAsync(db, usersMenuForChild.Id, respondersMenu.Id, cancellationToken);
 
         var approvalsMenu = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "approvals", cancellationToken);
         if (approvalsMenu is not null)
@@ -597,6 +603,64 @@ public static class DbSeeder
         await SyncContractsArchiveMenusForRolesWithPermissionAsync(db, cancellationToken);
 
         await db.SaveChangesAsync(cancellationToken);
+    }
+
+    /// <summary>«تنظیمات کاربران» و «تنظیمات پاسخگو» را از تنظیمات سایت به منوی مدیریت کاربران/پاسخگو منتقل می‌کند.</summary>
+    static async Task ReparentUserAndResponderSettingsMenusAsync(
+        AppDbContext db,
+        Guid usersMenuId,
+        Guid respondersMenuId,
+        CancellationToken cancellationToken)
+    {
+        var usersSettings = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "settings.users", cancellationToken);
+        if (usersSettings is null)
+        {
+            db.MenuItems.Add(new MenuItem
+            {
+                Id = Guid.NewGuid(),
+                Key = "settings.users",
+                Title = "تنظیمات کاربران",
+                Icon = "Settings2",
+                IconColor = "#0EA5E9",
+                Route = "/admin/settings/users",
+                Order = 4,
+                ParentId = usersMenuId,
+            });
+        }
+        else
+        {
+            usersSettings.ParentId = usersMenuId;
+            usersSettings.Order = 4;
+            usersSettings.Title = "تنظیمات کاربران";
+            usersSettings.Route = "/admin/settings/users";
+            usersSettings.Icon = "Settings2";
+            usersSettings.IconColor = "#0EA5E9";
+        }
+
+        var respondersSettings = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "settings.responders", cancellationToken);
+        if (respondersSettings is null)
+        {
+            db.MenuItems.Add(new MenuItem
+            {
+                Id = Guid.NewGuid(),
+                Key = "settings.responders",
+                Title = "تنظیمات پاسخگو",
+                Icon = "Settings2",
+                IconColor = "#0EA5E9",
+                Route = "/admin/settings/responders",
+                Order = 6,
+                ParentId = respondersMenuId,
+            });
+        }
+        else
+        {
+            respondersSettings.ParentId = respondersMenuId;
+            respondersSettings.Order = 6;
+            respondersSettings.Title = "تنظیمات پاسخگو";
+            respondersSettings.Route = "/admin/settings/responders";
+            respondersSettings.Icon = "Settings2";
+            respondersSettings.IconColor = "#0EA5E9";
+        }
     }
 
     /// <summary>منوی اقدامات را زیر «گردش قرارداد» قرار می‌دهد و منوی ریشهٔ قدیمی actions را حذف می‌کند.</summary>

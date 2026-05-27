@@ -163,7 +163,32 @@ public class ContractWorkflowProcessor(
 
         contract.StepsJson = JsonSerializer.Serialize(steps);
         await db.SaveChangesAsync(ct);
+
+        if (!string.IsNullOrWhiteSpace(comment))
+            await NotifyCreatorAboutApproverNoteAsync(contract, assigneeUserId, approverName, comment, approve, ct);
+
         return WorkflowActionResult.Ok(approve ? "تأیید شد" : "رد شد");
+    }
+
+    private async Task NotifyCreatorAboutApproverNoteAsync(
+        Contract contract,
+        Guid assigneeUserId,
+        string? approverName,
+        string comment,
+        bool approved,
+        CancellationToken ct)
+    {
+        var creatorId = contract.CreatedByUserId;
+        if (creatorId == Guid.Empty || creatorId == assigneeUserId) return;
+        var who = string.IsNullOrWhiteSpace(approverName) ? "تأییدکننده" : approverName;
+        var status = approved ? "تأیید" : "رد";
+        var title = contract.Title?.Trim();
+        if (string.IsNullOrWhiteSpace(title)) title = "قرارداد";
+        await inbox.SendToUserAsync(
+            creatorId,
+            $"یادداشت تأییدکننده — {title}",
+            $"پس از {status}، {who} نوشت:\n{comment.Trim()}",
+            ct);
     }
 
     public async Task<WorkflowActionResult> UpdateAmendmentAsync(
@@ -971,6 +996,6 @@ public class ContractWorkflowProcessor(
             .Replace("۵", "5").Replace("۶", "6").Replace("۷", "7").Replace("۸", "8").Replace("۹", "9")
             .Trim();
 
-    public static List<ApprovalStepDto> DeserializeSteps(string? json)
-        => string.IsNullOrWhiteSpace(json) ? [] : (JsonSerializer.Deserialize<List<ApprovalStepDto>>(json) ?? []);
+    public static List<ApprovalStepDto> DeserializeSteps(string? json) =>
+        WorkflowStepJsonHelper.Deserialize(json);
 }

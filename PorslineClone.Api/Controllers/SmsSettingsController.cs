@@ -20,6 +20,7 @@ public class AdminSmsSettingsController(AppDbContext db) : ControllerBase
             settings.OtpEnabled,
             settings.SurveySendEnabled,
             settings.SurveyCompletedNotificationEnabled,
+            settings.FormSubmissionTrackingSmsEnabled,
             settings.UserCreateSmsEnabled,
             settings.ApprovalReferralSmsEnabled,
             settings.FormWorkflowCompletedSenderSmsEnabled,
@@ -54,6 +55,7 @@ public class AdminSmsSettingsController(AppDbContext db) : ControllerBase
         settings.OtpEnabled = dto.OtpEnabled;
         settings.SurveySendEnabled = dto.SurveySendEnabled;
         settings.SurveyCompletedNotificationEnabled = dto.SurveyCompletedNotificationEnabled;
+        settings.FormSubmissionTrackingSmsEnabled = dto.FormSubmissionTrackingSmsEnabled;
         settings.UserCreateSmsEnabled = dto.UserCreateSmsEnabled;
         settings.ApprovalReferralSmsEnabled = dto.ApprovalReferralSmsEnabled;
         settings.FormWorkflowCompletedSenderSmsEnabled = dto.FormWorkflowCompletedSenderSmsEnabled;

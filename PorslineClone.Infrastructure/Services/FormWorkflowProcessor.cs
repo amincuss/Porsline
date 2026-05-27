@@ -132,6 +132,9 @@ public class FormWorkflowProcessor(
         submission.StepsJson = WorkflowStepJsonHelper.Serialize(steps);
         await db.SaveChangesAsync(ct);
 
+        if (!string.IsNullOrWhiteSpace(comment))
+            await NotifyDispatchSenderAboutApproverNoteAsync(submission, assigneeUserId, approverName, comment, approve, ct);
+
         if (becameFullyApproved)
         {
             await dispatchNotifier.NotifySenderAfterFullApprovalAsync(submission, ct);
@@ -246,6 +249,31 @@ public class FormWorkflowProcessor(
         if (sent && isReminder)
             await ApprovalReminderService.MarkReminderSentForFormAsync(db, submission.Id, userId, ct);
         return sent;
+    }
+
+    private async Task NotifyDispatchSenderAboutApproverNoteAsync(
+        FormSubmission submission,
+        Guid assigneeUserId,
+        string? approverName,
+        string comment,
+        bool approved,
+        CancellationToken ct)
+    {
+        if (submission.DispatchLinkId is not Guid linkId) return;
+        var senderId = await db.FormDispatchLinks.AsNoTracking()
+            .Where(x => x.Id == linkId)
+            .Select(x => x.SentByUserId)
+            .FirstOrDefaultAsync(ct);
+        if (senderId is null || senderId == assigneeUserId) return;
+
+        var formTitle = submission.Form?.Title ?? "فرم";
+        var status = approved ? "تأیید" : "رد";
+        var who = string.IsNullOrWhiteSpace(approverName) ? "تأییدکننده" : approverName;
+        await inbox.SendToUserAsync(
+            senderId.Value,
+            $"یادداشت تأییدکننده — {formTitle}",
+            $"پس از {status}، {who} نوشت:\n{comment.Trim()}",
+            ct);
     }
 
     public static List<ApprovalStepDto> DeserializeSteps(string? json) =>

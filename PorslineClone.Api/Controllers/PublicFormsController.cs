@@ -228,7 +228,7 @@ public class PublicFormsController(
         var filesByFieldId = Request.Form.Files.Where(f => f.Name.StartsWith("file_", StringComparison.OrdinalIgnoreCase))
             .ToDictionary(f => f.Name["file_".Length..], f => f, StringComparer.OrdinalIgnoreCase);
 
-        foreach (var ff in form.Fields.Where(x => x.FieldType is FieldType.FileUpload or FieldType.ImageUpload))
+        foreach (var ff in form.Fields.Where(x => x.FieldType is FieldType.FileUpload or FieldType.ImageUpload or FieldType.PersonalPhoto))
         {
             if (!filesByFieldId.TryGetValue(ff.Id.ToString(), out var file) || file.Length <= 0) continue;
             var maxMb = ff.UploadMaxSizeMb is > 0 and <= 100 ? ff.UploadMaxSizeMb!.Value : 10;
@@ -236,8 +236,11 @@ public class PublicFormsController(
             if (file.Length > maxBytes) return BadRequest(new { message = $"حجم فایل فیلد «{ff.Label}» بیشتر از {maxMb}MB است." });
 
             var ext = Path.GetExtension(file.FileName).ToLowerInvariant();
-            var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".pdf", ".jpg", ".jpeg", ".png", ".webp", ".gif" };
-            if (!allowed.Contains(ext)) return BadRequest(new { message = "فقط PDF یا تصویر مجاز است" });
+            var allowed = ff.FieldType == FieldType.FileUpload
+                ? new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".pdf", ".jpg", ".jpeg", ".png", ".webp", ".gif" }
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".jpg", ".jpeg", ".png", ".webp", ".gif" };
+            if (!allowed.Contains(ext))
+                return BadRequest(new { message = ff.FieldType == FieldType.FileUpload ? "فقط PDF یا تصویر مجاز است" : "فقط تصویر مجاز است" });
 
             var safeName = $"{ff.Id}_{DateTime.UtcNow:yyyyMMddHHmmssfff}{ext}";
             var savePath = Path.Combine(uploadRoot, safeName);
@@ -261,6 +264,7 @@ public class PublicFormsController(
             link.ResponderMobileNumber,
             responderId,
             link.Id);
+        submission.TrackingCode = await FormTrackingCodeGenerator.GenerateUniqueAsync(db, ct);
 
         if (link.WorkflowTemplateId is { } dispatchTemplateId)
         {
@@ -298,8 +302,9 @@ public class PublicFormsController(
         var responderForNotify = await db.Responders.AsNoTracking()
             .FirstOrDefaultAsync(x => x.Id == responderId, ct);
         await dispatchNotifier.NotifySenderAfterSubmitAsync(submission, form, link, responderForNotify, ct);
+        await dispatchNotifier.NotifyResponderTrackingCodeAsync(submission, form, link, responderForNotify, ct);
 
-        return Ok(new { message = "فرم با موفقیت ثبت شد" });
+        return Ok(new { message = "فرم با موفقیت ثبت شد", trackingCode = submission.TrackingCode });
     }
 
     private async Task SendInitialApprovalSmsAsync(Guid approverUserId, string formTitle, CancellationToken ct)

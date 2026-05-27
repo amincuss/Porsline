@@ -5,7 +5,6 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.StaticFiles;
-using PorslineClone.Application.Abstractions;
 using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
@@ -18,7 +17,6 @@ namespace PorslineClone.Api.Controllers;
 [Authorize]
 public class AdminUserFormsController(
     AppDbContext db,
-    IFrontendUrlResolver frontendUrls,
     IWebHostEnvironment env,
     FormWorkflowProcessor workflowProcessor,
     FormWorkflowRejectionService rejectionService) : ControllerBase
@@ -56,7 +54,7 @@ public class AdminUserFormsController(
         CancellationToken ct = default)
     {
         page = Math.Max(1, page);
-        pageSize = Math.Clamp(pageSize, 5, 100);
+        pageSize = Math.Clamp(pageSize, 5, 50);
         var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
         Guid.TryParse(currentUserId, out var currentUserGuid);
         var isAdmin = User.IsInRole("Admin");
@@ -72,6 +70,7 @@ public class AdminUserFormsController(
             q = q.Where(x =>
                 (x.SubmitterName ?? "").Contains(s) ||
                 (x.SubmitterEmail ?? "").Contains(s) ||
+                (x.TrackingCode ?? "").Contains(s) ||
                 x.Form.Title.Contains(s));
         }
 
@@ -106,43 +105,47 @@ public class AdminUserFormsController(
             _ => q.OrderByDescending(x => x.SubmittedAtUtc)
         };
 
-        await ProcessDueScheduledWorkflowStartsAsync(ct);
+        if (page == 1)
+            await ProcessDueScheduledWorkflowStartsAsync(ct);
 
         var total = await q.CountAsync(ct);
         var data = await q.Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(ct);
 
-        var baseUrl = (await frontendUrls.ResolvePublicBaseUrlAsync(ct)) ?? "";
+        var dispatchLinkIds = data
+            .Where(x => x.DispatchLinkId is not null)
+            .Select(x => x.DispatchLinkId!.Value)
+            .Distinct()
+            .ToList();
+        var dispatchTemplateByLinkId = dispatchLinkIds.Count == 0
+            ? new Dictionary<Guid, Guid?>()
+            : await db.FormDispatchLinks.AsNoTracking()
+                .Where(l => dispatchLinkIds.Contains(l.Id))
+                .ToDictionaryAsync(l => l.Id, l => (Guid?)l.WorkflowTemplateId, ct);
+        HashSet<Guid> senderLinkIds;
+        if (isAdmin || currentUserGuid == Guid.Empty || dispatchLinkIds.Count == 0)
+            senderLinkIds = new HashSet<Guid>();
+        else
+        {
+            var ownedLinks = await db.FormDispatchLinks.AsNoTracking()
+                .Where(l => dispatchLinkIds.Contains(l.Id) && l.SentByUserId == currentUserGuid)
+                .Select(l => l.Id)
+                .ToListAsync(ct);
+            senderLinkIds = ownedLinks.ToHashSet();
+        }
+
         var result = new List<object>();
         foreach (var x in data)
         {
-            var isSender = await rejectionService.IsDispatchSenderAsync(x, currentUserGuid, isAdmin, ct);
+            var isSender = isAdmin
+                || (x.DispatchLinkId is Guid linkId && senderLinkIds.Contains(linkId));
             var steps = FormWorkflowProcessor.DeserializeSteps(x.StepsJson);
             var latest = steps
                 .Where(s => s.Status == "approved" || s.Status == "rejected")
                 .OrderByDescending(s => s.ActionAt ?? DateTime.MinValue)
                 .FirstOrDefault();
-            string? accessCode = null;
             Guid? dispatchWorkflowTemplateId = null;
-            if (x.DispatchLinkId is not null)
-            {
-                var dispatchMeta = await db.FormDispatchLinks
-                    .Where(l => l.Id == x.DispatchLinkId)
-                    .Select(l => new { l.Code, l.WorkflowTemplateId })
-                    .FirstOrDefaultAsync(ct);
-                if (dispatchMeta is not null)
-                {
-                    accessCode = dispatchMeta.Code;
-                    dispatchWorkflowTemplateId = dispatchMeta.WorkflowTemplateId;
-                }
-            }
-            else if (x.ResponderId is not null)
-            {
-                accessCode = await db.FormDispatchLinks
-                    .Where(l => l.FormId == x.FormId && l.ResponderId == x.ResponderId && l.UsedAtUtc != null)
-                    .OrderByDescending(l => l.UsedAtUtc)
-                    .Select(l => l.Code)
-                    .FirstOrDefaultAsync(ct);
-            }
+            if (x.DispatchLinkId is Guid dlId && dispatchTemplateByLinkId.TryGetValue(dlId, out var tplId))
+                dispatchWorkflowTemplateId = tplId;
 
             result.Add(new
             {
@@ -152,13 +155,13 @@ public class AdminUserFormsController(
                 x.SubmittedAtUtc,
                 SubmitterName = x.SubmitterName,
                 SubmitterMobile = x.SubmitterEmail,
+                TrackingCode = x.TrackingCode,
                 ApprovalStatus = ToClientStatus(x.Status),
                 SuggestedWorkflowTemplateId = x.WorkflowTemplateId ?? dispatchWorkflowTemplateId ?? x.Form.WorkflowTemplateId,
                 SuggestedWorkflowName = x.WorkflowName ?? x.Form.WorkflowName,
                 LatestApprover = latest?.UserName,
                 LatestApproverActionAt = latest?.ActionAt,
                 IsApprovalCompleted = x.Status is FormSubmissionStatus.Approved or FormSubmissionStatus.Rejected,
-                PublicLink = string.IsNullOrWhiteSpace(accessCode) ? null : $"{baseUrl}/forms/fill?c={accessCode}",
                 x.WorkflowName,
                 x.WorkflowTemplateId,
                 x.WorkflowStartedAtUtc,
@@ -196,30 +199,22 @@ public class AdminUserFormsController(
         var values = string.IsNullOrWhiteSpace(submission.FieldsJson)
             ? new List<FormFieldValueDto>()
             : (JsonSerializer.Deserialize<List<FormFieldValueDto>>(submission.FieldsJson) ?? new List<FormFieldValueDto>());
-        var fileValues = values
-            .Where(x => !string.IsNullOrWhiteSpace(x.Value) && x.Value.StartsWith("/Formupload/", StringComparison.OrdinalIgnoreCase))
-            .Select((x, i) =>
+        var uploadPaths = FormSubmissionUploadHelper.ListUploadPaths(values);
+        var fileValues = uploadPaths
+            .Select((url, i) =>
             {
-                var url = x.Value;
-                var relative = url.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
-                var filePath = Path.Combine(env.ContentRootPath, relative);
+                FormSubmissionUploadHelper.TryResolveDiskPath(env, url, out var filePath);
                 var fileInfo = new FileInfo(filePath);
-                var ext = Path.GetExtension(url).ToLowerInvariant();
-                var kind = ext switch
-                {
-                    ".pdf" => "pdf",
-                    ".jpg" or ".jpeg" or ".png" or ".webp" or ".gif" => "image",
-                    _ => "file"
-                };
                 return new
                 {
                     Index = i,
-                    x.Label,
+                    Label = values.FirstOrDefault(v => FormSubmissionUploadHelper.NormalizeRelativePath(v.Value) == url)?.Label ?? "",
                     Url = url,
                     FileName = Path.GetFileName(url),
                     SizeBytes = fileInfo.Exists ? fileInfo.Length : 0L,
-                    Kind = kind,
-                    DownloadUrl = $"/api/admin/user-forms/{submission.Id}/files/{i}/download"
+                    Kind = FormSubmissionUploadHelper.FileKindFromPath(url),
+                    DownloadUrl = $"/api/admin/user-forms/{submission.Id}/files/{i}/download",
+                    MissingOnDisk = !fileInfo.Exists,
                 };
             })
             .ToList();
@@ -267,6 +262,7 @@ public class AdminUserFormsController(
             submission.SubmittedAtUtc,
             SubmitterName = submission.SubmitterName,
             SubmitterMobile = submission.SubmitterEmail,
+            TrackingCode = submission.TrackingCode,
             ApprovalStatus = ToClientStatus(submission.Status),
             SuggestedWorkflowTemplateId = submission.Form.WorkflowTemplateId,
             SuggestedWorkflowName = submission.Form.WorkflowName,
@@ -274,8 +270,9 @@ public class AdminUserFormsController(
             {
                 v.Label,
                 v.Value,
-                IsFile = !string.IsNullOrWhiteSpace(v.Value) && v.Value.StartsWith("/Formupload/", StringComparison.OrdinalIgnoreCase),
-                File = fileValues.FirstOrDefault(f => f.Url == v.Value)
+                IsFile = FormSubmissionUploadHelper.IsUploadPath(v.Value),
+                File = fileValues.FirstOrDefault(f =>
+                    f.Url == FormSubmissionUploadHelper.NormalizeRelativePath(v.Value))
             }),
             Files = fileValues,
             Steps = steps.Select(s => new
@@ -349,13 +346,19 @@ public class AdminUserFormsController(
     }
 
     [HttpPost("{id:guid}/assign-workflow")]
-    [Authorize(Policy = "forms.update")]
+    [Authorize(Policy = "responders.userforms.workflow")]
     public async Task<IActionResult> AssignWorkflow(Guid id, [FromBody] AssignWorkflowRequest req, CancellationToken ct)
     {
         var submission = await GetAuthorizedSubmissionAsync(id, ct);
         if (submission is null) return NotFound(new { message = "پاسخ فرم یافت نشد" });
         if (!CanAssignWorkflow(submission))
             return BadRequest(new { message = BuildAssignWorkflowDeniedMessage(submission) });
+
+        var isRestart = CanRestartWorkflowAfterReject(submission);
+        if (isRestart && !User.HasClaim("permission", "responders.userforms.workflow.restart")
+            && !User.HasClaim("permission", "responders.userforms.workflow")
+            && !User.HasClaim("permission", "forms.update"))
+            return StatusCode(403, new { message = "مجوز «گردش مجدد» ندارید" });
 
         if (!Guid.TryParse(req.WorkflowTemplateId, out var templateId))
             return BadRequest(new { message = "گردش انتخاب‌شده نامعتبر است" });
@@ -379,7 +382,6 @@ public class AdminUserFormsController(
                 return BadRequest(new { message = "تاریخ شروع باید در آینده باشد" });
         }
 
-        var isRestart = CanRestartWorkflowAfterReject(submission);
         if (isRestart)
         {
             FormWorkflowRunHistoryHelper.SnapshotCurrentRun(submission);
@@ -448,7 +450,7 @@ public class AdminUserFormsController(
     }
 
     [HttpPost("{id:guid}/unassign-workflow")]
-    [Authorize(Policy = "forms.update")]
+    [Authorize(Policy = "responders.userforms.workflow")]
     public async Task<IActionResult> UnassignWorkflow(Guid id, CancellationToken ct)
     {
         var submission = await GetAuthorizedSubmissionAsync(id, ct);
@@ -475,7 +477,7 @@ public class AdminUserFormsController(
     }
 
     [HttpPost("{id:guid}/start-workflow")]
-    [Authorize(Policy = "forms.update")]
+    [Authorize(Policy = "responders.userforms.workflow")]
     public async Task<IActionResult> StartWorkflow(Guid id, CancellationToken ct)
     {
         var submission = await GetAuthorizedSubmissionAsync(id, ct);
@@ -610,22 +612,47 @@ public class AdminUserFormsController(
         var values = string.IsNullOrWhiteSpace(submission.FieldsJson)
             ? new List<FormFieldValueDto>()
             : (JsonSerializer.Deserialize<List<FormFieldValueDto>>(submission.FieldsJson) ?? new List<FormFieldValueDto>());
-        var files = values
-            .Where(x => !string.IsNullOrWhiteSpace(x.Value) && x.Value.StartsWith("/Formupload/", StringComparison.OrdinalIgnoreCase))
-            .Select(x => x.Value)
-            .ToList();
-
+        var files = FormSubmissionUploadHelper.ListUploadPaths(values);
         if (index >= files.Count) return NotFound(new { message = "فایل یافت نشد" });
         var url = files[index];
-        var relative = url.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
-        var filePath = Path.Combine(env.ContentRootPath, relative);
-        if (!System.IO.File.Exists(filePath)) return NotFound(new { message = "فایل در سرور موجود نیست" });
+        if (!FormSubmissionUploadHelper.TryResolveDiskPath(env, url, out var filePath))
+            return NotFound(new { message = "فایل در سرور موجود نیست" });
 
         var provider = new FileExtensionContentTypeProvider();
         if (!provider.TryGetContentType(filePath, out var contentType))
             contentType = "application/octet-stream";
 
         return PhysicalFile(filePath, contentType, Path.GetFileName(filePath), enableRangeProcessing: true);
+    }
+
+    [HttpDelete("{id:guid}")]
+    [Authorize(Policy = "responders.userforms.delete")]
+    public async Task<IActionResult> Delete(Guid id, CancellationToken ct = default)
+    {
+        var submission = await GetAuthorizedSubmissionAsync(id, ct);
+        if (submission is null) return NotFound(new { message = "پاسخ فرم یافت نشد" });
+
+        if (submission.Status == FormSubmissionStatus.InProgress)
+            return BadRequest(new { message = "پاسخ در جریان گردش تأیید است؛ ابتدا گردش را لغو یا به پایان برسانید" });
+
+        var values = string.IsNullOrWhiteSpace(submission.FieldsJson)
+            ? new List<FormFieldValueDto>()
+            : (JsonSerializer.Deserialize<List<FormFieldValueDto>>(submission.FieldsJson) ?? new List<FormFieldValueDto>());
+        foreach (var path in FormSubmissionUploadHelper.ListUploadPaths(values))
+        {
+            if (!FormSubmissionUploadHelper.TryResolveDiskPath(env, path, out var fullPath)) continue;
+            try { System.IO.File.Delete(fullPath); } catch { /* ignore */ }
+        }
+
+        var approvalLinks = await db.FormSubmissionApprovalLinks
+            .Where(x => x.FormSubmissionId == id)
+            .ToListAsync(ct);
+        if (approvalLinks.Count > 0)
+            db.FormSubmissionApprovalLinks.RemoveRange(approvalLinks);
+
+        db.FormSubmissions.Remove(submission);
+        await db.SaveChangesAsync(ct);
+        return Ok(new { message = "پاسخ فرم حذف شد" });
     }
 
     [HttpPut("{id:guid}")]

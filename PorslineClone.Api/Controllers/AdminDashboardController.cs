@@ -84,16 +84,10 @@ public class AdminDashboardController(AppDbContext db, UserManager<AppUser> user
         string digits,
         CancellationToken ct)
     {
-        var canReadAll = User.HasClaim("permission", "contracts.read.all");
-        var idStr = userId.ToString();
-
-        var query = db.Contracts.AsNoTracking().Where(c => !c.IsArchived);
-        if (!canReadAll)
-        {
-            query = query.Where(c =>
-                c.CreatedByUserId == userId
-                || (c.StepsJson != null && c.StepsJson.Contains(idStr)));
-        }
+        _ = userId;
+        var query = db.Contracts.AsNoTracking()
+            .Where(c => !c.IsArchived)
+            .ApplyVisibleContracts(User);
 
         query = query.Where(c =>
             c.ContractNumber.Contains(term)
@@ -165,7 +159,9 @@ public class AdminDashboardController(AppDbContext db, UserManager<AppUser> user
         string digits,
         CancellationToken ct)
     {
-        var query = db.FormSubmissions.AsNoTracking();
+        var query = db.FormSubmissions.AsNoTracking()
+            .Include(s => s.Form)
+            .ApplyVisibleFormSubmissions(db, User);
         var words = term
             .Split([' ', '‌', '\t'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Where(w => w.Length >= 2)
@@ -181,6 +177,7 @@ public class AdminDashboardController(AppDbContext db, UserManager<AppUser> user
             query = query.Where(s =>
                 (s.SubmitterName != null && s.SubmitterName.Contains(w))
                 || (s.SubmitterEmail != null && s.SubmitterEmail.Contains(w))
+                || (s.TrackingCode != null && s.TrackingCode.Contains(w))
                 || (s.FieldsJson != null && s.FieldsJson.Contains(w)));
         }
 
@@ -188,6 +185,7 @@ public class AdminDashboardController(AppDbContext db, UserManager<AppUser> user
         {
             query = query.Where(s =>
                 (s.SubmitterEmail != null && s.SubmitterEmail.Contains(digits))
+                || (s.TrackingCode != null && s.TrackingCode.Contains(digits))
                 || (s.FieldsJson != null && s.FieldsJson.Contains(digits)));
         }
         else if (digits.Length >= 3)
@@ -198,6 +196,7 @@ public class AdminDashboardController(AppDbContext db, UserManager<AppUser> user
         var candidates = await (
                 from s in query
                 join f in db.Forms.AsNoTracking() on s.FormId equals f.Id
+                where !f.IsDeleted
                 orderby s.SubmittedAtUtc descending
                 select new
                 {
@@ -327,18 +326,10 @@ public class AdminDashboardController(AppDbContext db, UserManager<AppUser> user
 
     private async Task<IReadOnlyList<DashboardFeedItemDto>> BuildContractFeedAsync(Guid userId, CancellationToken ct)
     {
-        var canReadAll = User.HasClaim("permission", "contracts.read.all");
-        var idStr = userId.ToString();
-
-        var q = db.Contracts.AsNoTracking().Where(c => !c.IsArchived);
-        if (!canReadAll)
-        {
-            q = q.Where(c =>
-                c.CreatedByUserId == userId
-                || (c.StepsJson != null && c.StepsJson.Contains(idStr)));
-        }
-
-        var rows = await q
+        _ = userId;
+        var rows = await db.Contracts.AsNoTracking()
+            .Where(c => !c.IsArchived)
+            .ApplyVisibleContracts(User)
             .OrderByDescending(c => c.CreatedAtUtc)
             .Take(12)
             .Select(c => new
@@ -398,19 +389,19 @@ public class AdminDashboardController(AppDbContext db, UserManager<AppUser> user
 
     private async Task<IReadOnlyList<DashboardFeedItemDto>> BuildFormSubmissionFeedAsync(CancellationToken ct)
     {
-        var rows = await (
-            from s in db.FormSubmissions.AsNoTracking()
-            join f in db.Forms.AsNoTracking() on s.FormId equals f.Id
-            orderby s.SubmittedAtUtc descending
-            select new
+        var rows = await db.FormSubmissions.AsNoTracking()
+            .Include(s => s.Form)
+            .ApplyVisibleFormSubmissions(db, User)
+            .OrderByDescending(s => s.SubmittedAtUtc)
+            .Take(3)
+            .Select(s => new
             {
                 s.Id,
                 s.SubmittedAtUtc,
                 s.SubmitterName,
                 s.FieldsJson,
-                FormTitle = f.Title,
+                FormTitle = s.Form!.Title,
             })
-            .Take(3)
             .ToListAsync(ct);
 
         return rows.Select(s =>
@@ -439,21 +430,12 @@ public class AdminDashboardController(AppDbContext db, UserManager<AppUser> user
         CancellationToken ct)
     {
         var items = new List<DashboardFeedItemDto>();
-        var idStr = userId.ToString();
-        var canReadAllContracts = User.HasClaim("permission", "contracts.read.all");
 
         if (canContracts)
         {
-            var cq = db.Contracts.AsNoTracking()
-                .Where(c => !c.IsArchived && c.Status == ContractStatus.InProgress);
-            if (!canReadAllContracts)
-            {
-                cq = cq.Where(c =>
-                    c.CreatedByUserId == userId
-                    || (c.StepsJson != null && c.StepsJson.Contains(idStr)));
-            }
-
-            var contracts = await cq
+            var contracts = await db.Contracts.AsNoTracking()
+                .Where(c => !c.IsArchived && c.Status == ContractStatus.InProgress)
+                .ApplyVisibleContracts(User)
                 .OrderByDescending(c => c.CreatedAtUtc)
                 .Take(20)
                 .Select(c => new { c.Id, c.ContractNumber, c.Title, c.SubjectPersonName, c.StepsJson, c.CreatedAtUtc })
@@ -477,8 +459,10 @@ public class AdminDashboardController(AppDbContext db, UserManager<AppUser> user
         {
             var submissions = await (
                 from s in db.FormSubmissions.AsNoTracking()
+                    .Include(x => x.Form)
+                    .ApplyVisibleFormSubmissions(db, User)
                 join f in db.Forms.AsNoTracking() on s.FormId equals f.Id
-                where s.Status == FormSubmissionStatus.InProgress
+                where !f.IsDeleted && s.Status == FormSubmissionStatus.InProgress
                 orderby s.SubmittedAtUtc descending
                 select new { s.Id, s.StepsJson, s.SubmittedAtUtc, FormTitle = f.Title })
                 .Take(20)

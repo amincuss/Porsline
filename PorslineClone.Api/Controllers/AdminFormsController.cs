@@ -20,20 +20,9 @@ namespace PorslineClone.Api.Controllers;
 public class AdminFormsController(AppDbContext db, IRuleEvaluationService ruleEvaluationService, IWebHostEnvironment env, ISmsSender smsSender, IInboxMessageService inbox, IFrontendUrlResolver frontendUrls) : ControllerBase
 {
     private string? CurrentUserId => User.FindFirstValue(ClaimTypes.NameIdentifier);
-    private bool IsAdmin => User.IsInRole("Admin");
-    private bool CanReadAllForms => User.HasClaim("permission", "forms.read.all");
 
-    private IQueryable<Form> ScopeVisibleForms(IQueryable<Form> query)
-    {
-        if (IsAdmin || CanReadAllForms) return query;
-        var userId = CurrentUserId;
-        if (!Guid.TryParse(userId, out var userGuid))
-            return query.Where(_ => false);
-
-        return query.Where(f =>
-            f.UserId == userId ||
-            db.FormUserAccesses.Any(a => a.FormId == f.Id && a.UserId == userGuid));
-    }
+    private IQueryable<Form> ScopeVisibleForms(IQueryable<Form> query) =>
+        query.ApplyVisibleForms(db, User);
 
     [HttpGet]
     [Authorize(Policy = "forms.read")]
@@ -217,6 +206,9 @@ public class AdminFormsController(AppDbContext db, IRuleEvaluationService ruleEv
         if (form is null) return NotFound(new { message = "فرم یافت نشد" });
 
         var incoming = req?.Fields ?? [];
+        if (incoming.Count(f => (FieldType)f.FieldType == FieldType.PersonalPhoto) > 1)
+            return BadRequest(new { message = "فقط یک فیلد عکس پرسنلی در هر فرم مجاز است." });
+
         var existing = await db.FormFields.Where(f => f.FormId == id).ToListAsync(ct);
         db.FormFields.RemoveRange(existing);
 
@@ -527,7 +519,7 @@ public class AdminFormsController(AppDbContext db, IRuleEvaluationService ruleEv
                 f => f,
                 StringComparer.OrdinalIgnoreCase);
 
-        foreach (var ff in form.Fields.Where(x => (int)x.FieldType == 9 || (int)x.FieldType == 16))
+        foreach (var ff in form.Fields.Where(x => x.FieldType is FieldType.FileUpload or FieldType.ImageUpload or FieldType.PersonalPhoto))
         {
             if (!filesByFieldId.TryGetValue(ff.Id.ToString(), out var file) || file.Length <= 0) continue;
             var maxMb = ff.UploadMaxSizeMb is > 0 and <= 100 ? ff.UploadMaxSizeMb!.Value : 10;
@@ -537,12 +529,11 @@ public class AdminFormsController(AppDbContext db, IRuleEvaluationService ruleEv
             var ext = Path.GetExtension(file.FileName);
             if (string.IsNullOrWhiteSpace(ext)) ext = ".bin";
             var normalizedExt = ext.ToLowerInvariant();
-            var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            {
-                ".pdf", ".jpg", ".jpeg", ".png", ".webp", ".gif"
-            };
+            var allowed = ff.FieldType == FieldType.FileUpload
+                ? new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".pdf", ".jpg", ".jpeg", ".png", ".webp", ".gif" }
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".jpg", ".jpeg", ".png", ".webp", ".gif" };
             if (!allowed.Contains(normalizedExt))
-                return BadRequest(new { message = "فرمت فایل مجاز نیست. فقط PDF یا تصویر قابل آپلود است." });
+                return BadRequest(new { message = ff.FieldType == FieldType.FileUpload ? "فرمت فایل مجاز نیست. فقط PDF یا تصویر قابل آپلود است." : "فقط تصویر مجاز است." });
             var safeName = $"{ff.Id}_{DateTime.UtcNow:yyyyMMddHHmmssfff}{ext}";
             var savePath = Path.Combine(uploadRoot, safeName);
             await using var stream = System.IO.File.Create(savePath);

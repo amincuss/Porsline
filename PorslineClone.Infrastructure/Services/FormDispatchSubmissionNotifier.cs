@@ -64,6 +64,38 @@ public class FormDispatchSubmissionNotifier(
             await smsSender.SendSmsAsync(new SmsRequest(sender.PhoneNumber, body), ct);
     }
 
+    /// <summary>پس از ثبت فرم در وب — پیامک کد پیگیری به پاسخگو.</summary>
+    public async Task NotifyResponderTrackingCodeAsync(
+        FormSubmission submission,
+        Form form,
+        FormDispatchLink link,
+        Responder? responder,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(submission.TrackingCode))
+            return;
+
+        var smsSettings = await db.SmsSettings.AsNoTracking().FirstOrDefaultAsync(ct) ?? new SmsSettings();
+        if (!smsSettings.FormSubmissionTrackingSmsEnabled)
+            return;
+
+        var mobile = (responder?.MobileNumber ?? link.ResponderMobileNumber ?? submission.SubmitterEmail ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(mobile))
+            return;
+
+        var honorificName = ResponderHonorific.FormatFullName(
+            link.ResponderFullName ?? submission.SubmitterName,
+            responder?.Gender);
+
+        var body =
+            $"{honorificName} محترم،\n\n" +
+            $"فرم «{form.Title}» با موفقیت ثبت شد.\n" +
+            $"کد پیگیری شما: {submission.TrackingCode}\n\n" +
+            "لطفاً این کد را نگه دارید.";
+
+        await smsSender.SendSmsAsync(new SmsRequest(mobile, body), ct);
+    }
+
     public async Task NotifySenderAfterFullApprovalAsync(
         FormSubmission submission,
         CancellationToken ct = default)

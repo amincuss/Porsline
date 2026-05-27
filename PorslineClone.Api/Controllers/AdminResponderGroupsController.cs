@@ -12,7 +12,7 @@ namespace PorslineClone.Api.Controllers;
 public class AdminResponderGroupsController(AppDbContext db) : ControllerBase
 {
     [HttpGet]
-    [Authorize(Policy = "responders.read")]
+    [Authorize(Policy = "respondergroups.read")]
     public async Task<IActionResult> List(
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 10,
@@ -55,7 +55,7 @@ public class AdminResponderGroupsController(AppDbContext db) : ControllerBase
     }
 
     [HttpGet("options")]
-    [Authorize(Policy = "responders.read")]
+    [Authorize(Policy = "respondergroups.read")]
     public async Task<IActionResult> Options(CancellationToken ct)
     {
         var items = await db.ResponderGroups
@@ -67,7 +67,7 @@ public class AdminResponderGroupsController(AppDbContext db) : ControllerBase
     }
 
     [HttpPost]
-    [Authorize(Policy = "responders.add")]
+    [Authorize(Policy = "respondergroups.add")]
     public async Task<IActionResult> Create([FromBody] ResponderGroupUpsertDto dto, CancellationToken ct)
     {
         var name = dto.Name.Trim();
@@ -87,7 +87,7 @@ public class AdminResponderGroupsController(AppDbContext db) : ControllerBase
     }
 
     [HttpPut("{id:guid}")]
-    [Authorize(Policy = "responders.update")]
+    [Authorize(Policy = "respondergroups.update")]
     public async Task<IActionResult> Update(Guid id, [FromBody] ResponderGroupUpsertDto dto, CancellationToken ct)
     {
         var item = await db.ResponderGroups.FirstOrDefaultAsync(x => x.Id == id, ct);
@@ -103,7 +103,7 @@ public class AdminResponderGroupsController(AppDbContext db) : ControllerBase
     }
 
     [HttpDelete("{id:guid}")]
-    [Authorize(Policy = "responders.delete")]
+    [Authorize(Policy = "respondergroups.delete")]
     public async Task<IActionResult> SoftDelete(Guid id, CancellationToken ct)
     {
         var item = await db.ResponderGroups.FirstOrDefaultAsync(x => x.Id == id, ct);
@@ -112,7 +112,7 @@ public class AdminResponderGroupsController(AppDbContext db) : ControllerBase
         item.IsActive = false;
         item.DeletedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
-        return Ok(new { message = "گروه حذف شد" });
+        return Ok(new { message = "گروه به‌صورت حذف نرم از لیست حذف شد" });
     }
 }
 

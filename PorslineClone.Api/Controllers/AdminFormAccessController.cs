@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 using PorslineClone.Infrastructure.Persistence;
+using PorslineClone.Infrastructure.Services;
 
 namespace PorslineClone.Api.Controllers;
 
@@ -11,17 +12,8 @@ namespace PorslineClone.Api.Controllers;
 [Authorize]
 public class AdminFormAccessController(AppDbContext db) : ControllerBase
 {
-    private string? CurrentUserId => User.FindFirstValue(ClaimTypes.NameIdentifier);
-    private bool CanReadAllFormAccess => User.IsInRole("Admin") || User.HasClaim("permission", "forms.access.read.all");
-
-    private IQueryable<Domain.Entities.Form> ScopeFormsForAccess(IQueryable<Domain.Entities.Form> query)
-    {
-        if (CanReadAllFormAccess) return query;
-        var userId = CurrentUserId;
-        if (string.IsNullOrWhiteSpace(userId))
-            return query.Where(_ => false);
-        return query.Where(x => x.UserId == userId);
-    }
+    private IQueryable<Domain.Entities.Form> ScopeFormsForAccess(IQueryable<Domain.Entities.Form> query) =>
+        query.ApplyFormsForAccessDelegation(User);
 
     [HttpGet("users")]
     [Authorize(Policy = "forms.access.read")]

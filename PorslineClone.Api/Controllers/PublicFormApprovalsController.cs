@@ -142,16 +142,10 @@ public class PublicFormApprovalsController(
         if (!steps.Any(s => s.UserId == link.AssigneeUserId))
             return Forbid();
 
-        var files = DeserializeFields(link.FormSubmission.FieldsJson)
-            .Where(x => IsUploadPath(x.Value))
-            .Select(x => x.Value)
-            .ToList();
-
+        var files = FormSubmissionUploadHelper.ListUploadPaths(DeserializeFields(link.FormSubmission.FieldsJson));
         if (index >= files.Count) return NotFound(new { message = "فایل یافت نشد" });
 
-        var relative = files[index].TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
-        var filePath = Path.Combine(env.ContentRootPath, relative);
-        if (!System.IO.File.Exists(filePath))
+        if (!FormSubmissionUploadHelper.TryResolveDiskPath(env, files[index], out var filePath))
             return NotFound(new { message = "فایل در سرور موجود نیست" });
 
         var provider = new FileExtensionContentTypeProvider();
@@ -216,16 +210,10 @@ public class PublicFormApprovalsController(
         return Ok(new { message = result.Message });
     }
 
-    private static bool IsUploadPath(string? value) =>
-        !string.IsNullOrWhiteSpace(value) && value.StartsWith("/Formupload/", StringComparison.OrdinalIgnoreCase);
+    private static bool IsUploadPath(string? value) => FormSubmissionUploadHelper.IsUploadPath(value);
 
-    private long ResolveUploadSizeBytes(string? uploadPath)
-    {
-        if (!IsUploadPath(uploadPath)) return 0;
-        var relative = uploadPath!.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
-        var filePath = Path.Combine(env.ContentRootPath, relative);
-        return System.IO.File.Exists(filePath) ? new FileInfo(filePath).Length : 0;
-    }
+    private long ResolveUploadSizeBytes(string? uploadPath) =>
+        FormSubmissionUploadHelper.ResolveSizeBytes(env, uploadPath);
 
     private static List<FormFieldValueDto> DeserializeFields(string? json) =>
         string.IsNullOrWhiteSpace(json)

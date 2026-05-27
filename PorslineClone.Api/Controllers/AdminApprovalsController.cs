@@ -33,11 +33,9 @@ public class AdminApprovalsController(
         var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
         Guid.TryParse(currentUserId, out var currentUserGuid);
 
-        var query = db.FormSubmissions
+        var list = await db.FormSubmissions
             .Include(x => x.Form)
-            .AsQueryable();
-
-        var list = await query
+            .ApplyVisibleFormSubmissions(db, User)
             .OrderByDescending(x => x.SubmittedAtUtc)
             .Take(200)
             .ToListAsync(ct);
@@ -217,17 +215,11 @@ public class AdminApprovalsController(
         }
 
         var values = DeserializeFields(submission.FieldsJson);
-        var files = values
-            .Where(x => !string.IsNullOrWhiteSpace(x.Value) && x.Value.StartsWith("/Formupload/", StringComparison.OrdinalIgnoreCase))
-            .Select(x => x.Value)
-            .ToList();
-
+        var files = FormSubmissionUploadHelper.ListUploadPaths(values);
         if (index >= files.Count) return NotFound(new { message = "فایل یافت نشد" });
 
         var url = files[index];
-        var relative = url.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
-        var filePath = Path.Combine(env.ContentRootPath, relative);
-        if (!System.IO.File.Exists(filePath))
+        if (!FormSubmissionUploadHelper.TryResolveDiskPath(env, url, out var filePath))
             return NotFound(new { message = "فایل در سرور موجود نیست" });
 
         var provider = new FileExtensionContentTypeProvider();

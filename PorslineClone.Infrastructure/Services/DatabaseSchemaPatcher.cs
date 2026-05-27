@@ -180,6 +180,10 @@ public static class DatabaseSchemaPatcher
                 ALTER TABLE [dbo].[SmsSettings] ADD [FormResponderApprovedSmsEnabled] bit NOT NULL
                     CONSTRAINT [DF_SmsSettings_FormResponderApprovedSmsEnabled] DEFAULT (1);
 
+            IF COL_LENGTH('dbo.SmsSettings', 'FormSubmissionTrackingSmsEnabled') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [FormSubmissionTrackingSmsEnabled] bit NOT NULL
+                    CONSTRAINT [DF_SmsSettings_FormSubmissionTrackingSmsEnabled] DEFAULT (1);
+
             IF COL_LENGTH('dbo.SmsSettings', 'FormWorkflowRejectedSenderSmsEnabled') IS NULL
                 ALTER TABLE [dbo].[SmsSettings] ADD [FormWorkflowRejectedSenderSmsEnabled] bit NOT NULL
                     CONSTRAINT [DF_SmsSettings_FormWorkflowRejectedSenderSmsEnabled] DEFAULT (1);
@@ -477,6 +481,19 @@ public static class DatabaseSchemaPatcher
             IF COL_LENGTH('dbo.FormSubmissions', 'WorkflowRejectionJson') IS NULL
                 ALTER TABLE [dbo].[FormSubmissions] ADD [WorkflowRejectionJson] nvarchar(max) NULL;
 
+            IF COL_LENGTH('dbo.FormSubmissions', 'TrackingCode') IS NULL
+                ALTER TABLE [dbo].[FormSubmissions] ADD [TrackingCode] nvarchar(32) NULL;
+
+            IF OBJECT_ID(N'[dbo].[FormSubmissions]', N'U') IS NOT NULL
+               AND COL_LENGTH('dbo.FormSubmissions', 'TrackingCode') IS NOT NULL
+               AND NOT EXISTS (
+                    SELECT 1 FROM sys.indexes
+                    WHERE name = N'IX_FormSubmissions_TrackingCode'
+                      AND object_id = OBJECT_ID(N'[dbo].[FormSubmissions]'))
+                CREATE UNIQUE NONCLUSTERED INDEX [IX_FormSubmissions_TrackingCode]
+                    ON [dbo].[FormSubmissions]([TrackingCode])
+                    WHERE [TrackingCode] IS NOT NULL;
+
             IF OBJECT_ID(N'[dbo].[FormDispatchLinks]', N'U') IS NOT NULL
                AND COL_LENGTH('dbo.FormDispatchLinks', 'WorkflowTemplateId') IS NULL
                 ALTER TABLE [dbo].[FormDispatchLinks] ADD [WorkflowTemplateId] uniqueidentifier NULL;
@@ -508,10 +525,60 @@ public static class DatabaseSchemaPatcher
 
         await ExecuteScriptAsync(db,
             """
+            IF OBJECT_ID(N'[dbo].[FormUserAccesses]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[FormUserAccesses] (
+                    [FormId] uniqueidentifier NOT NULL,
+                    [UserId] uniqueidentifier NOT NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL CONSTRAINT [DF_FormUserAccesses_CreatedAtUtc] DEFAULT (GETUTCDATE()),
+                    CONSTRAINT [PK_FormUserAccesses] PRIMARY KEY ([FormId], [UserId])
+                );
+                CREATE INDEX [IX_FormUserAccesses_UserId] ON [dbo].[FormUserAccesses]([UserId]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[FormUserAccesses]', N'U') IS NOT NULL
+               AND OBJECT_ID(N'[dbo].[Forms]', N'U') IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM sys.foreign_keys
+                   WHERE name = N'FK_FormUserAccesses_Forms_FormId')
+            BEGIN
+                ALTER TABLE [dbo].[FormUserAccesses] WITH CHECK ADD CONSTRAINT [FK_FormUserAccesses_Forms_FormId]
+                    FOREIGN KEY ([FormId]) REFERENCES [dbo].[Forms]([Id]) ON DELETE CASCADE;
+            END
+
+            IF OBJECT_ID(N'[dbo].[FormUserAccesses]', N'U') IS NOT NULL
+               AND OBJECT_ID(N'[dbo].[AspNetUsers]', N'U') IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM sys.foreign_keys
+                   WHERE name = N'FK_FormUserAccesses_AspNetUsers_UserId')
+            BEGIN
+                ALTER TABLE [dbo].[FormUserAccesses] WITH CHECK ADD CONSTRAINT [FK_FormUserAccesses_AspNetUsers_UserId]
+                    FOREIGN KEY ([UserId]) REFERENCES [dbo].[AspNetUsers]([Id]) ON DELETE CASCADE;
+            END
+            """, ct);
+
+        await ExecuteScriptAsync(db,
+            """
             IF COL_LENGTH('dbo.InboxMessages', 'IsArchived') IS NULL
                 ALTER TABLE [dbo].[InboxMessages] ADD [IsArchived] bit NOT NULL CONSTRAINT DF_InboxMessages_IsArchived DEFAULT(0);
             IF COL_LENGTH('dbo.InboxMessages', 'ReadAtUtc') IS NULL
                 ALTER TABLE [dbo].[InboxMessages] ADD [ReadAtUtc] datetime2 NULL;
+            IF COL_LENGTH('dbo.InboxMessages', 'SenderUserId') IS NULL
+                ALTER TABLE [dbo].[InboxMessages] ADD [SenderUserId] uniqueidentifier NULL;
+            IF COL_LENGTH('dbo.InboxMessages', 'IsHtml') IS NULL
+                ALTER TABLE [dbo].[InboxMessages] ADD [IsHtml] bit NOT NULL CONSTRAINT DF_InboxMessages_IsHtml DEFAULT(0);
+            IF COL_LENGTH('dbo.InboxMessages', 'AttachmentFileName') IS NULL
+                ALTER TABLE [dbo].[InboxMessages] ADD [AttachmentFileName] nvarchar(260) NULL;
+            IF COL_LENGTH('dbo.InboxMessages', 'AttachmentPath') IS NULL
+                ALTER TABLE [dbo].[InboxMessages] ADD [AttachmentPath] nvarchar(500) NULL;
+            IF EXISTS (
+                SELECT 1 FROM sys.columns c
+                WHERE c.object_id = OBJECT_ID(N'dbo.InboxMessages') AND c.name = N'Body'
+                  AND c.max_length > 0 AND c.max_length <> -1)
+                ALTER TABLE [dbo].[InboxMessages] ALTER COLUMN [Body] nvarchar(max) NOT NULL;
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_InboxMessages_SenderUserId_CreatedAtUtc' AND object_id = OBJECT_ID(N'dbo.InboxMessages'))
+                CREATE NONCLUSTERED INDEX [IX_InboxMessages_SenderUserId_CreatedAtUtc]
+                    ON [dbo].[InboxMessages]([SenderUserId], [CreatedAtUtc]);
             """, ct);
 
         await ApplyRedundancyCleanupAndPerformanceIndexesAsync(db, ct);

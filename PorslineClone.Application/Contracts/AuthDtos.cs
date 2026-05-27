@@ -32,6 +32,7 @@ public record SmsSettingsDto(
     bool OtpEnabled,
     bool SurveySendEnabled,
     bool SurveyCompletedNotificationEnabled,
+    bool FormSubmissionTrackingSmsEnabled,
     bool UserCreateSmsEnabled,
     bool ApprovalReferralSmsEnabled,
     bool FormWorkflowCompletedSenderSmsEnabled,
@@ -62,7 +63,43 @@ public record InboxMessageDto(
     DateTime CreatedAtUtc,
     DateTime? ReadAtUtc);
 
+public record AdminInboxMessageDto(
+    Guid Id,
+    string Title,
+    string Body,
+    bool IsHtml,
+    bool IsRead,
+    bool IsArchived,
+    DateTime CreatedAtUtc,
+    DateTime? ReadAtUtc,
+    bool IsSystemMessage,
+    Guid? SenderUserId,
+    string? SenderName,
+    string? SenderEmail,
+    Guid RecipientUserId,
+    string? RecipientName,
+    string? RecipientEmail,
+    bool HasAttachment,
+    string? AttachmentFileName);
+
 public record InboxStatsDto(int Total, int Unread, int Archived);
+
+public record AdminInboxStatsDto(
+    int InboxTotal,
+    int Unread,
+    int Archived,
+    int SystemUnread,
+    int PersonalUnread,
+    int SentTotal,
+    int SentUnreadByRecipient);
+
+public record MessageRecipientOptionDto(
+    Guid Id,
+    string FirstName,
+    string LastName,
+    string Name,
+    string Email,
+    string? AvatarUrl);
 public record SmsRequest(string MobileNumber, string Message);
 public record CreateUserDto(
     [Required, MinLength(2), MaxLength(100)] string FirstName,

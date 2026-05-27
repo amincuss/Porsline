@@ -41,16 +41,6 @@ public class AdminWorkflowRunsController(
         return steps.Any(s => s.UserId == userId);
     }
 
-    private bool UserCanAccessSubmission(FormSubmission submission, Guid userId, string? currentUserId)
-    {
-        if (CanReadAllWorkflowRuns) return true;
-        if (!string.IsNullOrWhiteSpace(currentUserId) && submission.Form.UserId == currentUserId)
-            return true;
-        if (UserIsInSubmissionWorkflow(submission, userId))
-            return true;
-        return false;
-    }
-
     private async Task<bool> UserSentDispatchLinkAsync(FormSubmission submission, Guid userId, CancellationToken ct)
     {
         if (submission.DispatchLinkId is not { } linkId) return false;
@@ -64,7 +54,14 @@ public class AdminWorkflowRunsController(
         string? currentUserId,
         CancellationToken ct)
     {
-        if (UserCanAccessSubmission(submission, userId, currentUserId))
+        _ = currentUserId;
+        if (FormVisibilityQuery.CanReadAllFormSubmissions(User))
+            return true;
+        if (UserIsInSubmissionWorkflow(submission, userId))
+            return true;
+        if (submission.Form is not null && FormVisibilityQuery.UserOwnsForm(submission.Form, userId))
+            return true;
+        if (await db.FormUserAccesses.AnyAsync(a => a.FormId == submission.FormId && a.UserId == userId, ct))
             return true;
         return await UserSentDispatchLinkAsync(submission, userId, ct);
     }
@@ -74,16 +71,9 @@ public class AdminWorkflowRunsController(
         Guid userId,
         string? currentUserId)
     {
-        if (CanReadAllWorkflowRuns)
-            return query;
-
-        var idStr = userId.ToString();
-        return query.Where(x =>
-            x.Form.UserId == currentUserId
-            || (x.DispatchLinkId != null
-                && db.FormDispatchLinks.Any(l =>
-                    l.Id == x.DispatchLinkId && l.SentByUserId == userId))
-            || (x.StepsJson != null && x.StepsJson.Contains(idStr)));
+        _ = userId;
+        _ = currentUserId;
+        return query.ApplyVisibleFormSubmissions(db, User);
     }
 
     private async Task<FormSubmission?> GetAuthorizedSubmissionAsync(
@@ -125,13 +115,8 @@ public class AdminWorkflowRunsController(
         if (CanReadAllFormsArchive)
             return query;
 
-        var idStr = userId.ToString();
-        return query.Where(x =>
-            x.Form.UserId == currentUserId
-            || (x.DispatchLinkId != null
-                && db.FormDispatchLinks.Any(l =>
-                    l.Id == x.DispatchLinkId && l.SentByUserId == userId))
-            || (x.StepsJson != null && x.StepsJson.Contains(idStr)));
+        _ = currentUserId;
+        return query.ApplyVisibleFormSubmissions(db, User);
     }
 
     private static bool HasWorkflowRun(FormSubmission submission) =>
@@ -143,7 +128,7 @@ public class AdminWorkflowRunsController(
     [Authorize(Policy = "workflow-runs.read")]
     public async Task<IActionResult> List(
         [FromQuery] int page = 1,
-        [FromQuery] int pageSize = 15,
+        [FromQuery] int pageSize = 10,
         [FromQuery] string? search = null,
         [FromQuery] string? status = null,
         [FromQuery] bool awaitingMe = false,
@@ -193,16 +178,7 @@ public class AdminWorkflowRunsController(
         int total;
         if (awaitingMe)
         {
-            var candidates = await q
-                .OrderByDescending(x => x.SubmittedAtUtc)
-                .ToListAsync(ct);
-            var mine = candidates
-                .Where(x =>
-                    IsAwaitingUserApproval(x, DeserializeSteps(x.StepsJson), currentUserGuid)
-                    || FormActionPhaseHelper.IsAwaitingUserAction(x, currentUserGuid))
-                .ToList();
-            total = mine.Count;
-            data = mine.Skip((page - 1) * pageSize).Take(pageSize).ToList();
+            (data, total) = await PaginateAwaitingMeAsync(q, currentUserGuid, page, pageSize, ct);
         }
         else
         {
@@ -266,7 +242,7 @@ public class AdminWorkflowRunsController(
     [Authorize(Policy = "forms.archive.read")]
     public async Task<IActionResult> ListArchive(
         [FromQuery] int page = 1,
-        [FromQuery] int pageSize = 15,
+        [FromQuery] int pageSize = 10,
         [FromQuery] string? search = null,
         [FromQuery] string? status = null,
         CancellationToken ct = default)
@@ -374,30 +350,22 @@ public class AdminWorkflowRunsController(
             ? new List<FormFieldValueDto>()
             : (JsonSerializer.Deserialize<List<FormFieldValueDto>>(submission.FieldsJson) ?? new List<FormFieldValueDto>());
 
-        var fileValues = values
-            .Where(x => !string.IsNullOrWhiteSpace(x.Value) && x.Value.StartsWith("/Formupload/", StringComparison.OrdinalIgnoreCase))
-            .Select((x, i) =>
+        var uploadPaths = FormSubmissionUploadHelper.ListUploadPaths(values);
+        var fileValues = uploadPaths
+            .Select((url, i) =>
             {
-                var url = x.Value;
-                var relative = url.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
-                var filePath = Path.Combine(env.ContentRootPath, relative);
+                FormSubmissionUploadHelper.TryResolveDiskPath(env, url, out var filePath);
                 var fileInfo = new FileInfo(filePath);
-                var ext = Path.GetExtension(url).ToLowerInvariant();
-                var kind = ext switch
-                {
-                    ".pdf" => "pdf",
-                    ".jpg" or ".jpeg" or ".png" or ".webp" or ".gif" => "image",
-                    _ => "file"
-                };
                 return new
                 {
                     Index = i,
-                    x.Label,
+                    Label = values.FirstOrDefault(v => FormSubmissionUploadHelper.NormalizeRelativePath(v.Value) == url)?.Label ?? "",
                     Url = url,
                     FileName = Path.GetFileName(url),
                     SizeBytes = fileInfo.Exists ? fileInfo.Length : 0L,
-                    Kind = kind,
-                    DownloadUrl = $"/api/admin/workflow-runs/{submission.Id}/files/{i}/download"
+                    Kind = FormSubmissionUploadHelper.FileKindFromPath(url),
+                    DownloadUrl = $"/api/admin/workflow-runs/{submission.Id}/files/{i}/download",
+                    MissingOnDisk = !fileInfo.Exists,
                 };
             })
             .ToList();
@@ -452,8 +420,9 @@ public class AdminWorkflowRunsController(
             {
                 v.Label,
                 v.Value,
-                IsFile = !string.IsNullOrWhiteSpace(v.Value) && v.Value.StartsWith("/Formupload/", StringComparison.OrdinalIgnoreCase),
-                File = fileValues.FirstOrDefault(f => f.Url == v.Value)
+                IsFile = FormSubmissionUploadHelper.IsUploadPath(v.Value),
+                File = fileValues.FirstOrDefault(f =>
+                    f.Url == FormSubmissionUploadHelper.NormalizeRelativePath(v.Value))
             }),
             Files = fileValues,
             Steps = steps.Select(s => new
@@ -566,16 +535,11 @@ public class AdminWorkflowRunsController(
         var values = string.IsNullOrWhiteSpace(submission.FieldsJson)
             ? new List<FormFieldValueDto>()
             : (JsonSerializer.Deserialize<List<FormFieldValueDto>>(submission.FieldsJson) ?? new List<FormFieldValueDto>());
-        var files = values
-            .Where(x => !string.IsNullOrWhiteSpace(x.Value) && x.Value.StartsWith("/Formupload/", StringComparison.OrdinalIgnoreCase))
-            .Select(x => x.Value)
-            .ToList();
-
+        var files = FormSubmissionUploadHelper.ListUploadPaths(values);
         if (index >= files.Count) return NotFound(new { message = "فایل یافت نشد" });
         var url = files[index];
-        var relative = url.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
-        var filePath = Path.Combine(env.ContentRootPath, relative);
-        if (!System.IO.File.Exists(filePath)) return NotFound(new { message = "فایل در سرور موجود نیست" });
+        if (!FormSubmissionUploadHelper.TryResolveDiskPath(env, url, out var filePath))
+            return NotFound(new { message = "فایل در سرور موجود نیست" });
 
         var provider = new FileExtensionContentTypeProvider();
         if (!provider.TryGetContentType(filePath, out var contentType))
@@ -642,6 +606,45 @@ public class AdminWorkflowRunsController(
         FormSubmissionStatus.Submitted => "submitted",
         _ => "pending"
     };
+
+    /// <summary>صفحه‌بندی «نوبت من» بدون بارگذاری یکجای همه رکوردها در حافظه.</summary>
+    private async Task<(List<FormSubmission> Page, int Total)> PaginateAwaitingMeAsync(
+        IQueryable<FormSubmission> query,
+        Guid currentUserGuid,
+        int page,
+        int pageSize,
+        CancellationToken ct)
+    {
+        const int scanBatch = 80;
+        var ordered = query.OrderByDescending(x => x.SubmittedAtUtc);
+        var matchedTotal = 0;
+        var pageItems = new List<FormSubmission>();
+        var startIndex = (page - 1) * pageSize;
+        var offset = 0;
+
+        while (true)
+        {
+            var batch = await ordered.Skip(offset).Take(scanBatch).ToListAsync(ct);
+            if (batch.Count == 0) break;
+            offset += batch.Count;
+
+            foreach (var submission in batch)
+            {
+                var steps = DeserializeSteps(submission.StepsJson);
+                if (!IsAwaitingUserApproval(submission, steps, currentUserGuid)
+                    && !FormActionPhaseHelper.IsAwaitingUserAction(submission, currentUserGuid))
+                    continue;
+
+                if (matchedTotal >= startIndex && pageItems.Count < pageSize)
+                    pageItems.Add(submission);
+                matchedTotal++;
+            }
+
+            if (batch.Count < scanBatch) break;
+        }
+
+        return (pageItems, matchedTotal);
+    }
 
     private static bool IsAwaitingUserApproval(FormSubmission submission, List<ApprovalStepDto> steps, Guid userGuid)
     {

@@ -104,6 +104,8 @@ public class SmsSettings
     public bool OtpEnabled { get; set; } = true;
     public bool SurveySendEnabled { get; set; } = true;
     public bool SurveyCompletedNotificationEnabled { get; set; } = true;
+    /// <summary>پس از ثبت فرم در وب، پیامک کد پیگیری به موبایل پاسخگو</summary>
+    public bool FormSubmissionTrackingSmsEnabled { get; set; } = true;
     public bool UserCreateSmsEnabled { get; set; } = true;
     public bool ApprovalReferralSmsEnabled { get; set; } = true;
     /// <summary>پس از تأیید نهایی گردش فرم، پیامک به کارشناس ارسال‌کننده لینک</summary>
@@ -143,9 +145,16 @@ public class SmsSettings
 public class InboxMessage
 {
     public Guid Id { get; set; }
+    /// <summary>گیرنده</summary>
     public Guid UserId { get; set; }
+    /// <summary>فرستنده — null یعنی پیام سیستمی</summary>
+    public Guid? SenderUserId { get; set; }
     public string Title { get; set; } = string.Empty;
+    /// <summary>متن ساده یا HTML</summary>
     public string Body { get; set; } = string.Empty;
+    public bool IsHtml { get; set; }
+    public string? AttachmentFileName { get; set; }
+    public string? AttachmentPath { get; set; }
     public bool IsRead { get; set; }
     public bool IsArchived { get; set; }
     public DateTime? ReadAtUtc { get; set; }

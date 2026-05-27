@@ -9,7 +9,13 @@ public interface ISmsSender
 
 public interface IInboxMessageService
 {
-    Task SendToUserAsync(Guid userId, string title, string body, CancellationToken cancellationToken = default);
+    Task SendToUserAsync(
+        Guid userId,
+        string title,
+        string body,
+        CancellationToken cancellationToken = default,
+        Guid? senderUserId = null,
+        bool isHtml = false);
     Task SendToMobileAsync(string mobileNumber, string title, string body, CancellationToken cancellationToken = default);
 }
 

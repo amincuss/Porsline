@@ -8,7 +8,13 @@ namespace PorslineClone.Infrastructure.Services;
 
 public class InboxMessageService(AppDbContext db, UserManager<AppUser> userManager) : IInboxMessageService
 {
-    public async Task SendToUserAsync(Guid userId, string title, string body, CancellationToken cancellationToken = default)
+    public async Task SendToUserAsync(
+        Guid userId,
+        string title,
+        string body,
+        CancellationToken cancellationToken = default,
+        Guid? senderUserId = null,
+        bool isHtml = false)
     {
         var trimmedTitle = (title ?? "").Trim();
         var trimmedBody = (body ?? "").Trim();
@@ -19,8 +25,10 @@ public class InboxMessageService(AppDbContext db, UserManager<AppUser> userManag
         {
             Id = Guid.NewGuid(),
             UserId = userId,
+            SenderUserId = senderUserId,
             Title = trimmedTitle.Length > 200 ? trimmedTitle[..200] : trimmedTitle,
-            Body = trimmedBody.Length > 2000 ? trimmedBody[..2000] : trimmedBody,
+            Body = trimmedBody,
+            IsHtml = isHtml,
             IsRead = false,
             IsArchived = false,
             CreatedAtUtc = DateTime.UtcNow,

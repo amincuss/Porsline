@@ -150,7 +150,7 @@ public class AdminUsersController(
     }
 
     [HttpPost("import")]
-    [Authorize(Policy = "users.add")]
+    [Authorize(Policy = "users.import")]
     public async Task<IActionResult> Import([FromBody] ImportUsersDto dto, CancellationToken cancellationToken)
     {
         var groupIds = (dto.DefaultGroupIds ?? [])
@@ -571,7 +571,7 @@ public class AdminUsersController(
     }
 
     [HttpGet("{id:guid}/role-names")]
-    [Authorize(Policy = "users.read")]
+    [Authorize(Policy = "users.access.read")]
     public async Task<IActionResult> GetUserRoleNames(Guid id, CancellationToken cancellationToken)
     {
         var user = await userManager.FindByIdAsync(id.ToString());
@@ -581,7 +581,7 @@ public class AdminUsersController(
     }
 
     [HttpGet("roles-options")]
-    [Authorize(Policy = "users.read")]
+    [Authorize(Policy = "users.access.read")]
     public async Task<IActionResult> RolesOptions(CancellationToken cancellationToken)
     {
         var roles = await dbRoles(cancellationToken);
@@ -726,7 +726,7 @@ public class AdminUsersController(
     }
 
     [HttpPut("{id:guid}/role")]
-    [Authorize(Policy = "users.update")]
+    [Authorize(Policy = "users.access.update")]
     public async Task<IActionResult> UpdateRole(Guid id, [FromBody] UpdateUserRoleDto dto)
     {
         var user = await userManager.FindByIdAsync(id.ToString());
@@ -743,7 +743,7 @@ public class AdminUsersController(
     }
 
     [HttpPut("{id:guid}/roles")]
-    [Authorize(Policy = "users.update")]
+    [Authorize(Policy = "users.access.update")]
     public async Task<IActionResult> UpdateRoles(Guid id, [FromBody] SetUserRolesDto dto)
     {
         var user = await userManager.FindByIdAsync(id.ToString());

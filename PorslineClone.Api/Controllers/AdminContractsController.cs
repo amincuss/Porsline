@@ -34,13 +34,12 @@ public class AdminContractsController(
     };
 
     private bool IsAdmin => User.IsInRole("Admin");
-    private bool CanReadAllContracts => IsAdmin || User.HasClaim("permission", "contracts.read.all");
+    private bool CanReadAllContracts => ContractVisibilityQuery.CanReadAllContracts(User);
     private bool CanReadContractsArchive =>
-        IsAdmin
+        User.IsInRole("Admin")
         || User.HasClaim("permission", "contracts.archive.read")
         || User.HasClaim("permission", "contracts.archive.read.all");
-    private bool CanReadAllContractsArchive =>
-        IsAdmin || User.HasClaim("permission", "contracts.archive.read.all");
+    private bool CanReadAllContractsArchive => ContractVisibilityQuery.CanReadAllContractsArchive(User);
 
     private static bool UserIsInContractWorkflow(Contract contract, Guid userId)
     {
@@ -55,24 +54,14 @@ public class AdminContractsController(
 
     private IQueryable<Contract> ScopeVisibleContracts(IQueryable<Contract> query, Guid userId)
     {
-        if (CanReadAllContracts)
-            return query;
-
-        var idStr = userId.ToString();
-        return query.Where(c =>
-            c.CreatedByUserId == userId
-            || (c.StepsJson != null && c.StepsJson.Contains(idStr)));
+        _ = userId;
+        return query.ApplyVisibleContracts(User);
     }
 
     private IQueryable<Contract> ScopeVisibleArchivedContracts(IQueryable<Contract> query, Guid userId)
     {
-        if (CanReadAllContractsArchive)
-            return query;
-
-        var idStr = userId.ToString();
-        return query.Where(c =>
-            c.CreatedByUserId == userId
-            || (c.StepsJson != null && c.StepsJson.Contains(idStr)));
+        _ = userId;
+        return query.ApplyVisibleArchivedContracts(User);
     }
 
     private bool TryGetCurrentUserId(out Guid userId) =>

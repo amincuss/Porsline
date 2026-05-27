@@ -19,7 +19,9 @@ public enum FieldType
     PersianDate = 15,
     ImageUpload = 16,
     /// <summary>فایل راهنما (توسط سازنده فرم) — فقط مشاهده برای پاسخگو</summary>
-    Guide = 17
+    Guide = 17,
+    /// <summary>عکس پرسنلی — حداکثر یکی در فرم؛ در نسخه اداری گوشه بالا راست</summary>
+    PersonalPhoto = 18
 }
 
 public class Form
@@ -97,6 +99,8 @@ public class FormSubmission
     public Form Form { get; set; } = null!;
     public string? SubmitterName { get; set; }
     public string? SubmitterEmail { get; set; }
+    /// <summary>کد پیگیری ۸ رقمی — پس از ثبت فرم در وب به پاسخگو پیامک می‌شود.</summary>
+    public string? TrackingCode { get; set; }
     public Guid? ResponderId { get; set; }
     public Guid? DispatchLinkId { get; set; }
     public DateTime SubmittedAtUtc { get; set; } = DateTime.UtcNow;

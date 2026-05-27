@@ -189,9 +189,12 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         builder.Entity<InboxMessage>(entity =>
         {
             entity.Property(x => x.Title).HasMaxLength(200).IsRequired();
-            entity.Property(x => x.Body).HasMaxLength(2000).IsRequired();
+            entity.Property(x => x.Body).HasColumnType("nvarchar(max)").IsRequired();
+            entity.Property(x => x.AttachmentFileName).HasMaxLength(260);
+            entity.Property(x => x.AttachmentPath).HasMaxLength(500);
             entity.HasIndex(x => new { x.UserId, x.IsRead, x.CreatedAtUtc });
             entity.HasIndex(x => new { x.UserId, x.IsArchived, x.IsRead, x.CreatedAtUtc });
+            entity.HasIndex(x => new { x.SenderUserId, x.CreatedAtUtc });
             entity.HasOne<AppUser>()
                 .WithMany()
                 .HasForeignKey(x => x.UserId)
@@ -311,6 +314,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         {
             entity.Property(x => x.SubmitterName).HasMaxLength(200);
             entity.Property(x => x.SubmitterEmail).HasMaxLength(300);
+            entity.Property(x => x.TrackingCode).HasMaxLength(32);
+            entity.HasIndex(x => x.TrackingCode).IsUnique().HasFilter("[TrackingCode] IS NOT NULL");
             entity.HasIndex(x => x.ResponderId);
             entity.HasIndex(x => x.DispatchLinkId);
             entity.Property(x => x.FieldsJson).HasMaxLength(20000);
@@ -644,6 +649,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             OtpEnabled = true,
             SurveySendEnabled = true,
             SurveyCompletedNotificationEnabled = true,
+            FormSubmissionTrackingSmsEnabled = true,
             UserCreateSmsEnabled = true,
             ApprovalReferralSmsEnabled = true,
             FormWorkflowCompletedSenderSmsEnabled = true,

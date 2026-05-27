@@ -47,7 +47,19 @@ public static class WorkflowStepJsonHelper
             }
         }
 
+        EnsureUniqueStepIds(ordered);
         return ordered;
+    }
+
+    /// <summary>مراحل قدیمی بدون Id یا با Id تکراری — برای React و به‌روزرسانی پایدار.</summary>
+    private static void EnsureUniqueStepIds(List<ApprovalStepDto> steps)
+    {
+        var seen = new HashSet<Guid>();
+        foreach (var step in steps)
+        {
+            if (step.Id == Guid.Empty || !seen.Add(step.Id))
+                step.Id = Guid.NewGuid();
+        }
     }
 
     public static string NormalizeStatus(string? status)

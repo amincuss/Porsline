@@ -22,6 +22,15 @@ public class AdminUserGroupsController(AppDbContext db) : ControllerBase
     }
     private bool CanReadAllUserGroups => User.HasClaim("permission", "usergroups.read.all");
 
+    private IActionResult? DenyUnlessCanModify(UserGroup item)
+    {
+        if (CanReadAllUserGroups) return null;
+        var uid = CurrentUserGuid;
+        if (!uid.HasValue || item.CreatedByUserId != uid.Value)
+            return Forbid();
+        return null;
+    }
+
     [HttpGet]
     [Authorize(Policy = "usergroups.read")]
     public async Task<IActionResult> List(
@@ -145,6 +154,8 @@ public class AdminUserGroupsController(AppDbContext db) : ControllerBase
     {
         var item = await db.UserGroups.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (item is null || item.IsDeleted) return NotFound(new { message = "گروه یافت نشد" });
+        var denied = DenyUnlessCanModify(item);
+        if (denied is not null) return denied;
         var name = dto.Name.Trim();
         if (name.Length < 2) return BadRequest(new { message = "نام گروه نامعتبر است" });
         if (await db.UserGroups.AnyAsync(x => x.Name == name && x.Id != id && !x.IsDeleted, ct))
@@ -161,11 +172,13 @@ public class AdminUserGroupsController(AppDbContext db) : ControllerBase
     {
         var item = await db.UserGroups.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (item is null || item.IsDeleted) return NotFound(new { message = "گروه یافت نشد" });
+        var denied = DenyUnlessCanModify(item);
+        if (denied is not null) return denied;
         item.IsDeleted = true;
         item.IsActive = false;
         item.DeletedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
-        return Ok(new { message = "گروه حذف شد" });
+        return Ok(new { message = "گروه به‌صورت حذف نرم از لیست حذف شد" });
     }
 }
 

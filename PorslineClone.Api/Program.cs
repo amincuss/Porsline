@@ -83,10 +83,16 @@ builder.Services.AddAuthorization(options =>
         ctx.User.HasClaim("permission", "users.read") || ctx.User.HasClaim("permission", "users.crud")));
     options.AddPolicy("users.add", p => p.RequireAssertion(ctx =>
         ctx.User.HasClaim("permission", "users.add") || ctx.User.HasClaim("permission", "users.crud")));
+    options.AddPolicy("users.import", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "users.import") || ctx.User.HasClaim("permission", "users.add") || ctx.User.HasClaim("permission", "users.crud")));
     options.AddPolicy("users.update", p => p.RequireAssertion(ctx =>
         ctx.User.HasClaim("permission", "users.update") || ctx.User.HasClaim("permission", "users.crud")));
     options.AddPolicy("users.delete", p => p.RequireAssertion(ctx =>
         ctx.User.HasClaim("permission", "users.delete") || ctx.User.HasClaim("permission", "users.crud")));
+    options.AddPolicy("users.access.read", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "users.access.read") || ctx.User.HasClaim("permission", "users.update") || ctx.User.HasClaim("permission", "users.crud")));
+    options.AddPolicy("users.access.update", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "users.access.update") || ctx.User.HasClaim("permission", "users.update") || ctx.User.HasClaim("permission", "users.crud")));
     options.AddPolicy("settings.read", p => p.RequireAssertion(ctx =>
         ctx.User.HasClaim("permission", "settings.read") || ctx.User.HasClaim("permission", "settings.crud")));
     options.AddPolicy("settings.update", p => p.RequireAssertion(ctx =>
@@ -127,9 +133,34 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("responders.add", p => p.RequireClaim("permission", "responders.add"));
     options.AddPolicy("responders.update", p => p.RequireClaim("permission", "responders.update"));
     options.AddPolicy("responders.delete", p => p.RequireClaim("permission", "responders.delete"));
+    options.AddPolicy("responders.userforms.delete", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "responders.userforms.delete")
+        || ctx.User.HasClaim("permission", "responders.delete")));
+    options.AddPolicy("responders.userforms.workflow", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "responders.userforms.workflow")
+        || ctx.User.HasClaim("permission", "forms.update")));
+    options.AddPolicy("responders.userforms.workflow.restart", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "responders.userforms.workflow.restart")
+        || ctx.User.HasClaim("permission", "responders.userforms.workflow")
+        || ctx.User.HasClaim("permission", "forms.update")));
+    options.AddPolicy("respondergroups.read", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "respondergroups.read") || ctx.User.HasClaim("permission", "responders.read")));
+    options.AddPolicy("respondergroups.add", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "respondergroups.add") || ctx.User.HasClaim("permission", "responders.add")));
+    options.AddPolicy("respondergroups.update", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "respondergroups.update") || ctx.User.HasClaim("permission", "responders.update")));
+    options.AddPolicy("respondergroups.delete", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "respondergroups.delete") || ctx.User.HasClaim("permission", "responders.delete")));
     options.AddPolicy("responders.send", p => p.RequireAssertion(ctx =>
         ctx.User.HasClaim("permission", "responders.send") || ctx.User.HasClaim("permission", "responders.update")));
-    options.AddPolicy("usergroups.read", p => p.RequireClaim("permission", "usergroups.read"));
+    options.AddPolicy("responders.send.access", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "responders.send")
+        || ctx.User.HasClaim("permission", "responders.send.activation")
+        || ctx.User.HasClaim("permission", "responders.update")));
+    options.AddPolicy("responders.send.activation", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "responders.send.activation") || ctx.User.HasClaim("permission", "responders.update")));
+    options.AddPolicy("usergroups.read", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "usergroups.read") || ctx.User.HasClaim("permission", "usergroups.read.all")));
     options.AddPolicy("usergroups.add", p => p.RequireClaim("permission", "usergroups.add"));
     options.AddPolicy("usergroups.update", p => p.RequireClaim("permission", "usergroups.update"));
     options.AddPolicy("usergroups.delete", p => p.RequireClaim("permission", "usergroups.delete"));
@@ -146,6 +177,9 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("contracts.settings.delete", p => p.RequireClaim("permission", "contracts.settings.delete"));
     options.AddPolicy("forms.rules.delete", p => p.RequireClaim("permission", "forms.rules.delete"));
     options.AddPolicy("settings.delete", p => p.RequireClaim("permission", "settings.delete"));
+    options.AddPolicy("messages.read", p => p.RequireClaim("permission", "messages.read"));
+    options.AddPolicy("messages.read.all", p => p.RequireClaim("permission", "messages.read.all"));
+    options.AddPolicy("messages.send", p => p.RequireClaim("permission", "messages.send"));
 });
 
 var app = builder.Build();
@@ -175,6 +209,8 @@ app.UseSwaggerUI(options =>
 
 var profileImagesRoot = Path.Combine(app.Environment.ContentRootPath, "ProfileImages");
 Directory.CreateDirectory(profileImagesRoot);
+var formUploadRoot = Path.Combine(app.Environment.ContentRootPath, "Formupload");
+Directory.CreateDirectory(formUploadRoot);
 app.UseStaticFiles(new StaticFileOptions
 {
     FileProvider = new PhysicalFileProvider(profileImagesRoot),

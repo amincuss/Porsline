@@ -29,13 +29,15 @@ public class AdminResponderSendController(
     }
 
     [HttpGet("forms")]
-    [Authorize(Policy = "responders.send")]
+    [Authorize(Policy = "responders.send.access")]
     public async Task<IActionResult> Forms([FromQuery] int page = 1, [FromQuery] int pageSize = 10, [FromQuery] string? search = null, CancellationToken ct = default)
     {
         page = Math.Max(1, page);
         pageSize = Math.Clamp(pageSize, 5, 50);
 
-        var q = db.Forms.Where(x => !x.IsDeleted && x.IsActive);
+        var q = db.Forms
+            .Where(x => !x.IsDeleted && x.IsActive)
+            .ApplyVisibleForms(db, User);
         if (!string.IsNullOrWhiteSpace(search))
         {
             var s = search.Trim();
@@ -81,7 +83,7 @@ public class AdminResponderSendController(
     }
 
     [HttpPost("activation")]
-    [Authorize(Policy = "responders.update")]
+    [Authorize(Policy = "responders.send.activation")]
     public async Task<IActionResult> SetActivation([FromBody] FormDispatchActivationRequest req, CancellationToken ct)
     {
         if (req.FormId == Guid.Empty) return BadRequest(new { message = "فرم نامعتبر است" });
@@ -152,7 +154,9 @@ public class AdminResponderSendController(
     private async Task<IActionResult> SendCoreAsync(SendFormDispatchRequest req, CancellationToken ct)
     {
         if (req.FormId == Guid.Empty) return BadRequest(new { message = "فرم نامعتبر است" });
-        var form = await db.Forms.FirstOrDefaultAsync(x => x.Id == req.FormId && !x.IsDeleted, ct);
+        var form = await db.Forms
+            .ApplyVisibleForms(db, User)
+            .FirstOrDefaultAsync(x => x.Id == req.FormId && !x.IsDeleted, ct);
         if (form is null) return NotFound(new { message = "فرم یافت نشد" });
         if (!form.IsActive) return BadRequest(new { message = "این فرم غیرفعال است و قابل ارسال برای پاسخگو نیست" });
         if (form.ExpiresAtUtc.HasValue && form.ExpiresAtUtc.Value < DateTime.UtcNow)
