@@ -48,7 +48,7 @@ public class AdminContractDocumentTemplatesController(ContractDocumentTemplateSe
     }
 
     [HttpDelete("{id:guid}")]
-    [Authorize(Policy = "contracts.settings.update")]
+    [Authorize(Policy = "contracts.settings.delete")]
     public async Task<IActionResult> DeleteTemplate(Guid id, CancellationToken ct)
     {
         try
@@ -63,7 +63,7 @@ public class AdminContractDocumentTemplatesController(ContractDocumentTemplateSe
     }
 
     [HttpDelete("{id:guid}/versions/{versionId:guid}")]
-    [Authorize(Policy = "contracts.settings.update")]
+    [Authorize(Policy = "contracts.settings.delete")]
     public async Task<IActionResult> DeleteVersion(Guid id, Guid versionId, CancellationToken ct)
     {
         try
@@ -244,16 +244,29 @@ public class AdminContractDocumentTemplatesController(ContractDocumentTemplateSe
 
     [HttpGet("{id:guid}/versions/{versionId:guid}/file")]
     [Authorize(Policy = "contracts.settings.read")]
-    public async Task<IActionResult> DownloadVersion(Guid id, Guid versionId, CancellationToken ct)
+    public async Task<IActionResult> DownloadVersion(
+        Guid id,
+        Guid versionId,
+        [FromQuery] string? format = null,
+        [FromQuery] bool inline = false,
+        CancellationToken ct = default)
     {
-        var file = await templates.GetVersionFileAsync(id, versionId, ct);
-        if (file is null)
-            return NotFound();
+        var wantPdf = string.Equals(format, "pdf", StringComparison.OrdinalIgnoreCase);
+        try
+        {
+            var file = await templates.OpenVersionFileAsync(id, versionId, wantPdf, ct);
+            if (file is null)
+                return NotFound(new { message = "فایل نسخه یافت نشد" });
 
-        return PhysicalFile(
-            file.Value.fullPath,
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            file.Value.fileName);
+            if (inline)
+                return File(file.Value.Stream, file.Value.ContentType);
+
+            return File(file.Value.Stream, file.Value.ContentType, file.Value.FileName, enableRangeProcessing: true);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return NotFound(new { message = ex.Message });
+        }
     }
 
     private bool TryUserId(out Guid userId)

@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
+using PorslineClone.Infrastructure.Services;
 
 namespace PorslineClone.Api.Controllers;
 
@@ -22,11 +23,85 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
     }
     private bool CanReadAllResponders => User.HasClaim("permission", "responders.read.all");
 
+    private static IQueryable<Responder> ActiveOnly(IQueryable<Responder> query) =>
+        query.Where(x => !x.IsDeleted);
+
+    [HttpGet("lookup")]
+    [Authorize(Policy = "responders.read")]
+    public async Task<IActionResult> Lookup(
+        [FromQuery] string? nationalCode,
+        [FromQuery] string? prefix,
+        CancellationToken ct = default)
+    {
+        if (!string.IsNullOrWhiteSpace(nationalCode))
+        {
+            var code = nationalCode.Trim();
+            if (!ResponderLookupHelper.IsValidNationalCode(code))
+                return BadRequest(new { message = "کد ملی الزامی است" });
+
+            var q = ActiveOnly(db.Responders.AsQueryable());
+            if (!CanReadAllResponders)
+            {
+                var creatorId = CurrentUserGuid;
+                if (!creatorId.HasValue) return Ok(new { found = false, item = (object?)null });
+                q = q.Where(x => x.CreatedByUserId == creatorId.Value);
+            }
+
+            var item = await q.FirstOrDefaultAsync(x => x.NationalCode == code, ct);
+            return Ok(new
+            {
+                found = item is not null,
+                item = item is null ? null : MapLookupItem(item),
+            });
+        }
+
+        if (!string.IsNullOrWhiteSpace(prefix))
+        {
+            var p = prefix.Trim();
+            if (p.Length < 3)
+                return Ok(Array.Empty<object>());
+
+            var q = ActiveOnly(db.Responders.AsQueryable());
+            if (!CanReadAllResponders)
+            {
+                var creatorId = CurrentUserGuid;
+                if (!creatorId.HasValue) return Ok(Array.Empty<object>());
+                q = q.Where(x => x.CreatedByUserId == creatorId.Value);
+            }
+
+            var items = await q
+                .Where(x => x.NationalCode.StartsWith(p))
+                .OrderBy(x => x.NationalCode)
+                .Take(10)
+                .Select(x => new
+                {
+                    x.Id,
+                    x.NationalCode,
+                    x.FullName,
+                    x.MobileNumber,
+                    x.Gender,
+                })
+                .ToListAsync(ct);
+            return Ok(items);
+        }
+
+        return BadRequest(new { message = "nationalCode یا prefix الزامی است" });
+    }
+
+    private static object MapLookupItem(Responder x) => new
+    {
+        x.Id,
+        x.NationalCode,
+        x.FullName,
+        x.MobileNumber,
+        x.Gender,
+    };
+
     [HttpGet("export")]
     [Authorize(Policy = "responders.read")]
     public async Task<IActionResult> Export(CancellationToken ct)
     {
-        var query = db.Responders.AsQueryable();
+        var query = ActiveOnly(db.Responders.AsQueryable());
         if (!CanReadAllResponders)
         {
             var creatorId = CurrentUserGuid;
@@ -40,6 +115,7 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
             {
                 x.FullName,
                 x.MobileNumber,
+                x.NationalCode,
                 x.CreatedAtUtc
             })
             .ToListAsync(ct);
@@ -50,7 +126,7 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
     [Authorize(Policy = "responders.read")]
     public async Task<IActionResult> Options([FromQuery] string? search = null, CancellationToken ct = default)
     {
-        var q = db.Responders.AsQueryable();
+        var q = ActiveOnly(db.Responders.AsQueryable());
         if (!CanReadAllResponders)
         {
             var creatorId = CurrentUserGuid;
@@ -60,12 +136,12 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
         if (!string.IsNullOrWhiteSpace(search))
         {
             var s = search.Trim();
-            q = q.Where(x => x.FullName.Contains(s) || x.MobileNumber.Contains(s));
+            q = q.Where(x => x.FullName.Contains(s) || x.MobileNumber.Contains(s) || x.NationalCode.Contains(s));
         }
         var items = await q
             .OrderBy(x => x.FullName)
             .Take(50)
-            .Select(x => new { x.Id, x.FullName, x.MobileNumber })
+            .Select(x => new { x.Id, x.FullName, x.MobileNumber, x.NationalCode, x.Gender })
             .ToListAsync(ct);
         return Ok(items);
     }
@@ -77,12 +153,13 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
         [FromQuery] int pageSize = 10,
         [FromQuery] string? search = null,
         [FromQuery] string? sortBy = null,
+        [FromQuery] Guid? groupId = null,
         CancellationToken ct = default)
     {
         page = Math.Max(1, page);
         pageSize = Math.Clamp(pageSize, 5, 100);
 
-        var query = db.Responders.AsQueryable();
+        var query = ActiveOnly(db.Responders.AsQueryable());
         if (!CanReadAllResponders)
         {
             var creatorId = CurrentUserGuid;
@@ -90,10 +167,12 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
                 return Ok(new { items = new List<object>(), total = 0, page, pageSize, totalPages = 0 });
             query = query.Where(x => x.CreatedByUserId == creatorId.Value);
         }
+        if (groupId is Guid gid && gid != Guid.Empty)
+            query = query.Where(x => x.GroupMembers.Any(m => m.GroupId == gid));
         if (!string.IsNullOrWhiteSpace(search))
         {
             var q = search.Trim();
-            query = query.Where(x => x.FullName.Contains(q) || x.MobileNumber.Contains(q));
+            query = query.Where(x => x.FullName.Contains(q) || x.MobileNumber.Contains(q) || x.NationalCode.Contains(q));
         }
 
         query = sortBy switch
@@ -114,6 +193,8 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
                 x.Id,
                 x.FullName,
                 x.MobileNumber,
+                x.NationalCode,
+                x.Gender,
                 x.CreatedAtUtc,
                 x.GroupMembers.Select(gm => new ResponderGroupOptionDto(gm.GroupId, gm.Group.Name)).ToList()
             ))
@@ -135,17 +216,36 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
     {
         var fullName = dto.FullName.Trim();
         var mobile = dto.MobileNumber.Trim();
+        var nationalCode = dto.NationalCode.Trim();
 
         if (fullName.Length < 2) return BadRequest(new { message = "نام و نام خانوادگی نامعتبر است" });
-        if (!IsValidMobile(mobile)) return BadRequest(new { message = "شماره موبایل معتبر نیست" });
-        if (await db.Responders.AnyAsync(x => x.MobileNumber == mobile, ct))
-            return BadRequest(new { message = "این شماره موبایل قبلا ثبت شده است" });
+        if (!ResponderLookupHelper.IsValidNationalCode(nationalCode))
+            return BadRequest(new { message = "کد ملی الزامی است" });
+        if (!ResponderLookupHelper.IsValidMobile(mobile))
+            return BadRequest(new { message = "شماره موبایل معتبر نیست" });
+        try
+        {
+            await ResponderLookupHelper.EnsureNationalCodeUniqueAsync(db, null, nationalCode, ct);
+            await ResponderLookupHelper.EnsureMobileUniqueAsync(db, null, mobile, ct);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+
+        var gender = ResponderHonorific.ParseGender(dto.Gender);
+        if (dto.Gender is { Length: > 0 } gRaw && gender is null)
+            return BadRequest(new { message = "جنسیت معتبر نیست (آقای یا خانم)" });
+        if (gender is null)
+            return BadRequest(new { message = "جنسیت (آقای/خانم) الزامی است" });
 
         var entity = new Responder
         {
             Id = Guid.NewGuid(),
             FullName = fullName,
             MobileNumber = mobile,
+            NationalCode = ResponderLookupHelper.NormalizeNationalCode(nationalCode),
+            Gender = gender,
             CreatedByUserId = CurrentUserGuid,
             CreatedAtUtc = DateTime.UtcNow
         };
@@ -171,17 +271,35 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
         var item = await db.Responders
             .Include(x => x.GroupMembers)
             .FirstOrDefaultAsync(x => x.Id == id, ct);
-        if (item is null) return NotFound(new { message = "پاسخگو یافت نشد" });
+        if (item is null || item.IsDeleted) return NotFound(new { message = "پاسخگو یافت نشد" });
 
         var fullName = dto.FullName.Trim();
         var mobile = dto.MobileNumber.Trim();
+        var nationalCode = dto.NationalCode.Trim();
         if (fullName.Length < 2) return BadRequest(new { message = "نام و نام خانوادگی نامعتبر است" });
-        if (!IsValidMobile(mobile)) return BadRequest(new { message = "شماره موبایل معتبر نیست" });
-        if (await db.Responders.AnyAsync(x => x.MobileNumber == mobile && x.Id != id, ct))
-            return BadRequest(new { message = "این شماره موبایل قبلا ثبت شده است" });
+        if (!ResponderLookupHelper.IsValidNationalCode(nationalCode))
+            return BadRequest(new { message = "کد ملی الزامی است" });
+        if (!ResponderLookupHelper.IsValidMobile(mobile))
+            return BadRequest(new { message = "شماره موبایل معتبر نیست" });
+        try
+        {
+            await ResponderLookupHelper.EnsureNationalCodeUniqueAsync(db, id, nationalCode, ct);
+            await ResponderLookupHelper.EnsureMobileUniqueAsync(db, id, mobile, ct);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+
+        var gender = ResponderHonorific.ParseGender(dto.Gender);
+        if (dto.Gender is { Length: > 0 } gRaw && gender is null)
+            return BadRequest(new { message = "جنسیت معتبر نیست (آقای یا خانم)" });
 
         item.FullName = fullName;
         item.MobileNumber = mobile;
+        item.NationalCode = ResponderLookupHelper.NormalizeNationalCode(nationalCode);
+        if (gender is not null)
+            item.Gender = gender;
         var groupIds = (dto.GroupIds ?? [])
             .Where(x => x != Guid.Empty)
             .Distinct()
@@ -197,6 +315,28 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
         return Ok(new { message = "پاسخگو بروزرسانی شد" });
     }
 
+    [HttpDelete("{id:guid}")]
+    [Authorize(Policy = "responders.delete")]
+    public async Task<IActionResult> SoftDelete(Guid id, CancellationToken ct)
+    {
+        var item = await db.Responders
+            .Include(x => x.GroupMembers)
+            .FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (item is null || item.IsDeleted) return NotFound(new { message = "پاسخگو یافت نشد" });
+        if (!CanReadAllResponders)
+        {
+            var creatorId = CurrentUserGuid;
+            if (!creatorId.HasValue || item.CreatedByUserId != creatorId.Value)
+                return NotFound(new { message = "پاسخگو یافت نشد" });
+        }
+
+        item.IsDeleted = true;
+        item.DeletedAtUtc = DateTime.UtcNow;
+        item.GroupMembers.Clear();
+        await db.SaveChangesAsync(ct);
+        return Ok(new { message = "پاسخگو حذف شد" });
+    }
+
     [HttpPost("import")]
     [Authorize(Policy = "responders.add")]
     public async Task<IActionResult> Import([FromBody] ImportRespondersDto dto, CancellationToken ct)
@@ -208,7 +348,7 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
         {
             var name = (r.FullName ?? "").Trim();
             var mobile = (r.MobileNumber ?? "").Trim();
-            if (name.Length < 2 || !IsValidMobile(mobile))
+            if (name.Length < 2 || !ResponderLookupHelper.IsValidMobile(mobile))
             {
                 invalidRows.Add(new { r.RowNumber, r.FullName, r.MobileNumber, reason = "نام یا موبایل نامعتبر" });
                 continue;
@@ -241,6 +381,11 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
             if (existingMap.TryGetValue(v.Mobile, out var ex))
             {
                 ex.FullName = v.Name;
+                if (ex.IsDeleted)
+                {
+                    ex.IsDeleted = false;
+                    ex.DeletedAtUtc = null;
+                }
                 updated++;
             }
             else
@@ -268,12 +413,11 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
         });
     }
 
-    private static bool IsValidMobile(string mobile) => System.Text.RegularExpressions.Regex.IsMatch(mobile, "^09\\d{9}$");
 }
 
 public record ResponderGroupOptionDto(Guid Id, string Name);
-public record ResponderItemDto(Guid Id, string FullName, string MobileNumber, DateTime CreatedAtUtc, List<ResponderGroupOptionDto> Groups);
-public record CreateResponderDto(string FullName, string MobileNumber, List<Guid>? GroupIds = null);
-public record UpdateResponderDto(string FullName, string MobileNumber, List<Guid>? GroupIds = null);
+public record ResponderItemDto(Guid Id, string FullName, string MobileNumber, string NationalCode, UserGender? Gender, DateTime CreatedAtUtc, List<ResponderGroupOptionDto> Groups);
+public record CreateResponderDto(string FullName, string MobileNumber, string NationalCode, string Gender, List<Guid>? GroupIds = null);
+public record UpdateResponderDto(string FullName, string MobileNumber, string NationalCode, string? Gender = null, List<Guid>? GroupIds = null);
 public record ImportRespondersDto(List<ImportResponderRowDto> Rows);
 public record ImportResponderRowDto(int RowNumber, string? FullName, string? MobileNumber);

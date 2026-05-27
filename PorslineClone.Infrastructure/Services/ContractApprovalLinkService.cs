@@ -39,15 +39,27 @@ public class ContractApprovalLinkService(AppDbContext db)
         return link;
     }
 
+    /// <summary>ثبت اولین بازدید لینک تأیید (باز کردن صفحه یا فایل).</summary>
+    public async Task RecordLinkOpenedAsync(ContractApprovalLink link, CancellationToken ct = default)
+    {
+        if (link.LinkOpenedAtUtc.HasValue)
+            return;
+
+        link.LinkOpenedAtUtc = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+    }
+
     /// <summary>لینک معتبر (فعال یا پس از تأیید) برای مشاهده گردش و فایل — تا انقضا.</summary>
     public async Task<ContractApprovalLink?> ResolveByCodeAsync(string code, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(code)) return null;
         var normalized = code.Trim();
         var link = await db.ContractApprovalLinks
+            .IgnoreQueryFilters()
             .Include(x => x.Contract)
             .FirstOrDefaultAsync(x => x.Code == normalized, ct);
         if (link is null || link.ExpiresAtUtc < DateTime.UtcNow) return null;
+        if (link.Contract is null || link.Contract.IsSoftDeleted) return null;
         return link;
     }
 

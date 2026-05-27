@@ -20,7 +20,8 @@ public class AdminUserFormsController(
     AppDbContext db,
     IFrontendUrlResolver frontendUrls,
     IWebHostEnvironment env,
-    FormWorkflowProcessor workflowProcessor) : ControllerBase
+    FormWorkflowProcessor workflowProcessor,
+    FormWorkflowRejectionService rejectionService) : ControllerBase
 {
     private async Task<FormSubmission?> GetAuthorizedSubmissionAsync(Guid id, CancellationToken ct)
     {
@@ -30,7 +31,17 @@ public class AdminUserFormsController(
             .Include(x => x.Form)
             .FirstOrDefaultAsync(x => x.Id == id && x.Form != null && !x.Form.IsDeleted, ct);
         if (submission is null) return null;
-        if (!isAdmin && !string.IsNullOrWhiteSpace(currentUserId) && submission.Form.UserId != currentUserId) return null;
+        if (!isAdmin)
+        {
+            if (!Guid.TryParse(currentUserId, out var userGuid))
+                return null;
+            var ownsForm = submission.Form.UserId == currentUserId;
+            var sentLink = submission.DispatchLinkId is { } linkId
+                && await db.FormDispatchLinks.AnyAsync(
+                    l => l.Id == linkId && l.SentByUserId == userGuid, ct);
+            if (!ownsForm && !sentLink)
+                return null;
+        }
         return submission;
     }
 
@@ -64,8 +75,14 @@ public class AdminUserFormsController(
                 x.Form.Title.Contains(s));
         }
 
-        if (!isAdmin && !string.IsNullOrWhiteSpace(currentUserId))
-            q = q.Where(x => x.Form.UserId == currentUserId);
+        if (!isAdmin && currentUserGuid != Guid.Empty)
+        {
+            q = q.Where(x =>
+                x.Form.UserId == currentUserId
+                || (x.DispatchLinkId != null
+                    && db.FormDispatchLinks.Any(l =>
+                        l.Id == x.DispatchLinkId && l.SentByUserId == currentUserGuid)));
+        }
 
         if (!string.IsNullOrWhiteSpace(status))
         {
@@ -98,20 +115,25 @@ public class AdminUserFormsController(
         var result = new List<object>();
         foreach (var x in data)
         {
-            var steps = string.IsNullOrWhiteSpace(x.StepsJson)
-                ? new List<ApprovalStepDto>()
-                : (JsonSerializer.Deserialize<List<ApprovalStepDto>>(x.StepsJson) ?? new List<ApprovalStepDto>());
+            var isSender = await rejectionService.IsDispatchSenderAsync(x, currentUserGuid, isAdmin, ct);
+            var steps = FormWorkflowProcessor.DeserializeSteps(x.StepsJson);
             var latest = steps
                 .Where(s => s.Status == "approved" || s.Status == "rejected")
                 .OrderByDescending(s => s.ActionAt ?? DateTime.MinValue)
                 .FirstOrDefault();
             string? accessCode = null;
+            Guid? dispatchWorkflowTemplateId = null;
             if (x.DispatchLinkId is not null)
             {
-                accessCode = await db.FormDispatchLinks
+                var dispatchMeta = await db.FormDispatchLinks
                     .Where(l => l.Id == x.DispatchLinkId)
-                    .Select(l => l.Code)
+                    .Select(l => new { l.Code, l.WorkflowTemplateId })
                     .FirstOrDefaultAsync(ct);
+                if (dispatchMeta is not null)
+                {
+                    accessCode = dispatchMeta.Code;
+                    dispatchWorkflowTemplateId = dispatchMeta.WorkflowTemplateId;
+                }
             }
             else if (x.ResponderId is not null)
             {
@@ -131,8 +153,8 @@ public class AdminUserFormsController(
                 SubmitterName = x.SubmitterName,
                 SubmitterMobile = x.SubmitterEmail,
                 ApprovalStatus = ToClientStatus(x.Status),
-                SuggestedWorkflowTemplateId = x.Form.WorkflowTemplateId,
-                SuggestedWorkflowName = x.Form.WorkflowName,
+                SuggestedWorkflowTemplateId = x.WorkflowTemplateId ?? dispatchWorkflowTemplateId ?? x.Form.WorkflowTemplateId,
+                SuggestedWorkflowName = x.WorkflowName ?? x.Form.WorkflowName,
                 LatestApprover = latest?.UserName,
                 LatestApproverActionAt = latest?.ActionAt,
                 IsApprovalCompleted = x.Status is FormSubmissionStatus.Approved or FormSubmissionStatus.Rejected,
@@ -141,10 +163,16 @@ public class AdminUserFormsController(
                 x.WorkflowTemplateId,
                 x.WorkflowStartedAtUtc,
                 x.WorkflowScheduledStartAtUtc,
+                x.WorkflowRunCycle,
+                IsWorkflowRerun = x.WorkflowRunCycle > 1,
+                WorkflowRejection = FormWorkflowRejectionHelper.BuildView(x, isSender),
+                CanRestartWorkflow = CanRestartWorkflowAfterReject(x),
                 CanStartWorkflow = CanStartWorkflow(x),
                 CanAssignWorkflow = CanAssignWorkflow(x),
                 CanUnassignWorkflow = CanUnassignWorkflow(x),
+                HasWorkflowAssigned = HasAssignedWorkflow(x),
                 NeedsWorkflowStart = x.Status == FormSubmissionStatus.Pending && x.WorkflowTemplateId is not null,
+                x.IsArchived,
             });
         }
 
@@ -196,9 +224,40 @@ public class AdminUserFormsController(
             })
             .ToList();
 
-        var steps = string.IsNullOrWhiteSpace(submission.StepsJson)
-            ? new List<ApprovalStepDto>()
-            : (JsonSerializer.Deserialize<List<ApprovalStepDto>>(submission.StepsJson) ?? new List<ApprovalStepDto>());
+        var steps = FormWorkflowProcessor.DeserializeSteps(submission.StepsJson);
+
+        var approverIds = steps.Select(s => s.UserId).Where(id => id != Guid.Empty).Distinct().ToList();
+        if (approverIds.Count > 0)
+        {
+            var approvers = await db.Users.AsNoTracking()
+                .Where(u => approverIds.Contains(u.Id))
+                .Select(u => new
+                {
+                    u.Id,
+                    u.FirstName,
+                    u.LastName,
+                    u.Gender,
+                    u.SignatureImagePath,
+                    u.SignatureDisplayDegree,
+                    PositionTitle = u.UserPosition != null ? u.UserPosition.Name : null,
+                })
+                .ToListAsync(ct);
+            var userSigs = approvers.ToDictionary(
+                u => u.Id,
+                u => (u.SignatureImagePath, u.SignatureDisplayDegree));
+            foreach (var step in steps)
+            {
+                var profile = approvers.FirstOrDefault(u => u.Id == step.UserId);
+                if (profile is null) continue;
+                FormApprovalSignatureHelper.EnrichApproverIdentityFromProfile(
+                    step, profile.FirstName, profile.LastName, profile.PositionTitle, profile.Gender);
+            }
+            FormApprovalSignatureHelper.BackfillApprovedStepSignatures(steps, userSigs);
+        }
+
+        FormApprovalSignatureHelper.EnrichSignatureUrls(
+            steps,
+            s => $"/api/admin/user-forms/{submission.Id}/signature?stepOrder={s.Order}");
 
         return Ok(new
         {
@@ -223,18 +282,70 @@ public class AdminUserFormsController(
             {
                 s.Order,
                 s.UserName,
+                UserFirstName = s.UserFirstName,
+                UserLastName = s.UserLastName,
+                UserPositionTitle = s.UserPositionTitle,
+                s.UserGender,
                 s.Status,
                 s.ActionAt,
-                s.Note
+                s.Note,
+                s.Comment,
+                SignatureUrl = s.SignatureUrl,
+                SignatureWidthPx = SignatureWidthPx(s.SignatureDisplayDegree),
             }),
             submission.WorkflowName,
             submission.WorkflowTemplateId,
             submission.WorkflowStartedAtUtc,
             submission.WorkflowScheduledStartAtUtc,
+            submission.WorkflowRunCycle,
+            IsWorkflowRerun = submission.WorkflowRunCycle > 1,
+            CanRestartWorkflow = CanRestartWorkflowAfterReject(submission),
             CanStartWorkflow = CanStartWorkflow(submission),
             CanAssignWorkflow = CanAssignWorkflow(submission),
             CanUnassignWorkflow = CanUnassignWorkflow(submission),
+            HasWorkflowAssigned = HasAssignedWorkflow(submission),
+            WorkflowRunsHistory = FormWorkflowRunHistoryHelper.Deserialize(submission.WorkflowRunsHistoryJson),
+            submission.IsArchived,
+            WorkflowRejection = FormWorkflowRejectionHelper.BuildView(
+                submission,
+                await rejectionService.IsDispatchSenderAsync(
+                    submission,
+                    Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var ug) ? ug : Guid.Empty,
+                    User.IsInRole("Admin"),
+                    ct)),
         });
+    }
+
+    [HttpPost("{id:guid}/request-reapproval")]
+    [Authorize(Policy = "forms.update")]
+    public async Task<IActionResult> RequestReapproval(Guid id, CancellationToken ct)
+    {
+        var submission = await GetAuthorizedSubmissionAsync(id, ct);
+        if (submission is null) return NotFound(new { message = "پاسخ فرم یافت نشد" });
+
+        if (!Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
+            return Unauthorized();
+
+        var (ok, err) = await rejectionService.RequestReapprovalAsync(submission, userId, User.IsInRole("Admin"), ct);
+        if (!ok) return BadRequest(new { message = err ?? "درخواست مجدد تأیید ناموفق بود" });
+
+        return Ok(new { message = "درخواست مجدد تأیید ثبت شد. پیامک فوری برای تأییدکننده ارسال شد." });
+    }
+
+    [HttpPost("{id:guid}/end-workflow")]
+    [Authorize(Policy = "forms.update")]
+    public async Task<IActionResult> EndWorkflow(Guid id, CancellationToken ct)
+    {
+        var submission = await GetAuthorizedSubmissionAsync(id, ct);
+        if (submission is null) return NotFound(new { message = "پاسخ فرم یافت نشد" });
+
+        if (!Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
+            return Unauthorized();
+
+        var (ok, err) = await rejectionService.EndWorkflowAsync(submission, userId, User.IsInRole("Admin"), ct);
+        if (!ok) return BadRequest(new { message = err ?? "اتمام گردش ناموفق بود" });
+
+        return Ok(new { message = "گردش خاتمه یافت و پرونده به بایگانی منتقل شد." });
     }
 
     [HttpPost("{id:guid}/assign-workflow")]
@@ -244,7 +355,7 @@ public class AdminUserFormsController(
         var submission = await GetAuthorizedSubmissionAsync(id, ct);
         if (submission is null) return NotFound(new { message = "پاسخ فرم یافت نشد" });
         if (!CanAssignWorkflow(submission))
-            return BadRequest(new { message = "در وضعیت فعلی امکان انتصاب گردش وجود ندارد" });
+            return BadRequest(new { message = BuildAssignWorkflowDeniedMessage(submission) });
 
         if (!Guid.TryParse(req.WorkflowTemplateId, out var templateId))
             return BadRequest(new { message = "گردش انتخاب‌شده نامعتبر است" });
@@ -268,16 +379,36 @@ public class AdminUserFormsController(
                 return BadRequest(new { message = "تاریخ شروع باید در آینده باشد" });
         }
 
+        var isRestart = CanRestartWorkflowAfterReject(submission);
+        if (isRestart)
+        {
+            FormWorkflowRunHistoryHelper.SnapshotCurrentRun(submission);
+            submission.WorkflowRunCycle = Math.Max(1, submission.WorkflowRunCycle) + 1;
+            submission.IsArchived = false;
+            submission.PostApprovalJson = null;
+
+            var links = await db.FormSubmissionApprovalLinks
+                .Where(x => x.FormSubmissionId == id && x.IsActive)
+                .ToListAsync(ct);
+            foreach (var link in links)
+                link.IsActive = false;
+        }
+
         submission.WorkflowTemplateId = template.Id;
         submission.WorkflowName = template.Name;
         submission.WorkflowStartedAtUtc = null;
         submission.WorkflowScheduledStartAtUtc = mode == "scheduled" ? scheduledUtc : null;
         submission.Status = FormSubmissionStatus.Pending;
         submission.CurrentStepOrder = 1;
-        submission.StepsJson = JsonSerializer.Serialize(
-            WorkflowStepBuilder.BuildApprovalStepsFromTemplate(template.StepsJson, startImmediately: false));
+        var reviewCycle = isRestart ? submission.WorkflowRunCycle : 0;
+        submission.StepsJson = WorkflowStepJsonHelper.Serialize(
+            WorkflowStepBuilder.BuildApprovalStepsFromTemplate(template.StepsJson, startImmediately: false, reviewCycle));
 
         await db.SaveChangesAsync(ct);
+
+        var cycleLabel = submission.WorkflowRunCycle > 1
+            ? $" (دور {submission.WorkflowRunCycle})"
+            : "";
 
         if (mode == "now")
         {
@@ -286,8 +417,11 @@ public class AdminUserFormsController(
             if (!ok) return BadRequest(new { message = err ?? "شروع گردش ناموفق بود" });
             return Ok(new
             {
-                message = $"گردش «{submission.WorkflowName}» انتصاب و شروع شد",
+                message = isRestart
+                    ? $"گردش مجدد «{submission.WorkflowName}»{cycleLabel} انتصاب و شروع شد"
+                    : $"گردش «{submission.WorkflowName}» انتصاب و شروع شد",
                 workflowStartedAtUtc = submission.WorkflowStartedAtUtc,
+                workflowRunCycle = submission.WorkflowRunCycle,
             });
         }
 
@@ -295,15 +429,21 @@ public class AdminUserFormsController(
         {
             return Ok(new
             {
-                message = $"گردش «{submission.WorkflowName}» انتصاب شد و در تاریخ برنامه‌ریزی‌شده شروع می‌شود",
+                message = isRestart
+                    ? $"گردش مجدد «{submission.WorkflowName}»{cycleLabel} انتصاب شد و در تاریخ برنامه‌ریزی‌شده شروع می‌شود"
+                    : $"گردش «{submission.WorkflowName}» انتصاب شد و در تاریخ برنامه‌ریزی‌شده شروع می‌شود",
                 workflowScheduledStartAtUtc = submission.WorkflowScheduledStartAtUtc,
+                workflowRunCycle = submission.WorkflowRunCycle,
             });
         }
 
         return Ok(new
         {
-            message = $"گردش «{submission.WorkflowName}» انتصاب شد. برای شروع دکمه «شروع گردش» را بزنید",
+            message = isRestart
+                ? $"گردش مجدد «{submission.WorkflowName}»{cycleLabel} انتصاب شد. برای شروع دکمه «شروع گردش» را بزنید"
+                : $"گردش «{submission.WorkflowName}» انتصاب شد. برای شروع دکمه «شروع گردش» را بزنید",
             canStartWorkflow = true,
+            workflowRunCycle = submission.WorkflowRunCycle,
         });
     }
 
@@ -382,14 +522,27 @@ public class AdminUserFormsController(
     }
 
     private static bool HasAssignedWorkflow(FormSubmission submission) =>
-        submission.WorkflowTemplateId is not null
-        || (!string.IsNullOrWhiteSpace(submission.StepsJson) && submission.StepsJson.Trim() != "[]");
+        FormSubmissionWorkflowAccessRules.HasAssignedWorkflow(submission);
+
+    private static bool HasWorkflowActivity(FormSubmission submission) =>
+        FormSubmissionWorkflowAccessRules.HasWorkflowActivity(submission);
+
+    private static bool CanRestartWorkflowAfterReject(FormSubmission submission) =>
+        FormSubmissionWorkflowAccessRules.CanRestartWorkflowAfterReject(submission);
 
     private static bool CanAssignWorkflow(FormSubmission submission) =>
-        submission.WorkflowStartedAtUtc is null
-        && !HasAssignedWorkflow(submission)
-        && submission.Status is FormSubmissionStatus.Submitted
-            or FormSubmissionStatus.Approved; // پاسخ‌های قدیمی که بدون گردش «تأیید» شده بودند
+        FormSubmissionWorkflowAccessRules.CanAssignWorkflow(submission);
+
+    private static string BuildAssignWorkflowDeniedMessage(FormSubmission submission)
+    {
+        if (submission.Status == FormSubmissionStatus.InProgress)
+            return "این پرونده در حال گردش است؛ تا پایان گردش فعلی امکان اتصال گردش جدید وجود ندارد";
+        if (HasAssignedWorkflow(submission) && submission.WorkflowStartedAtUtc is null)
+            return "گردش قبلاً انتصاب شده است؛ ابتدا آن را شروع کنید یا لغو کنید";
+        if (HasWorkflowActivity(submission) && submission.Status != FormSubmissionStatus.Rejected)
+            return "در وضعیت فعلی امکان انتصاب گردش وجود ندارد";
+        return "در وضعیت فعلی امکان انتصاب گردش وجود ندارد";
+    }
 
     private static bool CanUnassignWorkflow(FormSubmission submission) =>
         submission.WorkflowStartedAtUtc is null
@@ -397,11 +550,20 @@ public class AdminUserFormsController(
         && HasAssignedWorkflow(submission);
 
     private static bool CanStartWorkflow(FormSubmission submission) =>
-        submission.Status == FormSubmissionStatus.Pending
-        && submission.WorkflowTemplateId is not null
-        && submission.WorkflowStartedAtUtc is null
-        && !string.IsNullOrWhiteSpace(submission.StepsJson)
-        && (submission.WorkflowScheduledStartAtUtc is null || submission.WorkflowScheduledStartAtUtc <= DateTime.UtcNow);
+        FormSubmissionWorkflowAccessRules.CanStartWorkflow(submission);
+
+    private static List<ApprovalStepDto> DeserializeSteps(string? json) =>
+        FormWorkflowProcessor.DeserializeSteps(json);
+
+    private static int SignatureWidthPx(int? degree) => degree switch
+    {
+        30 => 90,
+        45 => 110,
+        60 => 140,
+        75 => 170,
+        90 => 200,
+        _ => 140,
+    };
 
     private static string ToClientStatus(FormSubmissionStatus status) => status switch
     {
@@ -412,6 +574,30 @@ public class AdminUserFormsController(
         FormSubmissionStatus.Submitted => "submitted",
         _ => "pending"
     };
+
+    [HttpGet("{id:guid}/signature")]
+    [Authorize(Policy = "responders.read")]
+    public async Task<IActionResult> GetStepSignature(Guid id, [FromQuery] int stepOrder, CancellationToken ct = default)
+    {
+        if (stepOrder < 1) return BadRequest(new { message = "stepOrder نامعتبر است" });
+
+        var submission = await GetAuthorizedSubmissionAsync(id, ct);
+        if (submission is null) return NotFound(new { message = "پاسخ فرم یافت نشد" });
+
+        var steps = DeserializeSteps(submission.StepsJson);
+        var step = steps.FirstOrDefault(s => s.Order == stepOrder);
+        if (step is null || step.Status != "approved" || string.IsNullOrWhiteSpace(step.SignatureImagePath))
+            return NotFound(new { message = "امضای این مرحله یافت نشد" });
+
+        if (!FormApprovalSignatureHelper.TryResolveSignatureFile(env, step.SignatureImagePath, out var fullPath))
+            return NotFound(new { message = "فایل امضا در سرور موجود نیست" });
+
+        var provider = new FileExtensionContentTypeProvider();
+        if (!provider.TryGetContentType(fullPath, out var contentType))
+            contentType = "image/png";
+
+        return PhysicalFile(fullPath, contentType, enableRangeProcessing: true);
+    }
 
     [HttpGet("{id:guid}/files/{index:int}/download")]
     [Authorize(Policy = "responders.read")]

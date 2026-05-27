@@ -7,8 +7,9 @@ namespace PorslineClone.Infrastructure.Services;
 public static class FormSubmissionFactory
 {
     /// <summary>
-    /// پاسخ فرم را ذخیره می‌کند. گردش کار به‌صورت خودکار روی پاسخ کپی نمی‌شود —
-    /// پس از ثبت، مدیر برای همان شخص از «فرم کاربران» گردش را انتصاب می‌کند.
+    /// پاسخ فرم را ذخیره می‌کند. گردش خطی فرم (ApprovalEnabled) بلافاصله شروع می‌شود.
+    /// گردش قالب روی لینک ارسال پس از ثبت در PublicFormsController اعمال و خودکار شروع می‌شود.
+    /// بدون گردش در ارسال، از «فرم کاربران» می‌توان گردش را منتصب کرد.
     /// </summary>
     public static FormSubmission Create(
         Form form,
@@ -33,7 +34,7 @@ public static class FormSubmissionFactory
             CurrentStepOrder = hasInline ? 1 : 0,
             Status = hasInline ? FormSubmissionStatus.InProgress : FormSubmissionStatus.Submitted,
             FieldsJson = JsonSerializer.Serialize(fieldValues),
-            StepsJson = hasInline ? JsonSerializer.Serialize(inlineSteps) : null,
+            StepsJson = hasInline ? WorkflowStepJsonHelper.Serialize(inlineSteps) : null,
             WorkflowStartedAtUtc = hasInline ? DateTime.UtcNow : null,
         };
     }

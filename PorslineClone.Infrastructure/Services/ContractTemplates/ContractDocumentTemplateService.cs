@@ -615,6 +615,57 @@ public class ContractDocumentTemplateService(
         return (fullPath, version.FileName);
     }
 
+    /// <summary>باز کردن فایل نسخه برای دانلود یا پیش‌نمایش PDF (LibreOffice).</summary>
+    public async Task<(Stream Stream, string FileName, string ContentType)?> OpenVersionFileAsync(
+        Guid templateId,
+        Guid versionId,
+        bool asPdf,
+        CancellationToken ct)
+    {
+        var file = await GetVersionFileAsync(templateId, versionId, ct);
+        if (file is null)
+            return null;
+
+        var (fullPath, fileName) = file.Value;
+        if (!asPdf)
+        {
+            var docxStream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            return (
+                docxStream,
+                fileName,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+        }
+
+        if (fullPath.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+        {
+            var pdfStream = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            return (pdfStream, fileName, "application/pdf");
+        }
+
+        if (!fullPath.EndsWith(".docx", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("فرمت فایل برای پیش‌نمایش PDF پشتیبانی نمی‌شود.");
+
+        if (!pdfConverter.IsAvailable)
+        {
+            throw new InvalidOperationException(
+                "تبدیل Word به PDF فعال نیست. LibreOffice را روی سرور API نصب و سرویس را ری‌استارت کنید.");
+        }
+
+        var generatedPdf = pdfConverter.TryConvert(fullPath);
+        if (generatedPdf is null)
+            throw new InvalidOperationException("تبدیل فایل Word به PDF ناموفق بود.");
+
+        var stream = new FileStream(
+            generatedPdf,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            4096,
+            FileOptions.DeleteOnClose);
+        var pdfName = Path.ChangeExtension(fileName, ".pdf");
+        return (stream, pdfName, "application/pdf");
+    }
+
     public async Task<ContractDocumentTemplateVersion?> GetVersionEntityAsync(
         Guid templateId,
         Guid versionId,

@@ -73,6 +73,32 @@ public class AdminUserGroupsController(AppDbContext db) : ControllerBase
         return Ok(new { items, total, page, pageSize, totalPages = (int)Math.Ceiling((double)total / pageSize) });
     }
 
+    /// <summary>لیست سبک گروه‌ها برای سایدبار صفحه کاربران (بدون Join سنگین).</summary>
+    [HttpGet("sidebar")]
+    [Authorize(Policy = "usergroups.read")]
+    public async Task<IActionResult> Sidebar(CancellationToken ct)
+    {
+        var query = db.UserGroups.AsNoTracking().Where(x => !x.IsDeleted && x.IsActive);
+        if (!CanReadAllUserGroups)
+        {
+            var creatorId = CurrentUserGuid;
+            if (!creatorId.HasValue) return Ok(Array.Empty<object>());
+            query = query.Where(x => x.CreatedByUserId == creatorId.Value);
+        }
+
+        var items = await query
+            .OrderBy(x => x.Name)
+            .Select(x => new
+            {
+                x.Id,
+                x.Name,
+                MemberCount = x.Members.Count,
+            })
+            .ToListAsync(ct);
+
+        return Ok(items);
+    }
+
     [HttpGet("options")]
     [Authorize(Policy = "usergroups.read")]
     public async Task<IActionResult> Options(CancellationToken ct)
@@ -130,7 +156,7 @@ public class AdminUserGroupsController(AppDbContext db) : ControllerBase
     }
 
     [HttpDelete("{id:guid}")]
-    [Authorize(Policy = "usergroups.update")]
+    [Authorize(Policy = "usergroups.delete")]
     public async Task<IActionResult> SoftDelete(Guid id, CancellationToken ct)
     {
         var item = await db.UserGroups.FirstOrDefaultAsync(x => x.Id == id, ct);

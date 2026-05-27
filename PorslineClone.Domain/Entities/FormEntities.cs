@@ -17,7 +17,9 @@ public enum FieldType
     Checkbox = 13,
     CheckboxGroup = 14,
     PersianDate = 15,
-    ImageUpload = 16
+    ImageUpload = 16,
+    /// <summary>فایل راهنما (توسط سازنده فرم) — فقط مشاهده برای پاسخگو</summary>
+    Guide = 17
 }
 
 public class Form
@@ -109,6 +111,14 @@ public class FormSubmission
     public DateTime? WorkflowScheduledStartAtUtc { get; set; }
     /// <summary>وضعیت اقدام پس از تأیید (JSON) — فقط در صورت فعال‌سازی فاز اقدام</summary>
     public string? PostApprovalJson { get; set; }
+    /// <summary>پس از اتمام فاز اقدام از لیست گردش کار خارج می‌شود</summary>
+    public bool IsArchived { get; set; }
+    /// <summary>شماره دور گردش — ۰ قبل از اولین شروع؛ ۱ اولین گردش؛ ۲+ گردش مجدد پس از رد</summary>
+    public int WorkflowRunCycle { get; set; }
+    /// <summary>سوابق دورهای قبلی گردش (JSON)</summary>
+    public string? WorkflowRunsHistoryJson { get; set; }
+    /// <summary>رد قطعی در انتظار اقدام ارسال‌کننده یا تأیید مجدد</summary>
+    public string? WorkflowRejectionJson { get; set; }
 }
 
 /// <summary>لینک تأیید عمومی برای پاسخ فرم (مثل قرارداد)</summary>
@@ -138,6 +148,10 @@ public class FormDispatchLink
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
     public DateTime? OtpVerifiedAtUtc { get; set; }
     public DateTime? UsedAtUtc { get; set; }
+    /// <summary>گردش انتخاب‌شده هنگام ارسال؛ پس از ثبت کامل فرم به‌صورت خودکار شروع می‌شود.</summary>
+    public Guid? WorkflowTemplateId { get; set; }
+    /// <summary>کارشناسی که لینک را برای پاسخگو ارسال کرده (برای اعلان پس از ثبت فرم).</summary>
+    public Guid? SentByUserId { get; set; }
 }
 
 public class FormUserAccess

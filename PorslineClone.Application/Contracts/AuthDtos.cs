@@ -34,10 +34,16 @@ public record SmsSettingsDto(
     bool SurveyCompletedNotificationEnabled,
     bool UserCreateSmsEnabled,
     bool ApprovalReferralSmsEnabled,
+    bool FormWorkflowCompletedSenderSmsEnabled,
+    bool FormActionPhaseCompletedSenderSmsEnabled,
+    bool FormResponderApprovedSmsEnabled,
+    bool FormWorkflowRejectedSenderSmsEnabled,
+    bool FormWorkflowRejectedResponderSmsEnabled,
     bool ContractCreatorApprovalNotifySmsEnabled,
     bool ContractAmendmentAssigneeSmsEnabled,
     bool ContractAmendmentReturnToRejecterSmsEnabled,
     bool ContractRejectionNotifySmsEnabled,
+    bool ContractActionCompletedCreatorSmsEnabled,
     bool ApprovalReminderSmsEnabled,
     int ApprovalReminderDelayDays,
     int ApprovalReminderDelayHours,
@@ -66,7 +72,19 @@ public record CreateUserDto(
     List<Guid>? GroupIds = null,
     Guid? UserPositionId = null,
     string? PersonnelCode = null,
-    string? Gender = null);
+    string? Gender = null,
+    int? SignatureDisplayDegree = null);
+
+public record ImportUsersDto(List<Guid> DefaultGroupIds, List<ImportUserRowDto> Rows);
+public record ImportUserRowDto(
+    int RowNumber,
+    string? FirstName,
+    string? LastName,
+    string? MobileNumber,
+    string? NationalCode,
+    string? PersonnelCode = null,
+    string? Gender = null,
+    string? PositionName = null);
 
 public record ContractPartyLookupItemDto(
     string NationalId,
@@ -96,7 +114,8 @@ public record UpdateUserDto(
     List<Guid>? GroupIds = null,
     Guid? UserPositionId = null,
     string? PersonnelCode = null,
-    string? Gender = null);
+    string? Gender = null,
+    int? SignatureDisplayDegree = null);
 public record SetUserRolesDto([Required] List<string> RoleNames);
 public record UpdateUserStatusDto(bool IsActive);
 public record RoleItemDto(Guid Id, string Name, string DisplayName);

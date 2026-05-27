@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting;
 using PorslineClone.Application.Abstractions;
 using PorslineClone.Application.Contracts;
+using PorslineClone.Application.Users;
 using PorslineClone.Application.ContractTemplates;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
@@ -339,7 +340,10 @@ public class ContractWorkflowProcessor(
             RejectedByUserId = rejecterUserId,
             AssigneeUserId = returnToCreator ? contract.CreatedByUserId : first.UserId,
             StartedAtUtc = DateTime.UtcNow,
-            Cycle = cycle
+            Cycle = cycle,
+            SignedFilePath = HasSignedWorkflowDocument(contract) ? contract.FilePath : null,
+            SignedPdfFilePath = HasSignedWorkflowDocument(contract) ? contract.PdfFilePath : null,
+            SignedFileName = HasSignedWorkflowDocument(contract) ? contract.FileName : null,
         };
 
         contract.AmendmentJson = ContractAmendmentHelper.Serialize(amendment);
@@ -727,7 +731,8 @@ public class ContractWorkflowProcessor(
                 ImageBytes: await File.ReadAllBytesAsync(sigFull, ct),
                 ImageExtension: ext,
                 ApproverFullName: fullName,
-                PositionTitle: user.UserPosition?.Name));
+                PositionTitle: user.UserPosition?.Name,
+                WidthPx: UserSignatureDisplaySize.WidthPxFromDegree(user.SignatureDisplayDegree)));
         }
 
         return slots;
@@ -746,6 +751,80 @@ public class ContractWorkflowProcessor(
             return templateSignatureKeys[keyIndex].Trim();
 
         return $"sign_{workflowOrder}";
+    }
+
+    public sealed record ContractSignedFileResolution(
+        string RelativePath,
+        string? PdfRelativePath,
+        string? DisplayFileName);
+
+    /// <summary>آیا حداقل یک مرحله تأیید شده (فایل امضاشده قابل بازیابی است).</summary>
+    public static bool HasSignedWorkflowDocument(Contract contract) =>
+        DeserializeSteps(contract.StepsJson).Any(s => s.Status is "approved");
+
+    /// <summary>مسیر فایل امضاشده — هنگام اصلاحیه از نسخهٔ قبل از اصلاح بازیابی می‌شود.</summary>
+    public static async Task<ContractSignedFileResolution?> ResolveSignedFileForDownloadAsync(
+        Contract contract,
+        AppDbContext dbContext,
+        CancellationToken ct = default)
+    {
+        var steps = DeserializeSteps(contract.StepsJson);
+        if (!steps.Any(s => s.Status is "approved"))
+            return null;
+
+        var amendState = ContractAmendmentHelper.Deserialize(contract.AmendmentJson);
+        var amendActive = ContractAmendmentHelper.IsActive(amendState);
+        var currentIsAmended = amendState?.AmendedVersionNumber is not null
+            && contract.CurrentVersionNumber == amendState.AmendedVersionNumber;
+
+        if (amendActive
+            && !string.IsNullOrWhiteSpace(amendState!.SignedFilePath))
+        {
+            return new(
+                amendState.SignedFilePath,
+                amendState.SignedPdfFilePath,
+                amendState.SignedFileName ?? contract.FileName);
+        }
+
+        static bool IsUsableSignedCurrent(string? path, bool amendedCurrent) =>
+            !string.IsNullOrWhiteSpace(path)
+            && !amendedCurrent
+            && (ContractApprovalStampService.IsSignedDocumentPath(path)
+                || path.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)
+                || path.EndsWith(".docx", StringComparison.OrdinalIgnoreCase)
+                || path.EndsWith(".doc", StringComparison.OrdinalIgnoreCase));
+
+        if (IsUsableSignedCurrent(contract.FilePath, amendActive && currentIsAmended))
+            return new(contract.FilePath!, contract.PdfFilePath, contract.FileName);
+
+        if (!amendActive && !string.IsNullOrWhiteSpace(contract.PdfFilePath))
+            return new(contract.FilePath!, contract.PdfFilePath, contract.FileName);
+
+        if (!amendActive && !string.IsNullOrWhiteSpace(contract.FilePath))
+            return new(contract.FilePath, contract.PdfFilePath, contract.FileName);
+
+        var priorVersion = await dbContext.ContractVersions.AsNoTracking()
+            .Where(v => v.ContractId == contract.Id && !v.IsAmendedVersion)
+            .OrderByDescending(v => v.VersionNumber)
+            .FirstOrDefaultAsync(ct);
+
+        if (priorVersion is not null && !string.IsNullOrWhiteSpace(priorVersion.FilePath))
+            return new(priorVersion.FilePath, priorVersion.PdfFilePath, priorVersion.FileName);
+
+        var signedVersion = await dbContext.ContractVersions.AsNoTracking()
+            .Where(v => v.ContractId == contract.Id
+                        && v.FilePath != null
+                        && v.FilePath.Contains("_signed_"))
+            .OrderByDescending(v => v.VersionNumber)
+            .FirstOrDefaultAsync(ct);
+
+        if (signedVersion is not null)
+            return new(signedVersion.FilePath, signedVersion.PdfFilePath, signedVersion.FileName);
+
+        if (!string.IsNullOrWhiteSpace(contract.PdfFilePath) && !string.IsNullOrWhiteSpace(contract.FilePath))
+            return new(contract.FilePath, contract.PdfFilePath, contract.FileName);
+
+        return null;
     }
 
     public static async Task<string?> ResolveOriginalFilePathAsync(Contract contract, AppDbContext dbContext, CancellationToken ct)

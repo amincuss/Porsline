@@ -13,7 +13,7 @@ namespace PorslineClone.Api.Controllers;
 [ApiController]
 [Route("api/admin/form-workflows")]
 [Authorize]
-public class AdminFormWorkflowsController(AppDbContext db) : ControllerBase
+public class AdminFormWorkflowsController(AppDbContext db, IWebHostEnvironment env) : ControllerBase
 {
     [HttpGet]
     [Authorize(Policy = "forms.rules.read")]
@@ -23,12 +23,40 @@ public class AdminFormWorkflowsController(AppDbContext db) : ControllerBase
             .Where(x => x.IsActive)
             .OrderByDescending(x => x.CreatedAtUtc)
             .ToListAsync(ct);
-        var items = rows.Select(x => new FormWorkflowTemplateListItemDto(
-            x.Id,
-            x.Name,
-            DeserializeSteps(x.StepsJson).Count,
-            x.IsActive,
-            x.CreatedAtUtc)).ToList();
+
+        var creatorIds = rows
+            .Where(x => x.CreatedByUserId.HasValue)
+            .Select(x => x.CreatedByUserId!.Value)
+            .Distinct()
+            .ToList();
+        var creatorLookup = creatorIds.Count == 0
+            ? new Dictionary<Guid, string>()
+            : await db.Users.AsNoTracking()
+                .Where(u => creatorIds.Contains(u.Id))
+                .Select(u => new { u.Id, u.FirstName, u.LastName, u.UserName })
+                .ToDictionaryAsync(
+                    u => u.Id,
+                    u =>
+                    {
+                        var full = $"{u.FirstName} {u.LastName}".Trim();
+                        return string.IsNullOrWhiteSpace(full) ? (u.UserName ?? "") : full;
+                    },
+                    ct);
+
+        var items = rows.Select(x =>
+        {
+            string? createdByName = null;
+            if (x.CreatedByUserId.HasValue && creatorLookup.TryGetValue(x.CreatedByUserId.Value, out var n))
+                createdByName = string.IsNullOrWhiteSpace(n) ? null : n;
+            return new FormWorkflowTemplateListItemDto(
+                x.Id,
+                x.Name,
+                DeserializeSteps(x.StepsJson).Count,
+                x.IsActive,
+                x.CreatedAtUtc,
+                x.CreatedByUserId,
+                createdByName);
+        }).ToList();
         return Ok(items);
     }
 
@@ -53,6 +81,40 @@ public class AdminFormWorkflowsController(AppDbContext db) : ControllerBase
     [Authorize(Policy = "forms.rules.read")]
     public IActionResult ActionDirections() =>
         Ok(PostApprovalDirections.Items.Select(x => new { key = x.Key, label = x.Label }));
+
+    /// <summary>همه کارشناسان فعال برای انتخاب تأییدکننده و اقدام‌کننده در گردش فرم</summary>
+    [HttpGet("workflow-users")]
+    [Authorize(Policy = "forms.rules.read")]
+    public async Task<IActionResult> WorkflowUsers(CancellationToken ct)
+    {
+        var users = await db.Users
+            .Where(x => !x.IsSoftDeleted && x.IsActive)
+            .OrderBy(x => x.FirstName).ThenBy(x => x.LastName)
+            .Select(x => new
+            {
+                x.Id,
+                x.FirstName,
+                x.LastName,
+                Name = (x.FirstName + " " + x.LastName).Trim(),
+                Email = x.Email ?? (x.PhoneNumber ?? ""),
+                x.AvatarUrl,
+                PositionName = x.UserPosition != null ? x.UserPosition.Name : null,
+                HasSignature = x.SignatureImagePath != null && x.SignatureImagePath != "",
+            })
+            .ToListAsync(ct);
+
+        return Ok(users.Select(u => new
+        {
+            u.Id,
+            u.FirstName,
+            u.LastName,
+            u.Name,
+            u.Email,
+            AvatarUrl = ProfileAvatarUrlHelper.BuildPublicUrl(env.ContentRootPath, u.Id, u.AvatarUrl),
+            u.PositionName,
+            u.HasSignature,
+        }));
+    }
 
     [HttpGet("{id:guid}")]
     [Authorize(Policy = "forms.rules.read")]
@@ -85,6 +147,9 @@ public class AdminFormWorkflowsController(AppDbContext db) : ControllerBase
 
         var (dirKey, dirLabel, assignees, actionErr) = ResolveActionConfig(req);
         if (actionErr is not null) return BadRequest(new { message = actionErr });
+
+        var signatureErr = await ValidateWorkflowUserSignaturesAsync(cleaned, assignees, ct);
+        if (signatureErr is not null) return BadRequest(new { message = signatureErr });
 
         var entity = new FormWorkflowTemplate
         {
@@ -125,6 +190,9 @@ public class AdminFormWorkflowsController(AppDbContext db) : ControllerBase
         var (dirKey, dirLabel, assignees, actionErr) = ResolveActionConfig(req);
         if (actionErr is not null) return BadRequest(new { message = actionErr });
 
+        var signatureErr = await ValidateWorkflowUserSignaturesAsync(cleaned, assignees, ct);
+        if (signatureErr is not null) return BadRequest(new { message = signatureErr });
+
         entity.Name = name;
         entity.StepsJson = JsonSerializer.Serialize(cleaned);
         entity.ActionDirectionKey = dirKey;
@@ -136,7 +204,7 @@ public class AdminFormWorkflowsController(AppDbContext db) : ControllerBase
     }
 
     [HttpDelete("{id:guid}")]
-    [Authorize(Policy = "forms.rules.update")]
+    [Authorize(Policy = "forms.rules.delete")]
     public async Task<IActionResult> Deactivate(Guid id, CancellationToken ct)
     {
         var entity = await db.FormWorkflowTemplates.FirstOrDefaultAsync(x => x.Id == id, ct);
@@ -212,4 +280,13 @@ public class AdminFormWorkflowsController(AppDbContext db) : ControllerBase
 
         return (key, label, assignees, null);
     }
+
+    private Task<string?> ValidateWorkflowUserSignaturesAsync(
+        List<WorkflowStepDto> steps,
+        List<Guid> assignees,
+        CancellationToken ct) =>
+        WorkflowUserSignatureValidator.ValidateUserIdsAsync(
+            db,
+            steps.Select(s => s.UserId).Concat(assignees),
+            ct);
 }

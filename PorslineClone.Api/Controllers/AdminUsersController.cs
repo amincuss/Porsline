@@ -6,6 +6,7 @@ using Microsoft.EntityFrameworkCore;
 using System.Security.Claims;
 using PorslineClone.Application.Abstractions;
 using PorslineClone.Application.Contracts;
+using PorslineClone.Application.Users;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Services;
 
@@ -97,7 +98,8 @@ public class AdminUsersController(
             CreatedByUserId = CurrentUserGuid,
             CreatedAtUtc = DateTime.UtcNow,
             IsActive = true,
-            PhoneNumberConfirmed = true
+            PhoneNumberConfirmed = true,
+            SignatureDisplayDegree = UserSignatureDisplaySize.NormalizeDegree(dto.SignatureDisplayDegree),
         };
 
         var createResult = await userManager.CreateAsync(user, generatedPassword);
@@ -147,6 +149,250 @@ public class AdminUsersController(
         });
     }
 
+    [HttpPost("import")]
+    [Authorize(Policy = "users.add")]
+    public async Task<IActionResult> Import([FromBody] ImportUsersDto dto, CancellationToken cancellationToken)
+    {
+        var groupIds = (dto.DefaultGroupIds ?? [])
+            .Where(x => x != Guid.Empty)
+            .Distinct()
+            .ToList();
+        if (groupIds.Count == 0)
+            return BadRequest(new { message = "انتخاب حداقل یک گروه برای ایمپورت الزامی است" });
+
+        var validGroupIds = await db.UserGroups
+            .Where(x => groupIds.Contains(x.Id))
+            .Select(x => x.Id)
+            .ToListAsync(cancellationToken);
+        if (validGroupIds.Count != groupIds.Count)
+            return BadRequest(new { message = "یک یا چند گروه انتخاب‌شده معتبر نیستند" });
+
+        var positionsByName = await db.UserPositions
+            .Where(x => x.IsActive)
+            .ToDictionaryAsync(x => x.Name.Trim(), x => x.Id, StringComparer.OrdinalIgnoreCase, cancellationToken);
+
+        var invalidRows = new List<object>();
+        var candidates = new List<ImportUserCandidate>();
+
+        foreach (var r in dto.Rows)
+        {
+            var firstName = (r.FirstName ?? "").Trim();
+            var lastName = (r.LastName ?? "").Trim();
+            var mobile = NormalizeMobile(r.MobileNumber);
+            var nationalCode = NormalizeNationalCode(r.NationalCode);
+            var personnelCode = (r.PersonnelCode ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(personnelCode)) personnelCode = null;
+
+            var gender = ParseUserGender(r.Gender);
+            if (r.Gender is { Length: > 0 } && gender is null)
+            {
+                invalidRows.Add(new { r.RowNumber, reason = "جنسیت نامعتبر (آقای/خانم یا male/female)" });
+                continue;
+            }
+            if (gender is null)
+            {
+                invalidRows.Add(new { r.RowNumber, reason = "جنسیت الزامی است" });
+                continue;
+            }
+
+            if (firstName.Length < 2 || lastName.Length < 2)
+            {
+                invalidRows.Add(new { r.RowNumber, reason = "نام یا نام خانوادگی نامعتبر" });
+                continue;
+            }
+            if (!IsValidMobile(mobile))
+            {
+                invalidRows.Add(new { r.RowNumber, reason = "شماره موبایل نامعتبر" });
+                continue;
+            }
+            if (!IsValidNationalCode(nationalCode))
+            {
+                invalidRows.Add(new { r.RowNumber, reason = "کد ملی خالی است" });
+                continue;
+            }
+
+            Guid? positionId = null;
+            var positionName = (r.PositionName ?? "").Trim();
+            if (!string.IsNullOrWhiteSpace(positionName))
+            {
+                if (!positionsByName.TryGetValue(positionName, out var pid))
+                {
+                    invalidRows.Add(new { r.RowNumber, reason = $"سمت «{positionName}» در سیستم یافت نشد" });
+                    continue;
+                }
+                positionId = pid;
+            }
+
+            candidates.Add(new ImportUserCandidate(
+                r.RowNumber, firstName, lastName, mobile, nationalCode, personnelCode, gender.Value, positionId));
+        }
+
+        foreach (var dup in candidates.GroupBy(x => x.Mobile).Where(g => g.Count() > 1))
+            foreach (var x in dup)
+                invalidRows.Add(new { x.RowNumber, reason = "موبایل تکراری در فایل" });
+
+        foreach (var dup in candidates.GroupBy(x => x.NationalCode).Where(g => g.Count() > 1))
+            foreach (var x in dup)
+                invalidRows.Add(new { x.RowNumber, reason = "کد ملی تکراری در فایل" });
+
+        var uniqueCandidates = candidates
+            .Where(c => candidates.Count(x => x.Mobile == c.Mobile) == 1)
+            .Where(c => candidates.Count(x => x.NationalCode == c.NationalCode) == 1)
+            .ToList();
+
+        if (uniqueCandidates.Count == 0)
+        {
+            return Ok(new
+            {
+                message = "ردیف معتبری برای ایمپورت نبود",
+                inserted = 0,
+                skippedExisting = 0,
+                invalidCount = invalidRows.Count,
+                invalidRows,
+                smsSent = 0,
+                smsFailed = 0,
+            });
+        }
+
+        var mobiles = uniqueCandidates.Select(x => x.Mobile).ToList();
+        var nationalCodes = uniqueCandidates.Select(x => x.NationalCode).ToList();
+        var personnelCodes = uniqueCandidates
+            .Where(x => !string.IsNullOrWhiteSpace(x.PersonnelCode))
+            .Select(x => x.PersonnelCode!)
+            .Distinct()
+            .ToList();
+
+        var existingMobiles = await userManager.Users
+            .Where(x => x.PhoneNumber != null && mobiles.Contains(x.PhoneNumber))
+            .Select(x => x.PhoneNumber!)
+            .ToListAsync(cancellationToken);
+        var existingNationalCodes = await userManager.Users
+            .Where(x => nationalCodes.Contains(x.NationalCode))
+            .Select(x => x.NationalCode)
+            .ToListAsync(cancellationToken);
+        var existingPersonnelCodes = personnelCodes.Count == 0
+            ? new List<string>()
+            : await userManager.Users
+                .Where(x => x.PersonnelCode != null && personnelCodes.Contains(x.PersonnelCode))
+                .Select(x => x.PersonnelCode!)
+                .ToListAsync(cancellationToken);
+
+        var existingMobileSet = existingMobiles.ToHashSet(StringComparer.Ordinal);
+        var existingNationalSet = existingNationalCodes.ToHashSet(StringComparer.Ordinal);
+        var existingPersonnelSet = existingPersonnelCodes.ToHashSet(StringComparer.Ordinal);
+
+        var smsSettings = await db.SmsSettings.FirstOrDefaultAsync(cancellationToken) ?? new SmsSettings();
+        var (dateStr, timeStr) = SmsDateTimeFormatter.FormatUtcNowTehran();
+        var baseUrl = await frontendUrls.ResolveAdminBaseUrlAsync(cancellationToken);
+        var loginUrl = string.IsNullOrWhiteSpace(baseUrl) ? "/login" : $"{baseUrl}/login";
+
+        var inserted = 0;
+        var skippedExisting = 0;
+        var smsSent = 0;
+        var smsFailed = 0;
+        var createdUsers = new List<(AppUser User, string WelcomeText)>();
+
+        await using var tx = await db.Database.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            foreach (var c in uniqueCandidates)
+            {
+                if (existingMobileSet.Contains(c.Mobile))
+                {
+                    invalidRows.Add(new { c.RowNumber, reason = "موبایل قبلاً ثبت شده" });
+                    skippedExisting++;
+                    continue;
+                }
+                if (existingNationalSet.Contains(c.NationalCode))
+                {
+                    invalidRows.Add(new { c.RowNumber, reason = "کد ملی قبلاً ثبت شده" });
+                    skippedExisting++;
+                    continue;
+                }
+                if (!string.IsNullOrWhiteSpace(c.PersonnelCode) && existingPersonnelSet.Contains(c.PersonnelCode))
+                {
+                    invalidRows.Add(new { c.RowNumber, reason = "کد پرسنلی قبلاً ثبت شده" });
+                    skippedExisting++;
+                    continue;
+                }
+
+                var generatedPassword = PasswordGenerator.Generate();
+                var user = new AppUser
+                {
+                    Id = Guid.NewGuid(),
+                    UserName = c.Mobile,
+                    PhoneNumber = c.Mobile,
+                    FirstName = c.FirstName,
+                    LastName = c.LastName,
+                    NationalCode = c.NationalCode,
+                    PersonnelCode = c.PersonnelCode,
+                    Gender = c.Gender,
+                    UserPositionId = c.PositionId,
+                    CreatedByUserId = CurrentUserGuid,
+                    CreatedAtUtc = DateTime.UtcNow,
+                    IsActive = true,
+                    PhoneNumberConfirmed = true,
+                    SignatureDisplayDegree = UserSignatureDisplaySize.DefaultDegree,
+                };
+
+                var createResult = await userManager.CreateAsync(user, generatedPassword);
+                if (!createResult.Succeeded)
+                {
+                    invalidRows.Add(new
+                    {
+                        c.RowNumber,
+                        reason = string.Join(" | ", createResult.Errors.Select(e => e.Description)),
+                    });
+                    continue;
+                }
+
+                foreach (var gid in validGroupIds)
+                    db.UserGroupMembers.Add(new UserGroupMember { UserId = user.Id, GroupId = gid });
+
+                existingMobileSet.Add(c.Mobile);
+                existingNationalSet.Add(c.NationalCode);
+                if (!string.IsNullOrWhiteSpace(c.PersonnelCode))
+                    existingPersonnelSet.Add(c.PersonnelCode);
+
+                var welcomeText =
+                    $"کارشناس محترم {c.FirstName} {c.LastName}،\n" +
+                    $"کاربری شما در تاریخ {dateStr} ساعت {timeStr} ساخته شد.\n" +
+                    $"جهت استفاده از پنل به لینک زیر مراجعه نمایید:\n{loginUrl}";
+                createdUsers.Add((user, welcomeText));
+                inserted++;
+            }
+
+            await db.SaveChangesAsync(cancellationToken);
+            await tx.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await tx.RollbackAsync(cancellationToken);
+            throw;
+        }
+
+        foreach (var (user, welcomeText) in createdUsers)
+        {
+            await inbox.SendToUserAsync(user.Id, "خوش‌آمدگویی", welcomeText, cancellationToken);
+            if (!smsSettings.UserCreateSmsEnabled) continue;
+            var sent = await smsSender.SendSmsAsync(new SmsRequest(user.PhoneNumber!, welcomeText), cancellationToken);
+            if (sent) smsSent++;
+            else smsFailed++;
+        }
+
+        return Ok(new
+        {
+            message = inserted > 0 ? $"{inserted} کاربر ایمپورت شد" : "هیچ کاربر جدیدی ایجاد نشد",
+            inserted,
+            skippedExisting,
+            invalidCount = invalidRows.Count,
+            invalidRows,
+            smsSent,
+            smsFailed,
+            smsEnabled = smsSettings.UserCreateSmsEnabled,
+        });
+    }
+
     [HttpGet]
     [Authorize(Policy = "users.read")]
     public async Task<IActionResult> List(
@@ -156,12 +402,13 @@ public class AdminUsersController(
         [FromQuery] string? status = null,
         [FromQuery] Guid? groupId = null,
         [FromQuery] string? sortBy = null,
+        [FromQuery] bool lite = false,
         CancellationToken cancellationToken = default)
     {
         page = Math.Max(1, page);
         pageSize = Math.Clamp(pageSize, 5, 50);
 
-        var query = userManager.Users.Where(x => !x.IsSoftDeleted).AsQueryable();
+        var query = db.Users.AsNoTracking().Where(x => !x.IsSoftDeleted);
         if (!CanReadAllUsers)
         {
             var creatorId = CurrentUserGuid;
@@ -170,40 +417,31 @@ public class AdminUsersController(
             query = query.Where(x => x.CreatedByUserId == creatorId.Value);
         }
 
-        // فیلتر جستجو
         if (!string.IsNullOrWhiteSpace(search))
         {
             var q = search.Trim();
             query = query.Where(x =>
                 (x.FirstName + " " + x.LastName).Contains(q) ||
-                x.PhoneNumber!.Contains(q) ||
+                (x.PhoneNumber != null && x.PhoneNumber.Contains(q)) ||
                 x.NationalCode.Contains(q));
         }
 
-        // فیلتر وضعیت
-        if (status == "active")   query = query.Where(x => x.IsActive);
+        if (status == "active") query = query.Where(x => x.IsActive);
         if (status == "inactive") query = query.Where(x => !x.IsActive);
 
-        // فیلتر گروه
         if (groupId is Guid gid && gid != Guid.Empty)
-        {
-            var memberUserIds = db.UserGroupMembers
-                .Where(x => x.GroupId == gid)
-                .Select(x => x.UserId);
-            query = query.Where(x => memberUserIds.Contains(x.Id));
-        }
+            query = query.Where(u => u.GroupMembers.Any(m => m.GroupId == gid));
 
-        // مرتب‌سازی
         query = sortBy switch
         {
-            "created_asc"  => query.OrderBy(x => x.CreatedAtUtc),
-            "name_asc"     => query.OrderBy(x => x.FirstName).ThenBy(x => x.LastName),
-            "name_desc"    => query.OrderByDescending(x => x.FirstName).ThenByDescending(x => x.LastName),
-            _              => query.OrderByDescending(x => x.CreatedAtUtc)
+            "created_asc" => query.OrderBy(x => x.CreatedAtUtc),
+            "name_asc" => query.OrderBy(x => x.FirstName).ThenBy(x => x.LastName),
+            "name_desc" => query.OrderByDescending(x => x.FirstName).ThenByDescending(x => x.LastName),
+            _ => query.OrderByDescending(x => x.CreatedAtUtc),
         };
 
+        // DbContext is not thread-safe — count and page queries must run sequentially.
         var total = await query.CountAsync(cancellationToken);
-
         var usersRaw = await query
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
@@ -214,30 +452,69 @@ public class AdminUsersController(
                 x.LastName,
                 MobileNumber = x.PhoneNumber,
                 x.NationalCode,
+                x.PersonnelCode,
+                x.Gender,
                 x.CreatedAtUtc,
                 x.IsActive,
                 x.UserPositionId,
-                x.SignatureImagePath
+                x.SignatureImagePath,
+                x.SignatureDisplayDegree,
             })
             .ToListAsync(cancellationToken);
 
-        // بارگذاری role‌ها به صورت batch
+        var positionIds = usersRaw
+            .Where(x => x.UserPositionId.HasValue)
+            .Select(x => x.UserPositionId!.Value)
+            .Distinct()
+            .ToList();
+        var positionsById = positionIds.Count == 0
+            ? new Dictionary<Guid, string>()
+            : await db.UserPositions.AsNoTracking()
+                .Where(x => positionIds.Contains(x.Id))
+                .ToDictionaryAsync(x => x.Id, x => x.Name, cancellationToken);
+
+        if (lite)
+        {
+            var liteItems = usersRaw.Select(u => new
+            {
+                u.Id,
+                u.FirstName,
+                u.LastName,
+                u.MobileNumber,
+                u.NationalCode,
+                PersonnelCode = u.PersonnelCode,
+                Gender = u.Gender == UserGender.Male ? "male" : u.Gender == UserGender.Female ? "female" : null,
+                u.CreatedAtUtc,
+                u.IsActive,
+                u.UserPositionId,
+                UserPositionName = u.UserPositionId.HasValue && positionsById.TryGetValue(u.UserPositionId.Value, out var pn) ? pn : null,
+                HasSignature = u.SignatureImagePath != null && u.SignatureImagePath != "",
+                u.SignatureDisplayDegree,
+            }).ToList();
+
+            return Ok(new
+            {
+                items = liteItems,
+                total,
+                page,
+                pageSize,
+                totalPages = (int)Math.Ceiling((double)total / pageSize),
+            });
+        }
+
         var userIds = usersRaw.Select(x => x.Id).ToList();
-        var positionIds = usersRaw.Where(x => x.UserPositionId.HasValue).Select(x => x.UserPositionId!.Value).Distinct().ToList();
-        var positionsById = await db.UserPositions
-            .Where(x => positionIds.Contains(x.Id))
-            .ToDictionaryAsync(x => x.Id, x => x.Name, cancellationToken);
         var userRoles = await db.Set<Microsoft.AspNetCore.Identity.IdentityUserRole<Guid>>()
+            .AsNoTracking()
             .Where(x => userIds.Contains(x.UserId))
-            .Join(db.Roles, ur => ur.RoleId, r => r.Id, (ur, r) => new { ur.UserId, r.Name })
+            .Join(db.Roles.AsNoTracking(), ur => ur.RoleId, r => r.Id, (ur, r) => new { ur.UserId, r.Name })
             .ToListAsync(cancellationToken);
 
         var rolesByUser = userRoles.GroupBy(x => x.UserId)
             .ToDictionary(g => g.Key, g => g.Select(x => x.Name!).ToList());
 
-        var userGroups = await db.UserGroupMembers
+        var userGroups = await db.UserGroupMembers.AsNoTracking()
             .Where(x => userIds.Contains(x.UserId))
-            .Join(db.UserGroups, ug => ug.GroupId, g => g.Id, (ug, g) => new UserGroupOptionDto(ug.UserId, g.Id, g.Name))
+            .Join(db.UserGroups.AsNoTracking(), ug => ug.GroupId, g => g.Id, (ug, g) => new UserGroupOptionDto(ug.UserId, g.Id, g.Name))
             .ToListAsync(cancellationToken);
         var groupsByUser = userGroups
             .GroupBy(x => x.UserId)
@@ -260,9 +537,11 @@ public class AdminUsersController(
                 UserPositionName = u.UserPositionId.HasValue && positionsById.TryGetValue(u.UserPositionId.Value, out var pn) ? pn : null,
                 HasSignature = !string.IsNullOrWhiteSpace(u.SignatureImagePath),
                 SignaturePath = u.SignatureImagePath,
+                SignatureDisplayDegree = u.SignatureDisplayDegree,
+                SignatureWidthPx = UserSignatureDisplaySize.WidthPxFromDegree(u.SignatureDisplayDegree),
                 RoleName = roles.FirstOrDefault() ?? "",
                 RoleNames = roles,
-                Groups = groupNames
+                Groups = groupNames,
             };
         }).ToList();
 
@@ -272,8 +551,33 @@ public class AdminUsersController(
             total,
             page,
             pageSize,
-            totalPages = (int)Math.Ceiling((double)total / pageSize)
+            totalPages = (int)Math.Ceiling((double)total / pageSize),
         });
+    }
+
+    [HttpGet("{id:guid}/group-ids")]
+    [Authorize(Policy = "users.read")]
+    public async Task<IActionResult> GetUserGroupIds(Guid id, CancellationToken cancellationToken)
+    {
+        var exists = await db.Users.AsNoTracking().AnyAsync(x => x.Id == id && !x.IsSoftDeleted, cancellationToken);
+        if (!exists) return NotFound();
+
+        var groupIds = await db.UserGroupMembers.AsNoTracking()
+            .Where(x => x.UserId == id)
+            .Select(x => x.GroupId)
+            .ToListAsync(cancellationToken);
+
+        return Ok(groupIds);
+    }
+
+    [HttpGet("{id:guid}/role-names")]
+    [Authorize(Policy = "users.read")]
+    public async Task<IActionResult> GetUserRoleNames(Guid id, CancellationToken cancellationToken)
+    {
+        var user = await userManager.FindByIdAsync(id.ToString());
+        if (user is null || user.IsSoftDeleted) return NotFound();
+        var roles = await userManager.GetRolesAsync(user);
+        return Ok(roles.ToList());
     }
 
     [HttpGet("roles-options")]
@@ -299,10 +603,62 @@ public class AdminUsersController(
                 Name = (x.FirstName + " " + x.LastName).Trim(),
                 Email = x.Email ?? (x.PhoneNumber ?? ""),
                 x.AvatarUrl,
-                PositionName = x.UserPosition != null ? x.UserPosition.Name : null
+                PositionName = x.UserPosition != null ? x.UserPosition.Name : null,
+                HasSignature = x.SignatureImagePath != null && x.SignatureImagePath != "",
             })
             .ToListAsync(cancellationToken);
-        return Ok(users);
+        return Ok(users.Select(u => new
+        {
+            u.Id,
+            u.FirstName,
+            u.LastName,
+            u.Name,
+            u.Email,
+            AvatarUrl = ProfileAvatarUrlHelper.BuildPublicUrl(env.ContentRootPath, u.Id, u.AvatarUrl),
+            u.PositionName,
+            u.HasSignature,
+        }));
+    }
+
+    [HttpGet("{id:guid}/edit-profile")]
+    [Authorize(Policy = "users.read")]
+    public async Task<IActionResult> GetEditProfile(Guid id, CancellationToken cancellationToken)
+    {
+        var user = await db.Users.AsNoTracking()
+            .Where(x => x.Id == id && !x.IsSoftDeleted)
+            .Select(x => new
+            {
+                x.FirstName,
+                x.LastName,
+                MobileNumber = x.PhoneNumber ?? "",
+                x.NationalCode,
+                x.PersonnelCode,
+                x.Gender,
+                x.UserPositionId,
+                x.SignatureDisplayDegree,
+                HasSignature = x.SignatureImagePath != null && x.SignatureImagePath != "",
+            })
+            .FirstOrDefaultAsync(cancellationToken);
+        if (user is null) return NotFound();
+
+        var groupIds = await db.UserGroupMembers.AsNoTracking()
+            .Where(x => x.UserId == id)
+            .Select(x => x.GroupId)
+            .ToListAsync(cancellationToken);
+
+        return Ok(new
+        {
+            user.FirstName,
+            user.LastName,
+            user.MobileNumber,
+            user.NationalCode,
+            PersonnelCode = user.PersonnelCode ?? "",
+            Gender = user.Gender == UserGender.Male ? "male" : user.Gender == UserGender.Female ? "female" : "",
+            user.UserPositionId,
+            user.SignatureDisplayDegree,
+            user.HasSignature,
+            GroupIds = groupIds,
+        });
     }
 
     [HttpPut("{id:guid}")]
@@ -341,6 +697,9 @@ public class AdminUsersController(
         else
             user.UserPositionId = null;
 
+        if (dto.SignatureDisplayDegree.HasValue)
+            user.SignatureDisplayDegree = UserSignatureDisplaySize.NormalizeDegree(dto.SignatureDisplayDegree);
+
         var result = await userManager.UpdateAsync(user);
         if (!result.Succeeded) return BadRequest(result.Errors);
 
@@ -348,14 +707,20 @@ public class AdminUsersController(
             .Where(x => x != Guid.Empty)
             .Distinct()
             .ToList();
+        if (groupIds.Count == 0)
+            return BadRequest(new { message = "انتخاب حداقل یک گروه الزامی است" });
+
+        var validGroupIds = await db.UserGroups
+            .Where(x => groupIds.Contains(x.Id))
+            .Select(x => x.Id)
+            .ToListAsync();
+        if (validGroupIds.Count != groupIds.Count)
+            return BadRequest(new { message = "یک یا چند گروه انتخاب‌شده معتبر نیستند" });
+
         var oldMembers = await db.UserGroupMembers.Where(x => x.UserId == id).ToListAsync();
         db.UserGroupMembers.RemoveRange(oldMembers);
-        if (groupIds.Count > 0)
-        {
-            var validGroups = await db.UserGroups.Where(x => groupIds.Contains(x.Id)).Select(x => x.Id).ToListAsync();
-            foreach (var gid in validGroups)
-                db.UserGroupMembers.Add(new UserGroupMember { UserId = id, GroupId = gid });
-        }
+        foreach (var gid in validGroupIds)
+            db.UserGroupMembers.Add(new UserGroupMember { UserId = id, GroupId = gid });
         await db.SaveChangesAsync();
         return Ok(new { message = "مشخصات کاربر بروزرسانی شد" });
     }
@@ -455,9 +820,18 @@ public class AdminUsersController(
             return BadRequest(new { message = ex.Message });
         }
 
+        if (form.SignatureDisplayDegree.HasValue)
+            user.SignatureDisplayDegree = UserSignatureDisplaySize.NormalizeDegree(form.SignatureDisplayDegree);
+
         var update = await userManager.UpdateAsync(user);
         if (!update.Succeeded) return BadRequest(update.Errors);
-        return Ok(new { message = "امضای دیجیتال ذخیره شد", signaturePath = user.SignatureImagePath });
+        return Ok(new
+        {
+            message = "امضای دیجیتال ذخیره شد",
+            signaturePath = user.SignatureImagePath,
+            signatureDisplayDegree = user.SignatureDisplayDegree,
+            signatureWidthPx = UserSignatureDisplaySize.WidthPxFromDegree(user.SignatureDisplayDegree),
+        });
     }
 
     [HttpDelete("{id:guid}/signature")]
@@ -473,14 +847,34 @@ public class AdminUsersController(
 
     [HttpDelete("{id:guid}")]
     [Authorize(Policy = "users.delete")]
-    public async Task<IActionResult> SoftDelete(Guid id)
+    public async Task<IActionResult> SoftDelete(Guid id, CancellationToken cancellationToken)
     {
+        if (CurrentUserGuid == id)
+            return BadRequest(new { message = "امکان حذف حساب کاربری خودتان وجود ندارد" });
+
         var user = await userManager.FindByIdAsync(id.ToString());
-        if (user is null) return NotFound();
+        if (user is null) return NotFound(new { message = "کاربر یافت نشد" });
+        if (user.IsSoftDeleted)
+            return BadRequest(new { message = "این کاربر قبلاً حذف شده است" });
+
+        var now = DateTime.UtcNow;
+        var activeTokens = await db.RefreshTokens
+            .Where(x => x.UserId == id && x.RevokedAtUtc == null)
+            .ToListAsync(cancellationToken);
+        foreach (var token in activeTokens)
+            token.RevokedAtUtc = now;
+
         user.IsSoftDeleted = true;
         user.IsActive = false;
-        await userManager.UpdateAsync(user);
-        return Ok(new { message = "کاربر حذف شد" });
+        user.LockoutEnabled = true;
+        user.LockoutEnd = DateTimeOffset.UtcNow.AddYears(100);
+
+        var update = await userManager.UpdateAsync(user);
+        if (!update.Succeeded)
+            return BadRequest(new { message = "حذف کاربر ناموفق بود", errors = update.Errors.Select(e => e.Description) });
+
+        await db.SaveChangesAsync(cancellationToken);
+        return Ok(new { message = "کاربر حذف شد؛ ورود و تمدید نشست مجاز نیست" });
     }
 
     private static class PasswordGenerator
@@ -543,6 +937,33 @@ public class AdminUsersController(
             _ => null,
         };
     }
+
+    private static bool IsValidMobile(string mobile) =>
+        System.Text.RegularExpressions.Regex.IsMatch(mobile, "^09\\d{9}$");
+
+    private static bool IsValidNationalCode(string nationalCode) =>
+        !string.IsNullOrWhiteSpace(nationalCode);
+
+    private static string NormalizeMobile(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+        var digits = new string(raw.Where(char.IsDigit).ToArray());
+        if (digits.Length == 10 && digits.StartsWith('9')) return "0" + digits;
+        return digits.Length > 11 ? digits[^11..] : digits;
+    }
+
+    private static string NormalizeNationalCode(string? raw) =>
+        string.IsNullOrWhiteSpace(raw) ? "" : raw.Trim();
+
+    private sealed record ImportUserCandidate(
+        int RowNumber,
+        string FirstName,
+        string LastName,
+        string Mobile,
+        string NationalCode,
+        string? PersonnelCode,
+        UserGender Gender,
+        Guid? PositionId);
 }
 
 public record UserGroupOptionDto(Guid UserId, Guid Id, string Name);
@@ -551,5 +972,6 @@ public sealed class UploadUserSignatureForm
 {
     public IFormFile? Signature { get; set; }
     public IFormFile? File { get; set; }
+    public int? SignatureDisplayDegree { get; set; }
 }
 

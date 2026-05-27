@@ -60,6 +60,8 @@ public class PublicContractsController(
             && (current is null || current.UserId != assigneeId))
             return BadRequest(new { message = "در حال حاضر نوبت تأیید شما نیست" });
 
+        await approvalLinks.RecordLinkOpenedAsync(link, ct);
+
         await EnrichStepNamesAsync(steps, ct);
 
         var originalPath = await ContractWorkflowProcessor.ResolveOriginalFilePathAsync(contract, db, ct);
@@ -151,6 +153,8 @@ public class PublicContractsController(
             && amendState!.AssigneeUserId == link.AssigneeUserId;
         if (!steps.Any(s => s.UserId == link.AssigneeUserId) && !isAmendmentAssignee)
             return Forbid();
+
+        await approvalLinks.RecordLinkOpenedAsync(link, ct);
 
         var relative = contract.FilePath;
         if (string.IsNullOrWhiteSpace(relative))

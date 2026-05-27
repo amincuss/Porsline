@@ -38,7 +38,10 @@ public static class DependencyInjection
         services.AddScoped<ContractActionLinkService>();
         services.AddScoped<ContractPostApprovalService>();
         services.AddScoped<ContractWorkflowProcessor>();
+        services.AddScoped<FormPostApprovalService>();
         services.AddScoped<FormWorkflowProcessor>();
+        services.AddScoped<FormWorkflowRejectionService>();
+        services.AddScoped<FormDispatchSubmissionNotifier>();
         services.AddScoped<FormSubmissionApprovalLinkService>();
         services.AddScoped<ApprovalReminderService>();
         services.AddHostedService<ApprovalReminderBackgroundService>();

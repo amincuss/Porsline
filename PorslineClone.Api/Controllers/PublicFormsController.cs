@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.EntityFrameworkCore;
 using PorslineClone.Application.Abstractions;
 using PorslineClone.Application.Contracts;
@@ -18,7 +19,9 @@ public class PublicFormsController(
     IWebHostEnvironment env,
     ISmsSender smsSender,
     IInboxMessageService inbox,
-    IFrontendUrlResolver frontendUrls) : ControllerBase
+    IFrontendUrlResolver frontendUrls,
+    FormWorkflowProcessor workflowProcessor,
+    FormDispatchSubmissionNotifier dispatchNotifier) : ControllerBase
 {
     private static string NormalizeMobile(string? input)
     {
@@ -80,9 +83,36 @@ public class PublicFormsController(
                 f.SortOrder,
                 f.ColSpan,
                 f.UploadMaxSizeMb,
-                Options = f.OptionsJson != null ? JsonSerializer.Deserialize<List<string>>(f.OptionsJson) : null
+                Options = f.OptionsJson != null ? JsonSerializer.Deserialize<List<string>>(f.OptionsJson) : null,
+                HasGuideFile = f.FieldType == FieldType.Guide && !string.IsNullOrWhiteSpace(f.Placeholder),
+                GuideFileName = f.FieldType == FieldType.Guide ? f.HelpText : null,
             })
         });
+    }
+
+    [HttpGet("guide")]
+    [AllowAnonymous]
+    public async Task<IActionResult> DownloadGuide([FromQuery] string c, [FromQuery] Guid fieldId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(c)) return BadRequest(new { message = "کد لینک نامعتبر است" });
+        var link = await db.FormDispatchLinks.FirstOrDefaultAsync(x => x.Code == c, ct);
+        if (link is null || !link.IsActive || link.ExpiresAtUtc < DateTime.UtcNow)
+            return BadRequest(new { message = "لینک فرم نامعتبر یا منقضی است" });
+
+        var field = await db.FormFields.AsNoTracking()
+            .FirstOrDefaultAsync(f => f.FormId == link.FormId && f.Id == fieldId && f.FieldType == FieldType.Guide, ct);
+        if (field is null || string.IsNullOrWhiteSpace(field.Placeholder))
+            return NotFound(new { message = "فایل راهنما یافت نشد" });
+        if (!FormGuideFileHelper.TryResolveDiskPath(env, field.Placeholder, out var fullPath))
+            return NotFound(new { message = "فایل روی سرور یافت نشد" });
+
+        var provider = new FileExtensionContentTypeProvider();
+        if (!provider.TryGetContentType(fullPath, out var contentType))
+            contentType = "application/octet-stream";
+        var downloadName = string.IsNullOrWhiteSpace(field.HelpText)
+            ? Path.GetFileName(fullPath)
+            : field.HelpText;
+        return PhysicalFile(fullPath, contentType, downloadName, enableRangeProcessing: true);
     }
 
     [HttpPost("access/otp/send")]
@@ -198,7 +228,7 @@ public class PublicFormsController(
         var filesByFieldId = Request.Form.Files.Where(f => f.Name.StartsWith("file_", StringComparison.OrdinalIgnoreCase))
             .ToDictionary(f => f.Name["file_".Length..], f => f, StringComparer.OrdinalIgnoreCase);
 
-        foreach (var ff in form.Fields.Where(x => (int)x.FieldType == 9 || (int)x.FieldType == 16))
+        foreach (var ff in form.Fields.Where(x => x.FieldType is FieldType.FileUpload or FieldType.ImageUpload))
         {
             if (!filesByFieldId.TryGetValue(ff.Id.ToString(), out var file) || file.Length <= 0) continue;
             var maxMb = ff.UploadMaxSizeMb is > 0 and <= 100 ? ff.UploadMaxSizeMb!.Value : 10;
@@ -218,7 +248,9 @@ public class PublicFormsController(
 
         var fieldValues = form.Fields.Select(f => new FormFieldValueDto(
             f.Label,
-            values.TryGetValue(f.Id.ToString(), out var v) ? v : ""
+            PersianDigitHelper.PersianizeForFormStorage(
+                values.TryGetValue(f.Id.ToString(), out var v) ? v : "",
+                f.FieldType)
         )).ToList();
 
         var responderId = link.ResponderId != Guid.Empty ? link.ResponderId : responder.Id;
@@ -229,18 +261,43 @@ public class PublicFormsController(
             link.ResponderMobileNumber,
             responderId,
             link.Id);
+
+        if (link.WorkflowTemplateId is { } dispatchTemplateId)
+        {
+            var dispatchTemplate = await db.FormWorkflowTemplates
+                .FirstOrDefaultAsync(x => x.Id == dispatchTemplateId && x.IsActive, ct);
+            if (dispatchTemplate is not null)
+                FormDispatchWorkflowHelper.ApplyTemplateToSubmission(submission, dispatchTemplate);
+        }
+
         db.FormSubmissions.Add(submission);
         link.UsedAtUtc = DateTime.UtcNow;
 
         await db.SaveChangesAsync(ct);
 
-        if (submission.Status == FormSubmissionStatus.InProgress && submission.WorkflowStartedAtUtc is not null)
+        if (submission.WorkflowTemplateId is not null && submission.Status == FormSubmissionStatus.Pending)
+        {
+            await db.Entry(submission).ReloadAsync(ct);
+            var (started, _) = await workflowProcessor.TryStartWorkflowAsync(submission, ct);
+            if (started)
+            {
+                var steps = FormWorkflowProcessor.DeserializeSteps(submission.StepsJson);
+                var firstStep = steps.FirstOrDefault(x => x.Status == "pending");
+                if (firstStep is not null)
+                    await SendInitialApprovalSmsAsync(firstStep.UserId, form.Title, ct);
+            }
+        }
+        else if (submission.Status == FormSubmissionStatus.InProgress && submission.WorkflowStartedAtUtc is not null)
         {
             var steps = FormWorkflowProcessor.DeserializeSteps(submission.StepsJson);
             var firstStep = steps.FirstOrDefault(x => x.Status == "pending");
             if (firstStep is not null)
                 await SendInitialApprovalSmsAsync(firstStep.UserId, form.Title, ct);
         }
+
+        var responderForNotify = await db.Responders.AsNoTracking()
+            .FirstOrDefaultAsync(x => x.Id == responderId, ct);
+        await dispatchNotifier.NotifySenderAfterSubmitAsync(submission, form, link, responderForNotify, ct);
 
         return Ok(new { message = "فرم با موفقیت ثبت شد" });
     }

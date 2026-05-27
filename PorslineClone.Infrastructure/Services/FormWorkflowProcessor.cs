@@ -14,7 +14,9 @@ public class FormWorkflowProcessor(
     FormSubmissionApprovalLinkService approvalLinks,
     ISmsSender smsSender,
     IInboxMessageService inbox,
-    IFrontendUrlResolver frontendUrls)
+    IFrontendUrlResolver frontendUrls,
+    FormDispatchSubmissionNotifier dispatchNotifier,
+    FormPostApprovalService postApproval)
 {
     public async Task<WorkflowActionResult> ProcessActionAsync(
         Guid submissionId,
@@ -31,27 +33,52 @@ public class FormWorkflowProcessor(
             return WorkflowActionResult.Fail("گردش این پاسخ هنوز شروع نشده است");
 
         var steps = DeserializeSteps(submission.StepsJson);
-        var current = steps.FirstOrDefault(s => s.Order == submission.CurrentStepOrder && s.Status == "pending");
-        if (current is null) return WorkflowActionResult.Fail("مرحله فعالی برای این پاسخ وجود ندارد");
-        if (current.UserId != assigneeUserId) return WorkflowActionResult.Fail("این مرحله به شما ارجاع نشده است", 403);
+        if (steps.Count == 0)
+            return WorkflowActionResult.Fail("مرحله‌ای برای گردش وجود ندارد");
 
-        var currentUser = await db.Users.FirstOrDefaultAsync(u => u.Id == assigneeUserId, ct);
+        var current = WorkflowStepJsonHelper.FindCurrentPending(steps, submission.CurrentStepOrder);
+        if (current is null)
+            return WorkflowActionResult.Fail("مرحله فعالی برای این پاسخ وجود ندارد");
+        if (current.UserId != assigneeUserId)
+            return WorkflowActionResult.Fail("این مرحله به شما ارجاع نشده است", 403);
+
+        submission.CurrentStepOrder = current.Order;
+
+        var becameFullyApproved = false;
+        var terminalReject = false;
+        var currentUser = await userManager.FindByIdAsync(assigneeUserId.ToString());
         var approverName = currentUser is null
             ? current.UserName
             : $"{currentUser.FirstName} {currentUser.LastName}".Trim();
 
         if (approve)
         {
+            var sigErr = FormApprovalSignatureHelper.ValidateApproverSignature(currentUser);
+            if (sigErr is not null)
+                return WorkflowActionResult.Fail(sigErr);
+
             current.Status = "approved";
             current.Comment = comment;
             current.ActionAt = DateTime.UtcNow;
+            string? positionTitle = null;
+            if (currentUser?.UserPositionId is Guid positionId)
+            {
+                positionTitle = await db.UserPositions.AsNoTracking()
+                    .Where(p => p.Id == positionId)
+                    .Select(p => p.Name)
+                    .FirstOrDefaultAsync(ct);
+            }
+            FormApprovalSignatureHelper.CaptureSignatureOnApprove(current, currentUser, positionTitle);
 
-            var next = steps.Where(s => s.Order > current.Order).OrderBy(s => s.Order).FirstOrDefault();
+            var next = WorkflowStepJsonHelper.FindNextStep(steps, current);
             if (next is null)
+            {
                 submission.Status = FormSubmissionStatus.Approved;
+                becameFullyApproved = true;
+            }
             else
             {
-                next.Status = "pending";
+                WorkflowStepJsonHelper.SetSinglePending(steps, next);
                 submission.CurrentStepOrder = next.Order;
                 submission.Status = FormSubmissionStatus.InProgress;
                 await SendAssigneeSmsAsync(submission, next.UserId, approverName, current.UserName, ct);
@@ -65,12 +92,15 @@ public class FormWorkflowProcessor(
 
             if (current.OnReject == "continue")
             {
-                var next = steps.Where(s => s.Order > current.Order).OrderBy(s => s.Order).FirstOrDefault();
+                var next = WorkflowStepJsonHelper.FindNextStep(steps, current);
                 if (next is null)
+                {
                     submission.Status = FormSubmissionStatus.Rejected;
+                    terminalReject = true;
+                }
                 else
                 {
-                    next.Status = "pending";
+                    WorkflowStepJsonHelper.SetSinglePending(steps, next);
                     submission.CurrentStepOrder = next.Order;
                     submission.Status = FormSubmissionStatus.InProgress;
                     await SendAssigneeSmsAsync(submission, next.UserId, approverName, current.UserName, ct);
@@ -81,11 +111,38 @@ public class FormWorkflowProcessor(
                 foreach (var later in steps.Where(s => s.Order > current.Order && s.Status == "waiting"))
                     later.Status = "skipped";
                 submission.Status = FormSubmissionStatus.Rejected;
+                terminalReject = true;
+            }
+
+            if (terminalReject)
+            {
+                submission.IsArchived = false;
+                submission.WorkflowRejectionJson = FormWorkflowRejectionHelper.Serialize(new FormWorkflowRejectionStateDto
+                {
+                    Phase = "awaiting_sender",
+                    RejectedAtStepOrder = current.Order,
+                    RejectedByUserId = assigneeUserId,
+                    RejectedByUserName = string.IsNullOrWhiteSpace(approverName) ? current.UserName : approverName,
+                    RejectionComment = comment,
+                    RejectedAtUtc = current.ActionAt ?? DateTime.UtcNow,
+                });
             }
         }
 
-        submission.StepsJson = JsonSerializer.Serialize(steps);
+        submission.StepsJson = WorkflowStepJsonHelper.Serialize(steps);
         await db.SaveChangesAsync(ct);
+
+        if (becameFullyApproved)
+        {
+            await dispatchNotifier.NotifySenderAfterFullApprovalAsync(submission, ct);
+            await postApproval.TryStartPostApprovalAsync(submission, ct);
+        }
+        else if (terminalReject)
+        {
+            await dispatchNotifier.NotifyAfterRejectAwaitingSenderActionAsync(
+                submission, current, approverName, comment, ct);
+        }
+
         return WorkflowActionResult.Ok(approve ? "تأیید شد" : "رد شد");
     }
 
@@ -99,7 +156,7 @@ public class FormWorkflowProcessor(
             return WorkflowActionResult.Fail("گردش در حال اجرا نیست یا به پایان رسیده است");
 
         var steps = DeserializeSteps(submission.StepsJson);
-        var current = steps.FirstOrDefault(s => s.Order == submission.CurrentStepOrder && s.Status == "pending");
+        var current = WorkflowStepJsonHelper.FindCurrentPending(steps, submission.CurrentStepOrder);
         if (current is null)
             return WorkflowActionResult.Fail("در حال حاضر مرحله‌ای برای تأیید فعال نیست");
 
@@ -132,12 +189,14 @@ public class FormWorkflowProcessor(
             return (false, "مرحله‌ای برای گردش وجود ندارد");
 
         var first = steps.OrderBy(s => s.Order).First();
-        first.Status = "pending";
+        WorkflowStepJsonHelper.SetSinglePending(steps, first);
         submission.CurrentStepOrder = first.Order;
         submission.Status = FormSubmissionStatus.InProgress;
         submission.WorkflowStartedAtUtc = DateTime.UtcNow;
         submission.WorkflowScheduledStartAtUtc = null;
-        submission.StepsJson = JsonSerializer.Serialize(steps);
+        if (submission.WorkflowRunCycle < 1)
+            submission.WorkflowRunCycle = 1;
+        submission.StepsJson = WorkflowStepJsonHelper.Serialize(steps);
         await db.SaveChangesAsync(ct);
 
         await SendAssigneeSmsAsync(submission, first.UserId, null, null, ct);
@@ -166,19 +225,19 @@ public class FormWorkflowProcessor(
         var linkPath = string.IsNullOrWhiteSpace(publicBase)
             ? $"/approve/form?c={code}"
             : $"{publicBase.TrimEnd('/')}/approve/form?c={code}";
-        var adminApprovals = string.IsNullOrWhiteSpace(adminBase)
-            ? "/admin/approvals"
-            : $"{adminBase.TrimEnd('/')}/admin/approvals";
+        var adminWorkflowRuns = string.IsNullOrWhiteSpace(adminBase)
+            ? "/admin/forms/workflow-runs"
+            : $"{adminBase.TrimEnd('/')}/admin/forms/workflow-runs";
 
         var formTitle = submission.Form?.Title ?? "فرم";
         var msg = isReminder
             ? $"یادآوری: پاسخ فرم «{formTitle}» همچنان منتظر تأیید شماست.\n" +
               $"لینک تأیید: {linkPath}\n" +
-              $"یا پنل: {adminApprovals}"
+              $"یا پنل: {adminWorkflowRuns}"
             : $"پاسخ جدید از فرم «{formTitle}» برای تأیید شما ارسال شد.\n" +
               $"ارجاع‌دهنده: {sender}\n" +
               $"لینک تأیید: {linkPath}\n" +
-              $"یا پنل: {adminApprovals}";
+              $"یا پنل: {adminWorkflowRuns}";
 
         var inboxTitle = isReminder ? "یادآوری تأیید فرم" : "فرم برای تأیید";
         await inbox.SendToUserAsync(userId, inboxTitle, msg, ct);
@@ -189,6 +248,6 @@ public class FormWorkflowProcessor(
         return sent;
     }
 
-    public static List<ApprovalStepDto> DeserializeSteps(string? json)
-        => string.IsNullOrWhiteSpace(json) ? [] : (JsonSerializer.Deserialize<List<ApprovalStepDto>>(json) ?? []);
+    public static List<ApprovalStepDto> DeserializeSteps(string? json) =>
+        WorkflowStepJsonHelper.Deserialize(json);
 }

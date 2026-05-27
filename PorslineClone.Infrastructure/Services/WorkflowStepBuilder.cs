@@ -5,7 +5,10 @@ namespace PorslineClone.Infrastructure.Services;
 
 public static class WorkflowStepBuilder
 {
-    public static List<ApprovalStepDto> BuildApprovalStepsFromTemplate(string? workflowJson, bool startImmediately)
+    public static List<ApprovalStepDto> BuildApprovalStepsFromTemplate(
+        string? workflowJson,
+        bool startImmediately,
+        int reviewCycle = 0)
     {
         if (string.IsNullOrWhiteSpace(workflowJson)) return [];
         var workflow = JsonSerializer.Deserialize<List<WorkflowStepDto>>(workflowJson) ?? [];
@@ -21,6 +24,7 @@ public static class WorkflowStepBuilder
                 Note = x.Note,
                 ApprovalDeadlineDays = Math.Max(0, x.ApprovalDeadlineDays ?? 0),
                 ApprovalDeadlineHours = Math.Max(0, x.ApprovalDeadlineHours ?? 0),
+                ReviewCycle = Math.Max(0, reviewCycle),
             })
             .ToList();
     }

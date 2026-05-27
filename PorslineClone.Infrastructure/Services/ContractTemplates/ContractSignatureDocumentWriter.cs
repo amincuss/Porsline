@@ -12,7 +12,8 @@ public sealed record ContractSignatureSlot(
     byte[] ImageBytes,
     string ImageExtension,
     string ApproverFullName,
-    string? PositionTitle);
+    string? PositionTitle,
+    int WidthPx = 140);
 
 /// <summary>
 /// هر امضا فقط در placeholder با همان کلید (مثلاً sign_1 برای مرحله ۱) — بدون جایگزینی تصادفی.
@@ -124,7 +125,7 @@ public static class ContractSignatureDocumentWriter
                             rawEnd,
                             slot.ImageBytes,
                             ext,
-                            widthPx: 140,
+                            widthPx: slot.WidthPx > 0 ? slot.WidthPx : 140,
                             $"{exactKey}_{slot.WorkflowOrder}",
                             slot.ApproverFullName,
                             slot.PositionTitle))

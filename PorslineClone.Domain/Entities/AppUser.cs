@@ -20,5 +20,7 @@ public class AppUser : IdentityUser<Guid>
     public UserPosition? UserPosition { get; set; }
     /// <summary>مسیر نسبی PNG امضای دیجیتال</summary>
     public string? SignatureImagePath { get; set; }
+    /// <summary>درجهٔ سایز نمایش امضا در Word (۳۰–۹۰) — به عرض پیکسل نگاشت می‌شود</summary>
+    public int SignatureDisplayDegree { get; set; } = 60;
     public ICollection<UserGroupMember> GroupMembers { get; set; } = new List<UserGroupMember>();
 }

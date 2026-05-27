@@ -70,10 +70,11 @@ public class ContractFileStorageService(IHostEnvironment env)
 
     public static string GetNationalIdFolder(string nationalId)
     {
-        var digits = new string((nationalId ?? "").Where(char.IsDigit).ToArray());
-        if (digits.Length != 10)
-            throw new ArgumentException("کد ملی باید ۱۰ رقم باشد", nameof(nationalId));
-        return digits;
+        var trimmed = (nationalId ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(trimmed))
+            throw new ArgumentException("کد ملی الزامی است", nameof(nationalId));
+        var safe = SanitizeFileToken(trimmed);
+        return safe;
     }
 
     private static string SanitizeFileToken(string value)

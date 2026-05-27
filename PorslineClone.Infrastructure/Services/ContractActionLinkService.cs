@@ -35,9 +35,12 @@ public class ContractActionLinkService(AppDbContext db)
     {
         if (string.IsNullOrWhiteSpace(code)) return null;
         var normalized = code.Trim();
-        return await db.ContractActionLinks
+        var link = await db.ContractActionLinks
+            .IgnoreQueryFilters()
             .Include(x => x.Contract)
             .FirstOrDefaultAsync(x => x.Code == normalized && x.IsActive, ct);
+        if (link is null || link.Contract is null || link.Contract.IsSoftDeleted) return null;
+        return link;
     }
 
     private async Task<string> GenerateUniqueCodeAsync(CancellationToken ct)

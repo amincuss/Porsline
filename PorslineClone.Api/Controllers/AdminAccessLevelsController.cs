@@ -102,6 +102,14 @@ public class AdminAccessLevelsController(AppDbContext db, RoleManager<AppRole> r
             await db.SaveChangesAsync(cancellationToken);
             if (dto.PermissionName.StartsWith("contracts.", StringComparison.OrdinalIgnoreCase))
                 await DbSeeder.SyncContractMenusForRolesWithPermissionAsync(db, cancellationToken);
+            if (dto.PermissionName.StartsWith("actions.", StringComparison.OrdinalIgnoreCase))
+                await DbSeeder.SyncActionsMenusForRolesWithPermissionAsync(db, cancellationToken);
+            if (dto.PermissionName.StartsWith("forms.archive.", StringComparison.OrdinalIgnoreCase))
+                await DbSeeder.SyncFormsArchiveMenusForRolesWithPermissionAsync(db, cancellationToken);
+            if (dto.PermissionName.StartsWith("contracts.archive.", StringComparison.OrdinalIgnoreCase))
+                await DbSeeder.SyncContractsArchiveMenusForRolesWithPermissionAsync(db, cancellationToken);
+            if (dto.PermissionName.StartsWith("approvals.", StringComparison.OrdinalIgnoreCase))
+                await DbSeeder.SyncApprovalsMenusForRolesWithPermissionAsync(db, cancellationToken);
         }
         else if (!dto.Assigned && current is not null)
         {

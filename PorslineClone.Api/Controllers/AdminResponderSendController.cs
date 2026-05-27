@@ -1,9 +1,11 @@
 using System.Security.Claims;
+using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using PorslineClone.Application.Abstractions;
 using PorslineClone.Application.Contracts;
+using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
 using PorslineClone.Infrastructure.Services;
 
@@ -17,6 +19,14 @@ public class AdminResponderSendController(
     ISmsSender smsSender,
     IFrontendUrlResolver frontendUrls) : ControllerBase
 {
+    private Guid? CurrentUserGuid
+    {
+        get
+        {
+            var raw = User.FindFirstValue(ClaimTypes.NameIdentifier);
+            return Guid.TryParse(raw, out var g) ? g : null;
+        }
+    }
 
     [HttpGet("forms")]
     [Authorize(Policy = "responders.send")]
@@ -43,12 +53,31 @@ public class AdminResponderSendController(
                 x.Description,
                 x.CreatedAtUtc,
                 x.ApprovalEnabled,
+                x.WorkflowTemplateId,
+                x.WorkflowName,
                 ActiveLinks = db.FormDispatchLinks.Count(l => l.FormId == x.Id && l.IsActive && l.UsedAtUtc == null && l.ExpiresAtUtc > DateTime.UtcNow),
                 InactiveLinks = db.FormDispatchLinks.Count(l => l.FormId == x.Id && (!l.IsActive || l.ExpiresAtUtc <= DateTime.UtcNow) && l.UsedAtUtc == null)
             })
             .ToListAsync(ct);
 
         return Ok(new { items, total, page, pageSize, totalPages = (int)Math.Ceiling((double)total / pageSize) });
+    }
+
+    [HttpGet("workflows")]
+    [Authorize(Policy = "responders.send")]
+    public async Task<IActionResult> Workflows(CancellationToken ct)
+    {
+        var rows = await db.FormWorkflowTemplates
+            .Where(x => x.IsActive)
+            .OrderBy(x => x.Name)
+            .ToListAsync(ct);
+        var items = rows.Select(x => new
+        {
+            x.Id,
+            x.Name,
+            approverCount = JsonSerializer.Deserialize<List<WorkflowStepDto>>(x.StepsJson ?? "[]")?.Count ?? 0,
+        }).ToList();
+        return Ok(items);
     }
 
     [HttpPost("activation")]
@@ -87,6 +116,41 @@ public class AdminResponderSendController(
     [Authorize(Policy = "responders.send")]
     public async Task<IActionResult> Send([FromBody] SendFormDispatchRequest req, CancellationToken ct)
     {
+        try
+        {
+            return await SendCoreAsync(req, ct);
+        }
+        catch (DbUpdateException ex) when (IsNationalCodeDuplicate(ex))
+        {
+            return BadRequest(new { message = "این کد ملی قبلاً ثبت شده است" });
+        }
+        catch (DbUpdateException ex) when (IsSchemaMismatch(ex))
+        {
+            return StatusCode(500, new
+            {
+                message = "ساختار دیتابیس با نسخهٔ API هم‌خوان نیست (ستون Gender یا SentByUserId). API را ری‌استارت کنید تا SchemaPatch اعمال شود.",
+            });
+        }
+    }
+
+    private static bool IsSchemaMismatch(DbUpdateException ex)
+    {
+        var text = ex.InnerException?.Message ?? ex.Message;
+        return text.Contains("SentByUserId", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("Gender", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsNationalCodeDuplicate(DbUpdateException ex)
+    {
+        var text = ex.InnerException?.Message ?? ex.Message;
+        return text.Contains("IX_Responders_NationalCode", StringComparison.OrdinalIgnoreCase)
+            || (text.Contains("duplicate key", StringComparison.OrdinalIgnoreCase)
+                && text.Contains("NationalCode", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private async Task<IActionResult> SendCoreAsync(SendFormDispatchRequest req, CancellationToken ct)
+    {
         if (req.FormId == Guid.Empty) return BadRequest(new { message = "فرم نامعتبر است" });
         var form = await db.Forms.FirstOrDefaultAsync(x => x.Id == req.FormId && !x.IsDeleted, ct);
         if (form is null) return NotFound(new { message = "فرم یافت نشد" });
@@ -95,46 +159,62 @@ public class AdminResponderSendController(
             return BadRequest(new { message = "اعتبار این فرم به پایان رسیده و قابل ارسال نیست" });
 
         var responders = new List<(Guid Id, string FullName, string MobileNumber)>();
-        if (req.Mode == "group")
+        if (string.Equals(req.Mode, "group", StringComparison.OrdinalIgnoreCase))
         {
             if (req.GroupId == Guid.Empty) return BadRequest(new { message = "گروه انتخاب نشده است" });
             responders = await db.ResponderGroupMembers
-                .Where(x => x.GroupId == req.GroupId)
+                .Where(x => x.GroupId == req.GroupId && !x.Responder.IsDeleted)
                 .Select(x => new ValueTuple<Guid, string, string>(x.Responder.Id, x.Responder.FullName, x.Responder.MobileNumber))
                 .Distinct()
                 .ToListAsync(ct);
         }
         else
         {
+            var nationalCode = (req.NationalCode ?? "").Trim();
             var fullName = (req.FullName ?? "").Trim();
             var mobile = (req.MobileNumber ?? "").Trim();
+            if (!ResponderLookupHelper.IsValidNationalCode(nationalCode))
+                return BadRequest(new { message = "کد ملی الزامی است" });
             if (fullName.Length < 2) return BadRequest(new { message = "نام و نام خانوادگی نامعتبر است" });
-            if (!System.Text.RegularExpressions.Regex.IsMatch(mobile, "^09\\d{9}$"))
+            if (!ResponderLookupHelper.IsValidMobile(mobile))
                 return BadRequest(new { message = "شماره موبایل معتبر نیست" });
+            var gender = ResponderHonorific.ParseGender(req.Gender);
+            if (req.Gender is { Length: > 0 } gRaw && gender is null)
+                return BadRequest(new { message = "جنسیت معتبر نیست (آقای یا خانم)" });
+            if (gender is null)
+                return BadRequest(new { message = "جنسیت (آقای/خانم) الزامی است" });
 
-            // اگر پاسخگو قبلاً وجود داشت آپدیت می‌شود، در غیر این صورت ساخته می‌شود
-            var responder = await db.Responders.FirstOrDefaultAsync(x => x.MobileNumber == mobile, ct);
-            if (responder is null)
+            try
             {
-                responder = new Domain.Entities.Responder
-                {
-                    Id = Guid.NewGuid(),
-                    FullName = fullName,
-                    MobileNumber = mobile,
-                    CreatedAtUtc = DateTime.UtcNow
-                };
-                db.Responders.Add(responder);
-                await db.SaveChangesAsync(ct);
+                var responder = await ResponderLookupHelper.FindOrCreateForDispatchAsync(
+                    db,
+                    nationalCode,
+                    fullName,
+                    mobile,
+                    gender,
+                    CurrentUserGuid,
+                    ct);
+                responders.Add((responder.Id, responder.FullName, responder.MobileNumber));
             }
-            else
+            catch (InvalidOperationException ex)
             {
-                responder.FullName = fullName;
-                await db.SaveChangesAsync(ct);
+                return BadRequest(new { message = ex.Message });
             }
-            responders.Add((responder.Id, responder.FullName, responder.MobileNumber));
         }
 
         if (responders.Count == 0) return BadRequest(new { message = "هیچ پاسخگویی برای ارسال یافت نشد" });
+
+        var skipWorkflow = req.SkipWorkflow;
+        FormWorkflowTemplate? workflowTemplate = null;
+        if (!skipWorkflow)
+        {
+            if (req.WorkflowTemplateId == Guid.Empty)
+                return BadRequest(new { message = "گردش تأیید را انتخاب کنید یا گزینه «بدون گردش» را فعال کنید" });
+            workflowTemplate = await db.FormWorkflowTemplates
+                .FirstOrDefaultAsync(x => x.Id == req.WorkflowTemplateId && x.IsActive, ct);
+            if (workflowTemplate is null)
+                return BadRequest(new { message = "گردش انتخاب‌شده یافت نشد یا غیرفعال است" });
+        }
 
         var baseUrl = await frontendUrls.ResolvePublicBaseUrlAsync(ct);
         if (string.IsNullOrWhiteSpace(baseUrl))
@@ -159,7 +239,9 @@ public class AdminResponderSendController(
                 ResponderMobileNumber = r.MobileNumber,
                 ResponderFullName = r.FullName,
                 Code = code,
-                ExpiresAtUtc = linkExpiry
+                ExpiresAtUtc = linkExpiry,
+                WorkflowTemplateId = workflowTemplate?.Id,
+                SentByUserId = CurrentUserGuid,
             });
             var link = $"{baseUrl}/forms/fill?c={code}";
             var msg = $"سلام {r.FullName}\nفرم «{form.Title}» برای شما ارسال شد.\nلطفا از لینک زیر تکمیل کنید:\n{link}";
@@ -191,8 +273,15 @@ public class SendFormDispatchRequest
     public string Mode { get; set; } = "single"; // single | group
     public Guid GroupId { get; set; }
     public Guid ResponderId { get; set; }
+    public string? NationalCode { get; set; }
     public string? FullName { get; set; }
     public string? MobileNumber { get; set; }
+    /// <summary>male | female — برای پیام «آقای/خانم»</summary>
+    public string? Gender { get; set; }
+    /// <summary>قالب گردش؛ پس از ثبت کامل فرم به‌صورت خودکار شروع می‌شود.</summary>
+    public Guid WorkflowTemplateId { get; set; }
+    /// <summary>ارسال بدون گردش — انتصاب بعداً از «فرم کاربران».</summary>
+    public bool SkipWorkflow { get; set; }
 }
 
 public class FormDispatchActivationRequest

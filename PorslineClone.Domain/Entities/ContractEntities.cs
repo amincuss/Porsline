@@ -117,6 +117,9 @@ public class Contract
     public string? FileName { get; set; }
     public int CurrentVersionNumber { get; set; } = 1;
     public bool IsArchived { get; set; }
+    public bool IsSoftDeleted { get; set; }
+    public DateTime? DeletedAtUtc { get; set; }
+    public Guid? DeletedByUserId { get; set; }
     public Guid CreatedByUserId { get; set; }
     /// <summary>نام کاربر ایجادکننده قرارداد (ذخیره در زمان ثبت)</summary>
     public string CreatedByName { get; set; } = "";
@@ -158,4 +161,6 @@ public class ContractApprovalLink
     public DateTime ExpiresAtUtc { get; set; }
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
     public DateTime? ReminderSmsSentAtUtc { get; set; }
+    /// <summary>اولین بازدید تأییدکننده از لینک پیامک (UTC)</summary>
+    public DateTime? LinkOpenedAtUtc { get; set; }
 }

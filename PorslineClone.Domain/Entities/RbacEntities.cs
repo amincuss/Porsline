@@ -106,6 +106,16 @@ public class SmsSettings
     public bool SurveyCompletedNotificationEnabled { get; set; } = true;
     public bool UserCreateSmsEnabled { get; set; } = true;
     public bool ApprovalReferralSmsEnabled { get; set; } = true;
+    /// <summary>پس از تأیید نهایی گردش فرم، پیامک به کارشناس ارسال‌کننده لینک</summary>
+    public bool FormWorkflowCompletedSenderSmsEnabled { get; set; } = true;
+    /// <summary>پس از «اتمام کار» فاز اقدام، پیامک به ارسال‌کننده لینک فرم</summary>
+    public bool FormActionPhaseCompletedSenderSmsEnabled { get; set; } = true;
+    /// <summary>پس از اتمام فاز اقدام، پیامک تأیید نهایی به پاسخگو / ثبت‌کننده فرم</summary>
+    public bool FormResponderApprovedSmsEnabled { get; set; } = true;
+    /// <summary>پس از رد قطعی گردش فرم، پیامک به کارشناس ارسال‌کننده لینک</summary>
+    public bool FormWorkflowRejectedSenderSmsEnabled { get; set; } = true;
+    /// <summary>پس از رد قطعی گردش فرم، پیامک به پاسخگو / ثبت‌کننده</summary>
+    public bool FormWorkflowRejectedResponderSmsEnabled { get; set; } = true;
     /// <summary>پس از هر تأیید در گردش قرارداد، پیامک به کاربر ثبت‌کننده قرارداد</summary>
     public bool ContractCreatorApprovalNotifySmsEnabled { get; set; } = true;
     /// <summary>پیامک به مسئول اصلاحیه پس از رد (ایجادکننده یا تأییدکننده اول)</summary>
@@ -114,6 +124,8 @@ public class SmsSettings
     public bool ContractAmendmentReturnToRejecterSmsEnabled { get; set; } = true;
     /// <summary>پیامک اطلاع رد به ثبت‌کننده و طرف‌های مرتبط</summary>
     public bool ContractRejectionNotifySmsEnabled { get; set; } = true;
+    /// <summary>پیامک به ایجادکننده قرارداد پس از «اتمام کار» در فاز اقدام (شماره، نوع، لینک مشاهده)</summary>
+    public bool ContractActionCompletedCreatorSmsEnabled { get; set; } = true;
     /// <summary>ارسال خودکار یادآوری پس از اولین پیامک ارجاع تأیید</summary>
     public bool ApprovalReminderSmsEnabled { get; set; } = false;
     /// <summary>تأخیر یادآوری بر حسب روز (پس از اولین پیامک)</summary>
@@ -145,8 +157,13 @@ public class Responder
     public Guid Id { get; set; }
     public string FullName { get; set; } = string.Empty;
     public string MobileNumber { get; set; } = string.Empty;
+    /// <summary>کد ملی — یکتا برای پاسخگوهای فعال</summary>
+    public string NationalCode { get; set; } = string.Empty;
+    public UserGender? Gender { get; set; }
     public Guid? CreatedByUserId { get; set; }
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+    public bool IsDeleted { get; set; }
+    public DateTime? DeletedAtUtc { get; set; }
     public ICollection<ResponderGroupMember> GroupMembers { get; set; } = new List<ResponderGroupMember>();
 }
 

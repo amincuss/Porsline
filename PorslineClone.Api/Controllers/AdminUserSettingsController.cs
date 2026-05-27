@@ -70,7 +70,7 @@ public class AdminUserSettingsController(AppDbContext db) : ControllerBase
     }
 
     [HttpDelete("positions/{id:guid}")]
-    [Authorize(Policy = "settings.update")]
+    [Authorize(Policy = "settings.delete")]
     public async Task<IActionResult> DeactivatePosition(Guid id, CancellationToken ct)
     {
         var entity = await db.UserPositions.FirstOrDefaultAsync(x => x.Id == id, ct);

@@ -240,8 +240,8 @@ namespace PorslineClone.Infrastructure.Migrations
 
                     b.Property<string>("NationalCode")
                         .IsRequired()
-                        .HasMaxLength(10)
-                        .HasColumnType("nvarchar(10)");
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
 
                     b.Property<string>("NormalizedEmail")
                         .HasMaxLength(256)
@@ -267,6 +267,11 @@ namespace PorslineClone.Infrastructure.Migrations
 
                     b.Property<string>("SecurityStamp")
                         .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("SignatureDisplayDegree")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(60);
 
                     b.Property<string>("SignatureImagePath")
                         .HasMaxLength(500)
@@ -356,6 +361,12 @@ namespace PorslineClone.Infrastructure.Migrations
                     b.Property<DateTime>("DateToUtc")
                         .HasColumnType("datetime2");
 
+                    b.Property<DateTime?>("DeletedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid?>("DeletedByUserId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<string>("FileName")
                         .HasMaxLength(260)
                         .HasColumnType("nvarchar(260)");
@@ -372,6 +383,11 @@ namespace PorslineClone.Infrastructure.Migrations
                     b.Property<bool>("IsArchived")
                         .HasColumnType("bit");
 
+                    b.Property<bool>("IsSoftDeleted")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bit")
+                        .HasDefaultValue(false);
+
                     b.Property<string>("LastName")
                         .IsRequired()
                         .HasMaxLength(100)
@@ -379,8 +395,8 @@ namespace PorslineClone.Infrastructure.Migrations
 
                     b.Property<string>("NationalId")
                         .IsRequired()
-                        .HasMaxLength(10)
-                        .HasColumnType("nvarchar(10)");
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
 
                     b.Property<string>("OriginalFilePath")
                         .HasMaxLength(500)
@@ -465,6 +481,8 @@ namespace PorslineClone.Infrastructure.Migrations
 
                     b.HasIndex("IsArchived");
 
+                    b.HasIndex("IsSoftDeleted");
+
                     b.HasIndex("Title");
 
                     b.HasIndex("WorkflowTemplateId");
@@ -540,6 +558,9 @@ namespace PorslineClone.Infrastructure.Migrations
 
                     b.Property<bool>("IsActive")
                         .HasColumnType("bit");
+
+                    b.Property<DateTime?>("LinkOpenedAtUtc")
+                        .HasColumnType("datetime2");
 
                     b.Property<DateTime?>("ReminderSmsSentAtUtc")
                         .HasColumnType("datetime2");
@@ -985,13 +1006,21 @@ namespace PorslineClone.Infrastructure.Migrations
                         .HasMaxLength(11)
                         .HasColumnType("nvarchar(11)");
 
+                    b.Property<Guid?>("SentByUserId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<DateTime?>("UsedAtUtc")
                         .HasColumnType("datetime2");
+
+                    b.Property<Guid?>("WorkflowTemplateId")
+                        .HasColumnType("uniqueidentifier");
 
                     b.HasKey("Id");
 
                     b.HasIndex("Code")
                         .IsUnique();
+
+                    b.HasIndex("WorkflowTemplateId");
 
                     b.HasIndex("FormId", "ResponderId", "ExpiresAtUtc");
 
@@ -1083,6 +1112,9 @@ namespace PorslineClone.Infrastructure.Migrations
                     b.Property<Guid>("FormId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<bool>("IsArchived")
+                        .HasColumnType("bit");
+
                     b.Property<string>("PostApprovalJson")
                         .HasColumnType("nvarchar(max)");
 
@@ -1110,6 +1142,15 @@ namespace PorslineClone.Infrastructure.Migrations
                     b.Property<string>("WorkflowName")
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("WorkflowRejectionJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("WorkflowRunCycle")
+                        .HasColumnType("int");
+
+                    b.Property<string>("WorkflowRunsHistoryJson")
+                        .HasColumnType("nvarchar(max)");
 
                     b.Property<DateTime?>("WorkflowScheduledStartAtUtc")
                         .HasColumnType("datetime2");
@@ -1611,15 +1652,31 @@ namespace PorslineClone.Infrastructure.Migrations
                     b.Property<Guid?>("CreatedByUserId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<DateTime?>("DeletedAtUtc")
+                        .HasColumnType("datetime2");
+
                     b.Property<string>("FullName")
                         .IsRequired()
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");
 
+                    b.Property<int?>("Gender")
+                        .HasColumnType("int");
+
+                    b.Property<bool>("IsDeleted")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bit")
+                        .HasDefaultValue(false);
+
                     b.Property<string>("MobileNumber")
                         .IsRequired()
                         .HasMaxLength(11)
                         .HasColumnType("nvarchar(11)");
+
+                    b.Property<string>("NationalCode")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("nvarchar(50)");
 
                     b.HasKey("Id");
 
@@ -1628,7 +1685,12 @@ namespace PorslineClone.Infrastructure.Migrations
                     b.HasIndex("CreatedByUserId");
 
                     b.HasIndex("MobileNumber")
-                        .IsUnique();
+                        .IsUnique()
+                        .HasFilter("[IsDeleted] = 0");
+
+                    b.HasIndex("NationalCode")
+                        .IsUnique()
+                        .HasFilter("[IsDeleted] = 0 AND [NationalCode] <> ''");
 
                     b.ToTable("Responders");
                 });
@@ -2017,6 +2079,9 @@ namespace PorslineClone.Infrastructure.Migrations
                     b.Property<bool>("ApprovalReminderSmsEnabled")
                         .HasColumnType("bit");
 
+                    b.Property<bool>("ContractActionCompletedCreatorSmsEnabled")
+                        .HasColumnType("bit");
+
                     b.Property<bool>("ContractAmendmentAssigneeSmsEnabled")
                         .HasColumnType("bit");
 
@@ -2027,6 +2092,21 @@ namespace PorslineClone.Infrastructure.Migrations
                         .HasColumnType("bit");
 
                     b.Property<bool>("ContractRejectionNotifySmsEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("FormActionPhaseCompletedSenderSmsEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("FormResponderApprovedSmsEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("FormWorkflowCompletedSenderSmsEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("FormWorkflowRejectedResponderSmsEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("FormWorkflowRejectedSenderSmsEnabled")
                         .HasColumnType("bit");
 
                     b.Property<bool>("OtpEnabled")
@@ -2075,10 +2155,16 @@ namespace PorslineClone.Infrastructure.Migrations
                             ApprovalReminderDelayDays = 0,
                             ApprovalReminderDelayHours = 24,
                             ApprovalReminderSmsEnabled = false,
+                            ContractActionCompletedCreatorSmsEnabled = true,
                             ContractAmendmentAssigneeSmsEnabled = true,
                             ContractAmendmentReturnToRejecterSmsEnabled = true,
                             ContractCreatorApprovalNotifySmsEnabled = true,
                             ContractRejectionNotifySmsEnabled = true,
+                            FormActionPhaseCompletedSenderSmsEnabled = true,
+                            FormResponderApprovedSmsEnabled = true,
+                            FormWorkflowCompletedSenderSmsEnabled = true,
+                            FormWorkflowRejectedResponderSmsEnabled = true,
+                            FormWorkflowRejectedSenderSmsEnabled = true,
                             OtpEnabled = true,
                             PublicFormRequireOtp = false,
                             SurveyCompletedNotificationEnabled = true,

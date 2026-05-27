@@ -20,6 +20,10 @@ public class ContractAmendmentStateDto
     /// <summary>شماره نسخه اصلاح‌شده آپلودشده توسط ایجادکننده</summary>
     public int? AmendedVersionNumber { get; set; }
     public DateTime? AmendedFileUploadedAtUtc { get; set; }
+    /// <summary>مسیر فایل امضاشده قبل از شروع اصلاحیه (برای دانلود/پیش‌نمایش)</summary>
+    public string? SignedFilePath { get; set; }
+    public string? SignedPdfFilePath { get; set; }
+    public string? SignedFileName { get; set; }
 }
 
 public record ContractAmendmentViewDto(

@@ -89,7 +89,9 @@ public class ContractPostApprovalService(
         string? note,
         CancellationToken ct = default)
     {
-        var contract = await db.Contracts.FirstOrDefaultAsync(x => x.Id == contractId, ct);
+        var contract = await db.Contracts
+            .Include(c => c.ContractType)
+            .FirstOrDefaultAsync(x => x.Id == contractId, ct);
         if (contract is null) return (false, "قرارداد یافت نشد");
 
         var state = PostApprovalJsonHelper.DeserializeState(contract.PostApprovalJson);
@@ -127,7 +129,10 @@ public class ContractPostApprovalService(
         await db.SaveChangesAsync(ct);
 
         if (normalized == "completed")
+        {
             await NotifyApproversActionCompletedAsync(contract, state, actorName, ct);
+            await NotifyCreatorActionCompletedAsync(contract, state, actorName, ct);
+        }
 
         return (true, null);
     }
@@ -156,10 +161,58 @@ public class ContractPostApprovalService(
 
         foreach (var uid in approverIds)
             await inbox.SendToUserAsync(uid, "اتمام اقدام قرارداد", body, ct);
+    }
 
-        if (contract.CreatedByUserId != Guid.Empty
-            && !approverIds.Contains(contract.CreatedByUserId))
-            await inbox.SendToUserAsync(contract.CreatedByUserId, "اتمام اقدام قرارداد", body, ct);
+    private async Task NotifyCreatorActionCompletedAsync(
+        Contract contract,
+        ContractPostApprovalStateDto state,
+        string actorName,
+        CancellationToken ct)
+    {
+        if (contract.CreatedByUserId == Guid.Empty) return;
+
+        var typeName = contract.ContractType?.Name?.Trim();
+        if (string.IsNullOrWhiteSpace(typeName))
+        {
+            typeName = await db.ContractTypes.AsNoTracking()
+                .Where(t => t.Id == contract.ContractTypeId)
+                .Select(t => t.Name)
+                .FirstOrDefaultAsync(ct);
+        }
+        typeName = string.IsNullOrWhiteSpace(typeName) ? "—" : typeName.Trim();
+
+        var subject = ResolveSubject(contract);
+        var adminBase = await frontendUrls.ResolveAdminBaseUrlAsync(ct);
+        var viewPath = string.IsNullOrWhiteSpace(adminBase)
+            ? $"/admin/contracts?id={contract.Id}"
+            : $"{adminBase.TrimEnd('/')}/admin/contracts?id={contract.Id}";
+
+        var (dateStr, timeStr) = SmsDateTimeFormatter.FormatUtcNowTehran();
+        var actorLabel = string.IsNullOrWhiteSpace(actorName) ? "اقدام‌کننده" : actorName.Trim();
+        var noteBlock = string.IsNullOrWhiteSpace(state.Note)
+            ? ""
+            : $"\nتوضیحات اقدام:\n{state.Note.Trim()}";
+
+        var body =
+            "اتمام کار فاز اقدام قرارداد\n" +
+            $"شماره قرارداد: {contract.ContractNumber}\n" +
+            $"نوع قرارداد: {typeName}\n" +
+            $"موضوع: {subject}\n" +
+            $"جهت اقدام: {state.ActionDirectionLabel}\n" +
+            $"اقدام‌کننده: {actorLabel}\n" +
+            $"زمان ثبت: {dateStr} ساعت {timeStr}" +
+            noteBlock +
+            $"\n\nمشاهده پرونده:\n{viewPath}\n" +
+            "پرونده به بایگانی منتقل شد.";
+
+        await inbox.SendToUserAsync(contract.CreatedByUserId, "اتمام اقدام قرارداد", body, ct);
+
+        var smsSettings = await db.SmsSettings.AsNoTracking().FirstOrDefaultAsync(ct) ?? new SmsSettings();
+        if (!smsSettings.ContractActionCompletedCreatorSmsEnabled) return;
+
+        var creator = await userManager.FindByIdAsync(contract.CreatedByUserId.ToString());
+        if (creator is null || string.IsNullOrWhiteSpace(creator.PhoneNumber)) return;
+        await smsSender.SendSmsAsync(new SmsRequest(creator.PhoneNumber, body), ct);
     }
 
     private static string ResolveSubject(Contract contract) =>

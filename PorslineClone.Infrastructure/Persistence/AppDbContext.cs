@@ -50,13 +50,14 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         {
             entity.Property(x => x.FirstName).HasMaxLength(100).IsRequired();
             entity.Property(x => x.LastName).HasMaxLength(100).IsRequired();
-            entity.Property(x => x.NationalCode).HasMaxLength(10).IsRequired();
+            entity.Property(x => x.NationalCode).HasMaxLength(50).IsRequired();
             entity.Property(x => x.CreatedAtUtc).HasDefaultValueSql("GETUTCDATE()");
             entity.Property(x => x.IsActive).HasDefaultValue(true);
             entity.Property(x => x.PhoneNumber).HasMaxLength(11);
             entity.Property(x => x.AvatarUrl).HasMaxLength(500);
             entity.Property(x => x.AboutMe).HasMaxLength(1000);
             entity.Property(x => x.SignatureImagePath).HasMaxLength(500);
+            entity.Property(x => x.SignatureDisplayDegree).HasDefaultValue(60);
             entity.Property(x => x.PersonnelCode).HasMaxLength(30);
             entity.HasIndex(x => x.PersonnelCode)
                 .IsUnique()
@@ -201,7 +202,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         {
             entity.Property(x => x.FullName).HasMaxLength(200).IsRequired();
             entity.Property(x => x.MobileNumber).HasMaxLength(11).IsRequired();
-            entity.HasIndex(x => x.MobileNumber).IsUnique();
+            entity.Property(x => x.NationalCode).HasMaxLength(50).IsRequired();
+            entity.Property(x => x.IsDeleted).HasDefaultValue(false);
+            entity.HasIndex(x => x.MobileNumber).IsUnique().HasFilter("[IsDeleted] = 0");
+            entity.HasIndex(x => x.NationalCode).IsUnique().HasFilter("[IsDeleted] = 0 AND [NationalCode] <> ''");
             entity.HasIndex(x => x.CreatedByUserId);
             entity.HasIndex(x => x.CreatedAtUtc);
         });
@@ -347,6 +351,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.IsActive).HasDefaultValue(true);
             entity.HasIndex(x => x.Code).IsUnique();
             entity.HasIndex(x => new { x.FormId, x.ResponderId, x.ExpiresAtUtc });
+            entity.HasIndex(x => x.WorkflowTemplateId);
         });
 
         builder.Entity<FormUserAccess>(entity =>
@@ -486,7 +491,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.Title).HasMaxLength(300).IsRequired();
             entity.Property(x => x.FirstName).HasMaxLength(100).IsRequired();
             entity.Property(x => x.LastName).HasMaxLength(100).IsRequired();
-            entity.Property(x => x.NationalId).HasMaxLength(10).IsRequired();
+            entity.Property(x => x.NationalId).HasMaxLength(50).IsRequired();
             entity.Property(x => x.Phone).HasMaxLength(11).IsRequired();
             entity.Property(x => x.SubjectPersonName).HasMaxLength(200).IsRequired();
             entity.Property(x => x.FilePath).HasMaxLength(500);
@@ -518,6 +523,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasIndex(x => x.CreatedAtUtc);
             entity.HasIndex(x => new { x.Status, x.CurrentStepOrder });
             entity.HasIndex(x => x.IsArchived);
+            entity.Property(x => x.IsSoftDeleted).HasDefaultValue(false);
+            entity.HasIndex(x => x.IsSoftDeleted);
+            entity.HasQueryFilter(x => !x.IsSoftDeleted);
             entity.HasIndex(x => x.Title);
             entity.HasIndex(x => new { x.Status, x.IsArchived })
                 .HasFilter("[Status] = 3 AND [IsArchived] = 0 AND [PostApprovalJson] IS NOT NULL");
@@ -633,7 +641,28 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         builder.Entity<SmsSettings>().HasData(new SmsSettings
         {
             Id = 1,
-            OtpEnabled = true, SurveySendEnabled = true, SurveyCompletedNotificationEnabled = true, UserCreateSmsEnabled = true, ApprovalReferralSmsEnabled = true, ContractCreatorApprovalNotifySmsEnabled = true, PublicFormRequireOtp = false
+            OtpEnabled = true,
+            SurveySendEnabled = true,
+            SurveyCompletedNotificationEnabled = true,
+            UserCreateSmsEnabled = true,
+            ApprovalReferralSmsEnabled = true,
+            FormWorkflowCompletedSenderSmsEnabled = true,
+            FormActionPhaseCompletedSenderSmsEnabled = true,
+            FormResponderApprovedSmsEnabled = true,
+            FormWorkflowRejectedSenderSmsEnabled = true,
+            FormWorkflowRejectedResponderSmsEnabled = true,
+            ContractCreatorApprovalNotifySmsEnabled = true,
+            ContractAmendmentAssigneeSmsEnabled = true,
+            ContractAmendmentReturnToRejecterSmsEnabled = true,
+            ContractRejectionNotifySmsEnabled = true,
+            ContractActionCompletedCreatorSmsEnabled = true,
+            ApprovalReminderSmsEnabled = false,
+            ApprovalReminderDelayDays = 0,
+            ApprovalReminderDelayHours = 24,
+            WorkflowValidityReminderSmsEnabled = false,
+            WorkflowValiditySuspensionDelayDays = 0,
+            WorkflowValiditySuspensionDelayHours = 24,
+            PublicFormRequireOtp = false,
         });
     }
 }

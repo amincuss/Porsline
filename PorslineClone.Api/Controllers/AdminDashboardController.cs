@@ -137,7 +137,7 @@ public class AdminDashboardController(AppDbContext db, UserManager<AppUser> user
         {
             var party = ResolvePartyName(r.FirstName, r.LastName, r.SubjectPersonName);
             var subject = ResolveContractSubject(r.Title, r.SubjectPersonName);
-            var hasSigned = HasSignedContractDocument(r.FilePath, r.StepsJson);
+            var hasSigned = HasSignedContractDocument(r.StepsJson);
             var hasOriginal = !string.IsNullOrWhiteSpace(r.OriginalFilePath);
             return new DashboardQuickSearchItemDto(
                 r.Id.ToString(),
@@ -252,16 +252,9 @@ public class AdminDashboardController(AppDbContext db, UserManager<AppUser> user
         }).ToList();
     }
 
-    private static bool HasSignedContractDocument(string? filePath, string? stepsJson)
-    {
-        if (ContractApprovalStampService.IsSignedDocumentPath(filePath))
-            return true;
-        if (string.IsNullOrWhiteSpace(filePath)
-            || !filePath.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
-            return false;
-        return ContractWorkflowProcessor.DeserializeSteps(stepsJson)
+    private static bool HasSignedContractDocument(string? stepsJson) =>
+        ContractWorkflowProcessor.DeserializeSteps(stepsJson)
             .Any(s => string.Equals(s.Status, "approved", StringComparison.OrdinalIgnoreCase));
-    }
 
     private async Task EnrichApproverNamesAsync(
         Dictionary<Guid, List<PorslineClone.Application.Contracts.ApprovalStepDto>> stepsByEntity,

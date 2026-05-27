@@ -11,6 +11,7 @@ using PorslineClone.Infrastructure;
 using PorslineClone.Infrastructure.Auth;
 using PorslineClone.Infrastructure.Persistence;
 using PorslineClone.Infrastructure.Services;
+using PorslineClone.Api.Middleware;
 using PorslineClone.Api.RuleEngine;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -110,23 +111,41 @@ builder.Services.AddAuthorization(options =>
         ctx.User.HasClaim("permission", "forms.access.update") || ctx.User.HasClaim("permission", "forms.update") || ctx.User.HasClaim("permission", "forms.crud")));
     options.AddPolicy("approvals.read", p => p.RequireClaim("permission", "approvals.read"));
     options.AddPolicy("approvals.update", p => p.RequireClaim("permission", "approvals.update"));
+    options.AddPolicy("forms.archive.read", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "forms.archive.read")
+        || ctx.User.HasClaim("permission", "forms.archive.read.all")));
+    options.AddPolicy("workflow-runs.read", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "workflow-runs.read")
+        || ctx.User.HasClaim("permission", "workflow-runs.read.all")));
+    options.AddPolicy("workflow-runs.update", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "workflow-runs.update")
+        || ctx.User.HasClaim("permission", "approvals.update")));
     options.AddPolicy("actions.read", p => p.RequireAssertion(ctx =>
         ctx.User.HasClaim("permission", "actions.read") || ctx.User.HasClaim("permission", "actions.read.all")));
     options.AddPolicy("actions.update", p => p.RequireClaim("permission", "actions.update"));
     options.AddPolicy("responders.read", p => p.RequireClaim("permission", "responders.read"));
     options.AddPolicy("responders.add", p => p.RequireClaim("permission", "responders.add"));
     options.AddPolicy("responders.update", p => p.RequireClaim("permission", "responders.update"));
+    options.AddPolicy("responders.delete", p => p.RequireClaim("permission", "responders.delete"));
     options.AddPolicy("responders.send", p => p.RequireAssertion(ctx =>
         ctx.User.HasClaim("permission", "responders.send") || ctx.User.HasClaim("permission", "responders.update")));
     options.AddPolicy("usergroups.read", p => p.RequireClaim("permission", "usergroups.read"));
     options.AddPolicy("usergroups.add", p => p.RequireClaim("permission", "usergroups.add"));
     options.AddPolicy("usergroups.update", p => p.RequireClaim("permission", "usergroups.update"));
+    options.AddPolicy("usergroups.delete", p => p.RequireClaim("permission", "usergroups.delete"));
     options.AddPolicy("contracts.read", p => p.RequireClaim("permission", "contracts.read"));
+    options.AddPolicy("contracts.archive.read", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "contracts.archive.read")
+        || ctx.User.HasClaim("permission", "contracts.archive.read.all")));
     options.AddPolicy("contracts.add", p => p.RequireClaim("permission", "contracts.add"));
     options.AddPolicy("contracts.update", p => p.RequireClaim("permission", "contracts.update"));
+    options.AddPolicy("contracts.delete", p => p.RequireClaim("permission", "contracts.delete"));
     options.AddPolicy("contracts.settings.read", p => p.RequireAssertion(ctx =>
         ctx.User.HasClaim("permission", "contracts.settings.read") || ctx.User.HasClaim("permission", "contracts.settings.update")));
     options.AddPolicy("contracts.settings.update", p => p.RequireClaim("permission", "contracts.settings.update"));
+    options.AddPolicy("contracts.settings.delete", p => p.RequireClaim("permission", "contracts.settings.delete"));
+    options.AddPolicy("forms.rules.delete", p => p.RequireClaim("permission", "forms.rules.delete"));
+    options.AddPolicy("settings.delete", p => p.RequireClaim("permission", "settings.delete"));
 });
 
 var app = builder.Build();
@@ -136,6 +155,16 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseCors("DevCors");
+
+var pathBase = (builder.Configuration["Backend:PathBase"] ?? "").Trim().TrimEnd('/');
+if (!string.IsNullOrEmpty(pathBase))
+{
+    if (!pathBase.StartsWith('/'))
+        pathBase = "/" + pathBase;
+    app.UsePathBase(pathBase);
+}
+
+app.UseApiExceptionHandling();
 
 app.UseSwagger();
 app.UseSwaggerUI(options =>
@@ -155,6 +184,7 @@ app.UseStaticFiles(new StaticFileOptions
         ctx.Context.Response.Headers.CacheControl = "no-cache, no-store, must-revalidate";
         ctx.Context.Response.Headers.Pragma = "no-cache";
         ctx.Context.Response.Headers.Expires = "0";
+        ctx.Context.Response.Headers["Cross-Origin-Resource-Policy"] = "cross-origin";
     }
 });
 

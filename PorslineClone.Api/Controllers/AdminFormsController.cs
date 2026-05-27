@@ -2,6 +2,7 @@ using System.Security.Claims;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.EntityFrameworkCore;
 using System.Text.RegularExpressions;
 using PorslineClone.Application.Abstractions;
@@ -51,11 +52,23 @@ public class AdminFormsController(AppDbContext db, IRuleEvaluationService ruleEv
             .ToList();
         var creators = await db.Users
             .Where(x => creatorIds.Contains(x.Id))
-            .Select(x => new { UserId = x.Id.ToString(), FullName = (x.LastName + " " + x.FirstName).Trim() })
+            .Select(x => new
+            {
+                x.Id,
+                UserId = x.Id.ToString(),
+                FullName = (x.LastName + " " + x.FirstName).Trim(),
+                x.AvatarUrl,
+            })
             .ToListAsync(ct);
         var creatorMap = creators
             .GroupBy(x => x.UserId)
-            .ToDictionary(g => g.Key!, g => g.First().FullName);
+            .ToDictionary(
+                g => g.Key!,
+                g =>
+                {
+                    var c = g.First();
+                    return (Name: string.IsNullOrWhiteSpace(c.FullName) ? "-" : c.FullName, Avatar: BuildAvatarUrl(c.Id, c.AvatarUrl));
+                });
 
         var forms = await ScopeVisibleForms(db.Forms)
             .Where(f => !f.IsDeleted)
@@ -82,9 +95,13 @@ public class AdminFormsController(AppDbContext db, IRuleEvaluationService ruleEv
             f.CreatedAtUtc,
             f.IsActive,
             f.FieldCount,
-            CreatorName = !string.IsNullOrWhiteSpace(f.UserId) && creatorMap.TryGetValue(f.UserId, out var full) ? full : "-"
+            CreatorName = !string.IsNullOrWhiteSpace(f.UserId) && creatorMap.TryGetValue(f.UserId, out var creator) ? creator.Name : "-",
+            CreatorAvatarUrl = !string.IsNullOrWhiteSpace(f.UserId) && creatorMap.TryGetValue(f.UserId, out var cr) ? cr.Avatar : null,
         }));
     }
+
+    private string? BuildAvatarUrl(Guid userId, string? avatarPath) =>
+        ProfileAvatarUrlHelper.BuildPublicUrl(env.ContentRootPath, userId, avatarPath);
 
     [HttpPost]
     [Authorize(Policy = "forms.add")]
@@ -405,6 +422,73 @@ public class AdminFormsController(AppDbContext db, IRuleEvaluationService ruleEv
         return Ok(rules);
     }
 
+    [HttpPost("{id:guid}/fields/{fieldId:guid}/guide")]
+    [Authorize(Policy = "forms.update")]
+    [RequestSizeLimit(30_000_000)]
+    public async Task<IActionResult> UploadGuide(Guid id, Guid fieldId, IFormFile? file, CancellationToken ct)
+    {
+        var form = await ScopeVisibleForms(db.Forms).FirstOrDefaultAsync(f => f.Id == id && !f.IsDeleted, ct);
+        if (form is null) return NotFound(new { message = "فرم یافت نشد" });
+        if (file is null || file.Length <= 0) return BadRequest(new { message = "فایل انتخاب نشده است" });
+
+        var (ok, err, relativePath, displayName) = FormGuideFileHelper.ValidateAndBuildPath(id, fieldId, file);
+        if (!ok || relativePath is null) return BadRequest(new { message = err ?? "فایل نامعتبر است" });
+
+        var dir = Path.Combine(env.ContentRootPath, "FormGuide", id.ToString("N"), fieldId.ToString("N"));
+        Directory.CreateDirectory(dir);
+        foreach (var existing in Directory.EnumerateFiles(dir))
+        {
+            try { System.IO.File.Delete(existing); } catch { /* ignore */ }
+        }
+
+        var fullPath = Path.Combine(env.ContentRootPath, relativePath.TrimStart('/').Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        await using (var stream = System.IO.File.Create(fullPath))
+            await file.CopyToAsync(stream, ct);
+
+        var field = await db.FormFields.FirstOrDefaultAsync(f => f.FormId == id && f.Id == fieldId, ct);
+        if (field is null)
+        {
+            var maxOrder = await db.FormFields.Where(f => f.FormId == id).MaxAsync(f => (int?)f.SortOrder, ct) ?? -1;
+            field = new FormField
+            {
+                Id = fieldId,
+                FormId = id,
+                FieldType = FieldType.Guide,
+                Label = "راهنما",
+                SortOrder = maxOrder + 1,
+                ColSpan = 12,
+            };
+            db.FormFields.Add(field);
+        }
+
+        field.FieldType = FieldType.Guide;
+        field.Placeholder = relativePath;
+        field.HelpText = displayName;
+        await db.SaveChangesAsync(ct);
+
+        return Ok(new { message = "فایل راهنما ذخیره شد", path = relativePath, fileName = displayName });
+    }
+
+    [HttpGet("{id:guid}/fields/{fieldId:guid}/guide")]
+    [Authorize(Policy = "forms.read")]
+    public IActionResult DownloadGuideAdmin(Guid id, Guid fieldId)
+    {
+        var field = db.FormFields.AsNoTracking().FirstOrDefault(f => f.FormId == id && f.Id == fieldId);
+        if (field is null || field.FieldType != FieldType.Guide || string.IsNullOrWhiteSpace(field.Placeholder))
+            return NotFound(new { message = "فایل راهنما یافت نشد" });
+        if (!FormGuideFileHelper.TryResolveDiskPath(env, field.Placeholder, out var fullPath))
+            return NotFound(new { message = "فایل روی سرور یافت نشد" });
+
+        var provider = new FileExtensionContentTypeProvider();
+        if (!provider.TryGetContentType(fullPath, out var contentType))
+            contentType = "application/octet-stream";
+        var downloadName = string.IsNullOrWhiteSpace(field.HelpText)
+            ? Path.GetFileName(fullPath)
+            : field.HelpText;
+        return PhysicalFile(fullPath, contentType, downloadName, enableRangeProcessing: true);
+    }
+
     [HttpPost("{formId:guid}/rules/evaluate")]
     [Authorize(Policy = "forms.read")]
     public async Task<IActionResult> EvaluateRulesOnSubmit(Guid formId, [FromBody] RuleEvaluationRequest req, CancellationToken ct)
@@ -468,7 +552,9 @@ public class AdminFormsController(AppDbContext db, IRuleEvaluationService ruleEv
 
         var fieldValues = form.Fields.Select(f => new FormFieldValueDto(
             f.Label,
-            values.TryGetValue(f.Id.ToString(), out var v) ? v : ""
+            PersianDigitHelper.PersianizeForFormStorage(
+                values.TryGetValue(f.Id.ToString(), out var v) ? v : "",
+                f.FieldType)
         )).ToList();
 
         var submission = FormSubmissionFactory.Create(form, fieldValues, req.SubmitterName, req.SubmitterEmail, null, null);

@@ -103,7 +103,7 @@ public class AdminResponderGroupsController(AppDbContext db) : ControllerBase
     }
 
     [HttpDelete("{id:guid}")]
-    [Authorize(Policy = "responders.update")]
+    [Authorize(Policy = "responders.delete")]
     public async Task<IActionResult> SoftDelete(Guid id, CancellationToken ct)
     {
         var item = await db.ResponderGroups.FirstOrDefaultAsync(x => x.Id == id, ct);

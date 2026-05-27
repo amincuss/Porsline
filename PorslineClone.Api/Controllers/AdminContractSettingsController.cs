@@ -5,6 +5,7 @@ using Microsoft.EntityFrameworkCore;
 using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
+using PorslineClone.Infrastructure.Services;
 
 namespace PorslineClone.Api.Controllers;
 
@@ -41,6 +42,17 @@ public class AdminContractSettingsController(AppDbContext db) : ControllerBase
             .OrderBy(x => x.Order)
             .Select((x, i) => x with { Order = i + 1, OnReject = x.OnReject is "continue" ? "continue" : "stop" })
             .ToList();
+
+        if (req.Enabled && cleaned.Count > 0)
+        {
+            var signatureErr = await WorkflowUserSignatureValidator.ValidateUserIdsAsync(
+                db,
+                cleaned.Select(s => s.UserId),
+                ct);
+            if (signatureErr is not null)
+                return BadRequest(new { message = signatureErr });
+        }
+
         settings.ApprovalEnabled = req.Enabled;
         settings.ApprovalWorkflowJson = req.Enabled ? JsonSerializer.Serialize(cleaned) : null;
         await db.SaveChangesAsync(ct);
@@ -104,7 +116,7 @@ public class AdminContractSettingsController(AppDbContext db) : ControllerBase
     }
 
     [HttpDelete("types/{id:guid}")]
-    [Authorize(Policy = "contracts.settings.update")]
+    [Authorize(Policy = "contracts.settings.delete")]
     public async Task<IActionResult> DeactivateType(Guid id, CancellationToken ct)
     {
         var entity = await db.ContractTypes.FirstOrDefaultAsync(x => x.Id == id, ct);

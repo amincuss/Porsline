@@ -35,6 +35,12 @@ public class AdminContractsController(
 
     private bool IsAdmin => User.IsInRole("Admin");
     private bool CanReadAllContracts => IsAdmin || User.HasClaim("permission", "contracts.read.all");
+    private bool CanReadContractsArchive =>
+        IsAdmin
+        || User.HasClaim("permission", "contracts.archive.read")
+        || User.HasClaim("permission", "contracts.archive.read.all");
+    private bool CanReadAllContractsArchive =>
+        IsAdmin || User.HasClaim("permission", "contracts.archive.read.all");
 
     private static bool UserIsInContractWorkflow(Contract contract, Guid userId)
     {
@@ -58,6 +64,17 @@ public class AdminContractsController(
             || (c.StepsJson != null && c.StepsJson.Contains(idStr)));
     }
 
+    private IQueryable<Contract> ScopeVisibleArchivedContracts(IQueryable<Contract> query, Guid userId)
+    {
+        if (CanReadAllContractsArchive)
+            return query;
+
+        var idStr = userId.ToString();
+        return query.Where(c =>
+            c.CreatedByUserId == userId
+            || (c.StepsJson != null && c.StepsJson.Contains(idStr)));
+    }
+
     private bool TryGetCurrentUserId(out Guid userId) =>
         Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out userId);
 
@@ -66,6 +83,121 @@ public class AdminContractsController(
         if (!TryGetCurrentUserId(out var userId))
             return Unauthorized();
         return UserCanAccessContract(contract, userId) ? null : Forbid();
+    }
+
+    private IActionResult? DenyIfNoArchivedContractAccess(Contract contract)
+    {
+        if (!TryGetCurrentUserId(out var userId))
+            return Unauthorized();
+        if (!CanReadContractsArchive)
+            return Forbid();
+        if (CanReadAllContractsArchive)
+            return null;
+        return UserCanAccessContract(contract, userId) ? null : Forbid();
+    }
+
+    [HttpGet("archive")]
+    [Authorize(Policy = "contracts.archive.read")]
+    public async Task<IActionResult> ListArchive(
+        [FromQuery] string? q,
+        [FromQuery] bool lite = true,
+        CancellationToken ct = default)
+    {
+        if (!TryGetCurrentUserId(out var currentUserGuid))
+            return Unauthorized();
+
+        var query = ScopeVisibleArchivedContracts(
+            db.Contracts.AsNoTracking().Include(x => x.ContractType).Where(x => x.IsArchived),
+            currentUserGuid);
+
+        if (!string.IsNullOrWhiteSpace(q))
+        {
+            var term = q.Trim();
+            query = query.Where(x =>
+                x.ContractNumber.Contains(term) ||
+                x.Title.Contains(term) ||
+                x.FirstName.Contains(term) ||
+                x.LastName.Contains(term) ||
+                x.NationalId.Contains(term) ||
+                x.Phone.Contains(term) ||
+                x.SubjectPersonName.Contains(term));
+        }
+
+        var list = await query
+            .OrderByDescending(x => x.CreatedAtUtc)
+            .Take(200)
+            .ToListAsync(ct);
+
+        var stepsByContract = list.ToDictionary(x => x.Id, x => DeserializeSteps(x.StepsJson));
+        var workflowTemplates = await LoadWorkflowTemplatesAsync(list.Select(x => x.WorkflowTemplateId), ct);
+        var userNameLookup = await BuildListUserNameLookupAsync(
+            list,
+            stepsByContract,
+            workflowTemplates,
+            ct);
+        EnrichStepsWithUserLookup(stepsByContract, userNameLookup);
+        var amendedVersionLookup = await ResolveCurrentVersionIsAmendedAsync(list, ct);
+
+        var result = new List<ContractListItemDto>(list.Count);
+        foreach (var x in list)
+        {
+            var steps = stepsByContract[x.Id];
+            var creatorName = !string.IsNullOrWhiteSpace(x.CreatedByName)
+                ? x.CreatedByName
+                : userNameLookup.GetValueOrDefault(x.CreatedByUserId, "");
+
+            result.Add(new ContractListItemDto(
+                x.Id,
+                x.ContractNumber,
+                x.Title,
+                x.FirstName,
+                x.LastName,
+                x.NationalId,
+                x.Phone,
+                x.ContractTypeId,
+                x.ContractType.Name,
+                x.SubjectPersonName,
+                x.DateFromUtc,
+                x.DateToUtc,
+                x.FileName,
+                x.FilePath,
+                !string.IsNullOrWhiteSpace(x.FilePath),
+                HasSignedDocument(x),
+                HasOriginalDocument(x),
+                !string.IsNullOrWhiteSpace(x.PdfFilePath),
+                x.CurrentVersionNumber,
+                x.IsArchived,
+                x.CreatedByUserId,
+                creatorName,
+                x.CreatedAtUtc,
+                x.CurrentStepOrder,
+                ToClientStatus(x),
+                x.WorkflowTemplateId,
+                x.WorkflowName,
+                x.WorkflowStartedAtUtc,
+                x.WorkflowScheduledStartAtUtc,
+                CanStartWorkflow(x),
+                CanAssignWorkflow(x),
+                CanUnassignWorkflow(x),
+                x.ContractDocumentTemplateId,
+                x.ContractDocumentTemplateVersionId,
+                steps,
+                BuildAmendmentView(x, currentUserGuid),
+                lite ? [] : WorkflowEventHelper.ToViews(x.WorkflowEventsJson),
+                amendedVersionLookup.GetValueOrDefault(x.Id),
+                BuildActionPhaseView(x, workflowTemplates, userNameLookup),
+                BuildCanAmendContract(x, currentUserGuid),
+                BuildCanAmendContractDocument(x, currentUserGuid),
+                x.WorkflowValidityEndsAtUtc,
+                x.SuspendedPendingUserId,
+                x.SuspendedPendingUserId.HasValue
+                    ? userNameLookup.GetValueOrDefault(x.SuspendedPendingUserId.Value)
+                    : null,
+                x.WorkflowIncompleteNote,
+                x.WorkflowIncompleteTerminatedAtUtc));
+        }
+
+        return Ok(result);
     }
 
     [HttpGet("party-lookup")]
@@ -127,8 +259,8 @@ public class AdminContractsController(
             return Unauthorized();
 
         var digits = NormalizeDigits(nationalId ?? "");
-        if (digits.Length != 10)
-            return BadRequest(new { message = "کد ملی باید ۱۰ رقم باشد" });
+        if (string.IsNullOrWhiteSpace(digits))
+            return BadRequest(new { message = "کد ملی الزامی است" });
 
         var contract = await ScopeVisibleContracts(db.Contracts.AsNoTracking(), currentUserGuid)
             .Where(c => c.NationalId == digits)
@@ -171,16 +303,28 @@ public class AdminContractsController(
         [FromQuery] string? status,
         [FromQuery] string? q,
         [FromQuery] bool? archived,
-        CancellationToken ct)
+        [FromQuery] bool syncScheduled = false,
+        [FromQuery] bool lite = true,
+        CancellationToken ct = default)
     {
         if (!TryGetCurrentUserId(out var currentUserGuid))
             return Unauthorized();
 
-        var query = ScopeVisibleContracts(db.Contracts.Include(x => x.ContractType), currentUserGuid);
+        if (syncScheduled)
+            await ProcessDueScheduledWorkflowStartsAsync(ct);
+
+        var statusKey = (status ?? "all").ToLowerInvariant();
+
+        var query = ScopeVisibleContracts(
+            db.Contracts.AsNoTracking().Include(x => x.ContractType),
+            currentUserGuid);
+
         if (archived == true)
             query = query.Where(x => x.IsArchived);
         else if (archived != true)
             query = query.Where(x => !x.IsArchived);
+
+        query = ApplyContractListStatusPreFilter(query, statusKey);
 
         if (!string.IsNullOrWhiteSpace(q))
         {
@@ -195,41 +339,34 @@ public class AdminContractsController(
                 x.SubjectPersonName.Contains(term));
         }
 
-        await ProcessDueScheduledWorkflowStartsAsync(ct);
-
         var list = await query
             .OrderByDescending(x => x.CreatedAtUtc)
-            .Take(300)
+            .Take(120)
             .ToListAsync(ct);
 
-        var creatorIds = list.Select(x => x.CreatedByUserId).Distinct().ToList();
-        var creatorLookup = await userManager.Users
-            .Where(u => creatorIds.Contains(u.Id))
-            .Select(u => new { u.Id, u.FirstName, u.LastName, u.UserName })
-            .ToDictionaryAsync(
-                u => u.Id,
-                u =>
-                {
-                    var full = $"{u.FirstName} {u.LastName}".Trim();
-                    return string.IsNullOrWhiteSpace(full) ? (u.UserName ?? "") : full;
-                },
-                ct);
-
         var stepsByContract = list.ToDictionary(x => x.Id, x => DeserializeSteps(x.StepsJson));
-        await EnrichApproverNamesAsync(stepsByContract, ct);
-        var amendedVersionLookup = await ResolveCurrentVersionIsAmendedAsync(list, ct);
+
         var workflowTemplates = await LoadWorkflowTemplatesAsync(list.Select(x => x.WorkflowTemplateId), ct);
-        var actionPhaseNameLookup = await ResolveActionPhaseUserNamesAsync(list, workflowTemplates, ct);
-        var suspendedUserLookup = await ResolveUserNamesByIdsAsync(
-            list.Where(c => c.SuspendedPendingUserId.HasValue).Select(c => c.SuspendedPendingUserId!.Value).Distinct(),
+
+        var userNameLookup = await BuildListUserNameLookupAsync(
+            list,
+            stepsByContract,
+            workflowTemplates,
             ct);
 
-        var result = list.Select(x =>
+        EnrichStepsWithUserLookup(stepsByContract, userNameLookup);
+
+        var amendedVersionLookup = await ResolveCurrentVersionIsAmendedAsync(list, ct);
+
+        var result = new List<ContractListItemDto>(list.Count);
+        foreach (var x in list)
         {
             var steps = stepsByContract[x.Id];
-            creatorLookup.TryGetValue(x.CreatedByUserId, out var lookupName);
-            var creatorName = !string.IsNullOrWhiteSpace(x.CreatedByName) ? x.CreatedByName : (lookupName ?? "");
-            return new ContractListItemDto(
+            var creatorName = !string.IsNullOrWhiteSpace(x.CreatedByName)
+                ? x.CreatedByName
+                : userNameLookup.GetValueOrDefault(x.CreatedByUserId, "");
+
+            result.Add(new ContractListItemDto(
                 x.Id,
                 x.ContractNumber,
                 x.Title,
@@ -245,13 +382,13 @@ public class AdminContractsController(
                 x.FileName,
                 x.FilePath,
                 !string.IsNullOrWhiteSpace(x.FilePath),
-                HasSignedDocument(x.FilePath, x.StepsJson),
+                HasSignedDocument(x),
                 HasOriginalDocument(x),
                 !string.IsNullOrWhiteSpace(x.PdfFilePath),
                 x.CurrentVersionNumber,
                 x.IsArchived,
                 x.CreatedByUserId,
-                creatorName ?? "",
+                creatorName,
                 x.CreatedAtUtc,
                 x.CurrentStepOrder,
                 ToClientStatus(x),
@@ -266,55 +403,91 @@ public class AdminContractsController(
                 x.ContractDocumentTemplateVersionId,
                 steps,
                 BuildAmendmentView(x, currentUserGuid),
-                WorkflowEventHelper.ToViews(x.WorkflowEventsJson),
+                lite ? [] : WorkflowEventHelper.ToViews(x.WorkflowEventsJson),
                 amendedVersionLookup.GetValueOrDefault(x.Id),
-                BuildActionPhaseView(x, workflowTemplates, actionPhaseNameLookup),
+                BuildActionPhaseView(x, workflowTemplates, userNameLookup),
                 BuildCanAmendContract(x, currentUserGuid),
                 BuildCanAmendContractDocument(x, currentUserGuid),
                 x.WorkflowValidityEndsAtUtc,
                 x.SuspendedPendingUserId,
                 x.SuspendedPendingUserId.HasValue
-                    ? suspendedUserLookup.GetValueOrDefault(x.SuspendedPendingUserId.Value)
+                    ? userNameLookup.GetValueOrDefault(x.SuspendedPendingUserId.Value)
                     : null,
                 x.WorkflowIncompleteNote,
-                x.WorkflowIncompleteTerminatedAtUtc);
-        });
+                x.WorkflowIncompleteTerminatedAtUtc));
+        }
 
-        result = (status ?? "all").ToLowerInvariant() switch
+        var filtered = ApplyContractListStatusPostFilter(result, statusKey, currentUserGuid);
+        return Ok(filtered);
+    }
+
+    [HttpDelete("{id:guid}")]
+    [Authorize(Policy = "contracts.delete")]
+    public async Task<IActionResult> SoftDelete(Guid id, CancellationToken ct)
+    {
+        if (!TryGetCurrentUserId(out var currentUserGuid))
+            return Unauthorized();
+
+        var contract = await db.Contracts
+            .IgnoreQueryFilters()
+            .FirstOrDefaultAsync(c => c.Id == id, ct);
+        if (contract is null)
+            return NotFound(new { message = "قرارداد یافت نشد" });
+
+        if (contract.IsSoftDeleted)
+            return BadRequest(new { message = "این قرارداد قبلاً حذف شده است" });
+
+        var accessDenied = DenyIfNoContractAccess(contract);
+        if (accessDenied is not null)
+            return accessDenied;
+
+        var usage = await ContractSoftDelete.AnalyzeAsync(db, contract, ct);
+        await ContractSoftDelete.ApplyAsync(db, contract, currentUserGuid, ct);
+        await db.SaveChangesAsync(ct);
+
+        var message = ContractSoftDelete.BuildMessage(contract.ContractNumber, usage);
+        return Ok(new
         {
-            "mine" => result.Where(x => x.Steps.Any(s => s.UserId == currentUserGuid && s.Status == "pending")),
-            "approved" => result.Where(x => x.OverallStatus == "approved"),
-            "rejected" => result.Where(x => x.OverallStatus == "rejected"),
-            "in_progress" => result.Where(x => x.OverallStatus == "in_progress"),
-            "suspended" => result.Where(x => x.OverallStatus == "suspended"),
-            "incomplete" => result.Where(x => x.OverallStatus == "incomplete"),
-            "action" => result.Where(x =>
-                x.OverallStatus == "approved"
-                && x.ActionPhase is not null
-                && !string.Equals(x.ActionPhase.Status, "completed", StringComparison.OrdinalIgnoreCase)),
-            _ => result
-        };
-
-        return Ok(result);
+            message,
+            usage = new
+            {
+                usage.WorkflowStarted,
+                usage.WorkflowInProgress,
+                usage.HasPostApproval,
+                usage.ActiveApprovalLinks,
+                usage.ActiveActionLinks,
+            },
+        });
     }
 
     [HttpGet("{id:guid}")]
-    [Authorize(Policy = "contracts.read")]
+    [Authorize]
     public async Task<IActionResult> Get(Guid id, CancellationToken ct)
     {
         var x = await db.Contracts.Include(c => c.ContractType).FirstOrDefaultAsync(c => c.Id == id, ct);
         if (x is null) return NotFound(new { message = "قرارداد یافت نشد" });
 
+        if (x.IsArchived)
+        {
+            if (DenyIfNoArchivedContractAccess(x) is { } archivedDenied)
+                return archivedDenied;
+        }
+        else
+        {
+            if (!IsAdmin && !User.HasClaim("permission", "contracts.read"))
+                return Forbid();
+            if (DenyIfNoContractAccess(x) is { } accessDenied)
+                return accessDenied;
+        }
+
         await ProcessDueScheduledWorkflowStartsAsync(ct);
         x = await db.Contracts.Include(c => c.ContractType).FirstOrDefaultAsync(c => c.Id == id, ct);
         if (x is null) return NotFound(new { message = "قرارداد یافت نشد" });
 
-        var accessDenied = DenyIfNoContractAccess(x);
-        if (accessDenied is not null) return accessDenied;
-
         var steps = DeserializeSteps(x.StepsJson);
         var map = new Dictionary<Guid, List<AppApprovalStepDto>> { [x.Id] = steps };
         await EnrichApproverNamesAsync(map, ct);
+        await EnrichApprovalLinkOpenedAsync(steps, id, ct);
 
         var creatorName = !string.IsNullOrWhiteSpace(x.CreatedByName)
             ? x.CreatedByName
@@ -345,7 +518,7 @@ public class AdminContractsController(
             x.FileName,
             x.FilePath,
             !string.IsNullOrWhiteSpace(x.FilePath),
-            HasSignedDocument(x.FilePath, x.StepsJson),
+            HasSignedDocument(x),
             HasOriginalDocument(x),
             !string.IsNullOrWhiteSpace(x.PdfFilePath),
             x.CurrentVersionNumber,
@@ -500,8 +673,8 @@ public class AdminContractsController(
             return BadRequest(new { message = "تاریخ پایان باید بعد از تاریخ شروع باشد" });
 
         var nationalId = NormalizeDigits(req.NationalId ?? "");
-        if (nationalId.Length != 10)
-            return BadRequest(new { message = "کد ملی باید ۱۰ رقم باشد" });
+        if (string.IsNullOrWhiteSpace(nationalId))
+            return BadRequest(new { message = "کد ملی الزامی است" });
 
         var phone = NormalizeDigits(req.Phone ?? "");
         if (!System.Text.RegularExpressions.Regex.IsMatch(phone, @"^09\d{9}$"))
@@ -1031,7 +1204,6 @@ public class AdminContractsController(
         var stored = await contractFiles.SaveAsync(contract.NationalId, nextVersion, contract.ContractNumber, file, ct);
 
         contract.FilePath = stored.relativePath;
-        contract.OriginalFilePath = stored.relativePath;
         contract.FileName = stored.originalFileName;
         contract.PdfFilePath = null;
         contract.CurrentVersionNumber = nextVersion;
@@ -1125,7 +1297,6 @@ public class AdminContractsController(
                 contract.TemplateFieldValuesJson = req.FieldValuesJson;
                 contract.ContractDocumentTemplateVersionId = versionId;
                 contract.FilePath = stored.relativePath;
-                contract.OriginalFilePath = stored.relativePath;
                 contract.FileName = stored.originalFileName;
                 contract.PdfFilePath = null;
                 contract.CurrentVersionNumber = nextVersion;
@@ -1184,7 +1355,7 @@ public class AdminContractsController(
     }
 
     [HttpGet("{id:guid}/file")]
-    [Authorize(Policy = "contracts.read")]
+    [Authorize]
     public async Task<IActionResult> DownloadFile(
         Guid id,
         [FromQuery] Guid? versionId,
@@ -1193,12 +1364,27 @@ public class AdminContractsController(
         [FromQuery] string? source = null,
         CancellationToken ct = default)
     {
-        var contract = await GetAccessibleContractAsync(id, ct);
+        var contract = await db.Contracts.FirstOrDefaultAsync(c => c.Id == id, ct);
         if (contract is null) return NotFound(new { message = "قرارداد یافت نشد" });
+
+        if (contract.IsArchived)
+        {
+            if (DenyIfNoArchivedContractAccess(contract) is { } archivedDenied)
+                return archivedDenied;
+        }
+        else
+        {
+            if (!IsAdmin && !User.HasClaim("permission", "contracts.read"))
+                return Forbid();
+            if (DenyIfNoContractAccess(contract) is { } accessDenied)
+                return accessDenied;
+        }
 
         var wantPdf = string.Equals(format, "pdf", StringComparison.OrdinalIgnoreCase);
         var wantOriginal = string.Equals(source, "original", StringComparison.OrdinalIgnoreCase);
         var wantAmended = string.Equals(source, "amended", StringComparison.OrdinalIgnoreCase);
+        var wantSigned = string.Equals(source, "signed", StringComparison.OrdinalIgnoreCase);
+        var usePdfOutput = wantPdf || wantSigned;
 
         ContractVersion? versionEntity = null;
         string? sourceRelative;
@@ -1250,6 +1436,15 @@ public class AdminContractsController(
                     displayName = baseName;
             }
         }
+        else if (wantSigned)
+        {
+            var signed = await ContractWorkflowProcessor.ResolveSignedFileForDownloadAsync(contract, db, ct);
+            if (signed is null)
+                return NotFound(new { message = "نسخه امضاشده یافت نشد" });
+            sourceRelative = signed.RelativePath;
+            storedPdfRelative = signed.PdfRelativePath;
+            displayName = signed.DisplayFileName ?? contract.FileName;
+        }
         else
         {
             sourceRelative = contract.FilePath;
@@ -1262,7 +1457,7 @@ public class AdminContractsController(
 
         string relative;
         string? downloadName;
-        if (wantPdf)
+        if (usePdfOutput)
         {
             var pdfResolved = await ResolveOrCreatePdfAsync(
                 contract, versionEntity, sourceRelative, storedPdfRelative, displayName, ct);
@@ -1393,16 +1588,8 @@ public class AdminContractsController(
         return Ok(new { message = result.Message });
     }
 
-    private static bool HasSignedDocument(string? filePath, string? stepsJson)
-    {
-        if (ContractApprovalStampService.IsSignedDocumentPath(filePath))
-            return true;
-        if (string.IsNullOrWhiteSpace(filePath)
-            || !filePath.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
-            return false;
-        return ContractWorkflowProcessor.DeserializeSteps(stepsJson)
-            .Any(s => s.Status is "approved");
-    }
+    private static bool HasSignedDocument(Contract contract) =>
+        ContractWorkflowProcessor.HasSignedWorkflowDocument(contract);
 
     private static bool HasOriginalDocument(Contract contract) =>
         !string.IsNullOrWhiteSpace(contract.OriginalFilePath);
@@ -1412,6 +1599,14 @@ public class AdminContractsController(
         var contract = await db.Contracts.FirstOrDefaultAsync(c => c.Id == id, ct);
         if (contract is null) return null;
         if (!TryGetCurrentUserId(out var userId)) return null;
+
+        if (contract.IsArchived)
+        {
+            if (!CanReadContractsArchive) return null;
+            if (CanReadAllContractsArchive) return contract;
+            return UserCanAccessContract(contract, userId) ? contract : null;
+        }
+
         return UserCanAccessContract(contract, userId) ? contract : null;
     }
 
@@ -1452,6 +1647,37 @@ public class AdminContractsController(
                 if (string.IsNullOrWhiteSpace(step.UserName)) step.UserName = p.DisplayName ?? "";
                 if (string.IsNullOrWhiteSpace(step.UserEmail)) step.UserEmail = p.Email;
             }
+        }
+    }
+
+    private async Task EnrichApprovalLinkOpenedAsync(
+        List<AppApprovalStepDto> steps,
+        Guid contractId,
+        CancellationToken ct)
+    {
+        if (steps.Count == 0)
+            return;
+
+        var userIds = steps.Select(s => s.UserId).Where(id => id != Guid.Empty).Distinct().ToList();
+        if (userIds.Count == 0)
+            return;
+
+        var links = await db.ContractApprovalLinks.AsNoTracking()
+            .Where(l => l.ContractId == contractId && userIds.Contains(l.AssigneeUserId))
+            .Select(l => new { l.AssigneeUserId, l.IsActive, l.CreatedAtUtc, l.LinkOpenedAtUtc })
+            .ToListAsync(ct);
+
+        foreach (var step in steps)
+        {
+            var opened = links
+                .Where(l => l.AssigneeUserId == step.UserId && l.LinkOpenedAtUtc.HasValue)
+                .OrderByDescending(l => l.IsActive)
+                .ThenByDescending(l => l.LinkOpenedAtUtc)
+                .Select(l => l.LinkOpenedAtUtc)
+                .FirstOrDefault();
+
+            if (opened.HasValue)
+                step.ApprovalLinkOpenedAtUtc = opened;
         }
     }
 
@@ -1570,6 +1796,94 @@ public class AdminContractsController(
                 ApprovalDeadlineHours = Math.Max(0, x.ApprovalDeadlineHours ?? 0),
             })
             .ToList();
+    }
+
+    private static IQueryable<Contract> ApplyContractListStatusPreFilter(IQueryable<Contract> query, string statusKey) =>
+        statusKey switch
+        {
+            "pending" => query.Where(x => x.Status == ContractStatus.Pending),
+            "in_progress" => query.Where(x => x.Status == ContractStatus.InProgress),
+            "rejected" => query.Where(x => x.Status == ContractStatus.Rejected),
+            "suspended" => query.Where(x => x.Status == ContractStatus.Suspended),
+            "incomplete" => query.Where(x => x.Status == ContractStatus.Incomplete),
+            "approved" => query.Where(x => x.Status == ContractStatus.Approved),
+            "action" => query.Where(x => x.Status == ContractStatus.Approved),
+            "mine" => query.Where(x =>
+                x.Status == ContractStatus.InProgress
+                || x.Status == ContractStatus.Pending
+                || x.Status == ContractStatus.Suspended),
+            _ => query,
+        };
+
+    private static IEnumerable<ContractListItemDto> ApplyContractListStatusPostFilter(
+        IEnumerable<ContractListItemDto> items,
+        string statusKey,
+        Guid currentUserGuid) =>
+        statusKey switch
+        {
+            "mine" => items.Where(x => x.Steps.Any(s => s.UserId == currentUserGuid && s.Status == "pending")),
+            "approved" => items.Where(x => x.OverallStatus == "approved"),
+            "rejected" => items.Where(x => x.OverallStatus == "rejected"),
+            "in_progress" => items.Where(x => x.OverallStatus == "in_progress"),
+            "suspended" => items.Where(x => x.OverallStatus == "suspended"),
+            "incomplete" => items.Where(x => x.OverallStatus == "incomplete"),
+            "pending" => items.Where(x => x.OverallStatus == "pending"),
+            "action" => items.Where(x =>
+                x.OverallStatus == "approved"
+                && x.ActionPhase is not null
+                && !string.Equals(x.ActionPhase.Status, "completed", StringComparison.OrdinalIgnoreCase)),
+            _ => items,
+        };
+
+    private async Task<Dictionary<Guid, string>> BuildListUserNameLookupAsync(
+        IReadOnlyList<Contract> contracts,
+        Dictionary<Guid, List<AppApprovalStepDto>> stepsByContract,
+        IReadOnlyDictionary<Guid, ContractWorkflowTemplate> workflowTemplates,
+        CancellationToken ct)
+    {
+        var ids = new HashSet<Guid>();
+        foreach (var c in contracts)
+        {
+            ids.Add(c.CreatedByUserId);
+            if (c.SuspendedPendingUserId.HasValue)
+                ids.Add(c.SuspendedPendingUserId.Value);
+            if (stepsByContract.TryGetValue(c.Id, out var steps))
+            {
+                foreach (var s in steps)
+                {
+                    if (s.UserId != Guid.Empty)
+                        ids.Add(s.UserId);
+                }
+            }
+
+            var source = ResolveActionPhaseSource(c, workflowTemplates);
+            if (source is not null)
+            {
+                foreach (var uid in source.Value.AssigneeIds)
+                {
+                    if (uid != Guid.Empty)
+                        ids.Add(uid);
+                }
+            }
+        }
+
+        return await ResolveUserNamesByIdsAsync(ids, ct);
+    }
+
+    private static void EnrichStepsWithUserLookup(
+        Dictionary<Guid, List<AppApprovalStepDto>> stepsByContract,
+        IReadOnlyDictionary<Guid, string> userNames)
+    {
+        foreach (var steps in stepsByContract.Values)
+        {
+            foreach (var step in steps)
+            {
+                if (step.UserId == Guid.Empty) continue;
+                if (string.IsNullOrWhiteSpace(step.UserName)
+                    && userNames.TryGetValue(step.UserId, out var name))
+                    step.UserName = name;
+            }
+        }
     }
 
     private async Task ProcessDueScheduledWorkflowStartsAsync(CancellationToken ct)

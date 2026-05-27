@@ -10,13 +10,21 @@ using PorslineClone.Application.Abstractions;
 using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
+using PorslineClone.Infrastructure.Services;
 
 namespace PorslineClone.Api.Controllers;
 
 [ApiController]
 [Route("api/admin/approvals")]
 [Authorize]
-public class AdminApprovalsController(AppDbContext db, UserManager<AppUser> userManager, ISmsSender smsSender, IInboxMessageService inbox, IWebHostEnvironment env, IFrontendUrlResolver frontendUrls) : ControllerBase
+public class AdminApprovalsController(
+    AppDbContext db,
+    UserManager<AppUser> userManager,
+    ISmsSender smsSender,
+    IInboxMessageService inbox,
+    IWebHostEnvironment env,
+    IFrontendUrlResolver frontendUrls,
+    FormWorkflowProcessor workflowProcessor) : ControllerBase
 {
     [HttpGet]
     [Authorize(Policy = "approvals.read")]
@@ -45,7 +53,7 @@ public class AdminApprovalsController(AppDbContext db, UserManager<AppUser> user
             .Distinct()
             .ToList();
 
-        var approverLookup = await userManager.Users
+        var approverLookup = await db.Users.AsNoTracking()
             .Where(u => approverIds.Contains(u.Id))
             .Select(u => new
             {
@@ -53,7 +61,10 @@ public class AdminApprovalsController(AppDbContext db, UserManager<AppUser> user
                 u.FirstName,
                 u.LastName,
                 u.Email,
-                u.UserName
+                u.UserName,
+                u.SignatureImagePath,
+                u.SignatureDisplayDegree,
+                PositionTitle = u.UserPosition != null ? u.UserPosition.Name : null,
             })
             .ToDictionaryAsync(
                 x => x.Id,
@@ -64,12 +75,21 @@ public class AdminApprovalsController(AppDbContext db, UserManager<AppUser> user
                     return new
                     {
                         DisplayName = displayName,
-                        Email = x.Email
+                        Email = x.Email,
+                        x.SignatureImagePath,
+                        x.SignatureDisplayDegree,
+                        x.FirstName,
+                        x.LastName,
+                        x.PositionTitle,
                     };
                 },
                 ct);
 
-        foreach (var steps in stepsBySubmission.Values)
+        var userSignatureLookup = approverLookup.ToDictionary(
+            x => x.Key,
+            x => (x.Value.SignatureImagePath, x.Value.SignatureDisplayDegree));
+
+        foreach (var (submissionId, steps) in stepsBySubmission)
         {
             foreach (var step in steps)
             {
@@ -78,7 +98,14 @@ public class AdminApprovalsController(AppDbContext db, UserManager<AppUser> user
                     step.UserName = profile.DisplayName ?? "";
                 if (string.IsNullOrWhiteSpace(step.UserEmail))
                     step.UserEmail = profile.Email;
+                FormApprovalSignatureHelper.EnrichApproverIdentityFromProfile(
+                    step, profile.FirstName, profile.LastName, profile.PositionTitle);
             }
+            FormApprovalSignatureHelper.BackfillApprovedStepSignatures(steps, userSignatureLookup);
+            var sid = submissionId;
+            FormApprovalSignatureHelper.EnrichSignatureUrls(
+                steps,
+                s => $"/api/admin/approvals/{sid}/signature?stepOrder={s.Order}");
         }
 
         var result = list.Select(x =>
@@ -117,44 +144,15 @@ public class AdminApprovalsController(AppDbContext db, UserManager<AppUser> user
         var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
         if (!Guid.TryParse(currentUserId, out var currentUserGuid)) return Unauthorized();
 
-        var submission = await db.FormSubmissions.FirstOrDefaultAsync(x => x.Id == id, ct);
-        if (submission is null) return NotFound(new { message = "درخواست یافت نشد" });
-
-        var steps = DeserializeSteps(submission.StepsJson);
-        var current = steps.FirstOrDefault(s => s.Order == submission.CurrentStepOrder && s.Status == "pending");
-        if (current is null) return BadRequest(new { message = "مرحله فعالی برای این درخواست وجود ندارد" });
-        if (current.UserId != currentUserGuid) return Forbid();
-        var currentUser = await userManager.FindByIdAsync(currentUserGuid.ToString());
-        var currentApproverName = currentUser is null
-            ? current.UserName
-            : $"{currentUser.FirstName} {currentUser.LastName}".Trim();
-
-        current.Status = "approved";
-        current.Comment = req.Comment;
-        current.ActionAt = DateTime.UtcNow;
-
-        var next = steps.Where(s => s.Order > current.Order).OrderBy(s => s.Order).FirstOrDefault();
-        if (next is null)
+        var result = await workflowProcessor.ProcessActionAsync(id, currentUserGuid, true, req.Comment, ct);
+        if (!result.Success)
         {
-            submission.Status = FormSubmissionStatus.Approved;
+            var code = result.Message?.Contains("امضا", StringComparison.Ordinal) == true
+                ? "signature_required"
+                : "workflow_action_failed";
+            return StatusCode(result.HttpStatus ?? 400, new { message = result.Message, code });
         }
-        else
-        {
-            next.Status = "pending";
-            submission.CurrentStepOrder = next.Order;
-            submission.Status = FormSubmissionStatus.InProgress;
-
-            await SendNextAssigneeSmsAsync(
-                next.UserId,
-                submission.FormId,
-                currentApproverName,
-                current.UserName,
-                ct);
-        }
-
-        submission.StepsJson = JsonSerializer.Serialize(steps);
-        await db.SaveChangesAsync(ct);
-        return Ok(new { message = "تأیید شد" });
+        return Ok(new { message = result.Message });
     }
 
     [HttpPost("{id:guid}/reject")]
@@ -164,53 +162,34 @@ public class AdminApprovalsController(AppDbContext db, UserManager<AppUser> user
         var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
         if (!Guid.TryParse(currentUserId, out var currentUserGuid)) return Unauthorized();
 
-        var submission = await db.FormSubmissions.FirstOrDefaultAsync(x => x.Id == id, ct);
+        var result = await workflowProcessor.ProcessActionAsync(id, currentUserGuid, false, req.Comment, ct);
+        if (!result.Success)
+            return StatusCode(result.HttpStatus ?? 400, new { message = result.Message, code = "workflow_action_failed" });
+        return Ok(new { message = result.Message });
+    }
+
+    [HttpGet("{id:guid}/signature")]
+    [Authorize(Policy = "approvals.read")]
+    public async Task<IActionResult> GetStepSignature(Guid id, [FromQuery] int stepOrder, CancellationToken ct)
+    {
+        if (stepOrder < 1) return BadRequest(new { message = "stepOrder نامعتبر است" });
+
+        var submission = await db.FormSubmissions.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id, ct);
         if (submission is null) return NotFound(new { message = "درخواست یافت نشد" });
 
         var steps = DeserializeSteps(submission.StepsJson);
-        var current = steps.FirstOrDefault(s => s.Order == submission.CurrentStepOrder && s.Status == "pending");
-        if (current is null) return BadRequest(new { message = "مرحله فعالی برای این درخواست وجود ندارد" });
-        if (current.UserId != currentUserGuid) return Forbid();
-        var currentUser = await userManager.FindByIdAsync(currentUserGuid.ToString());
-        var currentApproverName = currentUser is null
-            ? current.UserName
-            : $"{currentUser.FirstName} {currentUser.LastName}".Trim();
+        var step = steps.FirstOrDefault(s => s.Order == stepOrder);
+        if (step is null || step.Status != "approved" || string.IsNullOrWhiteSpace(step.SignatureImagePath))
+            return NotFound(new { message = "امضای این مرحله یافت نشد" });
 
-        current.Status = "rejected";
-        current.Comment = req.Comment;
-        current.ActionAt = DateTime.UtcNow;
+        if (!FormApprovalSignatureHelper.TryResolveSignatureFile(env, step.SignatureImagePath, out var fullPath))
+            return NotFound(new { message = "فایل امضا در سرور موجود نیست" });
 
-        if (current.OnReject == "continue")
-        {
-            var next = steps.Where(s => s.Order > current.Order).OrderBy(s => s.Order).FirstOrDefault();
-            if (next is null)
-            {
-                submission.Status = FormSubmissionStatus.Rejected;
-            }
-            else
-            {
-                next.Status = "pending";
-                submission.CurrentStepOrder = next.Order;
-                submission.Status = FormSubmissionStatus.InProgress;
+        var provider = new FileExtensionContentTypeProvider();
+        if (!provider.TryGetContentType(fullPath, out var contentType))
+            contentType = "image/png";
 
-                await SendNextAssigneeSmsAsync(
-                    next.UserId,
-                    submission.FormId,
-                    currentApproverName,
-                    current.UserName,
-                    ct);
-            }
-        }
-        else
-        {
-            foreach (var later in steps.Where(s => s.Order > current.Order && s.Status == "waiting"))
-                later.Status = "skipped";
-            submission.Status = FormSubmissionStatus.Rejected;
-        }
-
-        submission.StepsJson = JsonSerializer.Serialize(steps);
-        await db.SaveChangesAsync(ct);
-        return Ok(new { message = "رد شد" });
+        return PhysicalFile(fullPath, contentType, enableRangeProcessing: true);
     }
 
     [HttpGet("{id:guid}/files/{index:int}/download")]
@@ -292,9 +271,7 @@ public class AdminApprovalsController(AppDbContext db, UserManager<AppUser> user
     }
 
     private static List<ApprovalStepDto> DeserializeSteps(string? json)
-        => string.IsNullOrWhiteSpace(json)
-            ? []
-            : (JsonSerializer.Deserialize<List<ApprovalStepDto>>(json) ?? []);
+        => FormWorkflowProcessor.DeserializeSteps(json);
 
     private static List<FormFieldValueDto> DeserializeFields(string? json)
         => string.IsNullOrWhiteSpace(json)
@@ -313,19 +290,6 @@ public class AdminApprovalsController(AppDbContext db, UserManager<AppUser> user
 }
 
 public record ApprovalActionRequest(string? Comment);
-public class ApprovalStepDto
-{
-    public Guid Id { get; set; }
-    public int Order { get; set; }
-    public Guid UserId { get; set; }
-    public string UserName { get; set; } = "";
-    public string? UserEmail { get; set; }
-    public string Status { get; set; } = "waiting";
-    public string? Comment { get; set; }
-    public DateTime? ActionAt { get; set; }
-    public string OnReject { get; set; } = "stop";
-    public string? Note { get; set; }
-}
 
 public record ApprovalListItemDto(
     Guid Id,

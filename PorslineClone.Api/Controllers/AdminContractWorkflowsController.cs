@@ -23,12 +23,40 @@ public class AdminContractWorkflowsController(AppDbContext db) : ControllerBase
             .Where(x => x.IsActive)
             .OrderByDescending(x => x.CreatedAtUtc)
             .ToListAsync(ct);
-        var items = rows.Select(x => new ContractWorkflowTemplateListItemDto(
-            x.Id,
-            x.Name,
-            DeserializeSteps(x.StepsJson).Count,
-            x.IsActive,
-            x.CreatedAtUtc)).ToList();
+
+        var creatorIds = rows
+            .Where(x => x.CreatedByUserId.HasValue)
+            .Select(x => x.CreatedByUserId!.Value)
+            .Distinct()
+            .ToList();
+        var creatorLookup = creatorIds.Count == 0
+            ? new Dictionary<Guid, string>()
+            : await db.Users.AsNoTracking()
+                .Where(u => creatorIds.Contains(u.Id))
+                .Select(u => new { u.Id, u.FirstName, u.LastName, u.UserName })
+                .ToDictionaryAsync(
+                    u => u.Id,
+                    u =>
+                    {
+                        var full = $"{u.FirstName} {u.LastName}".Trim();
+                        return string.IsNullOrWhiteSpace(full) ? (u.UserName ?? "") : full;
+                    },
+                    ct);
+
+        var items = rows.Select(x =>
+        {
+            string? createdByName = null;
+            if (x.CreatedByUserId.HasValue && creatorLookup.TryGetValue(x.CreatedByUserId.Value, out var n))
+                createdByName = string.IsNullOrWhiteSpace(n) ? null : n;
+            return new ContractWorkflowTemplateListItemDto(
+                x.Id,
+                x.Name,
+                DeserializeSteps(x.StepsJson).Count,
+                x.IsActive,
+                x.CreatedAtUtc,
+                x.CreatedByUserId,
+                createdByName);
+        }).ToList();
         return Ok(items);
     }
 
@@ -86,6 +114,9 @@ public class AdminContractWorkflowsController(AppDbContext db) : ControllerBase
         var (dirKey, dirLabel, assignees, actionErr) = ResolveActionConfig(req);
         if (actionErr is not null) return BadRequest(new { message = actionErr });
 
+        var signatureErr = await ValidateWorkflowUserSignaturesAsync(cleaned, assignees, ct);
+        if (signatureErr is not null) return BadRequest(new { message = signatureErr });
+
         var entity = new ContractWorkflowTemplate
         {
             Id = Guid.NewGuid(),
@@ -127,6 +158,9 @@ public class AdminContractWorkflowsController(AppDbContext db) : ControllerBase
         var (dirKey, dirLabel, assignees, actionErr) = ResolveActionConfig(req);
         if (actionErr is not null) return BadRequest(new { message = actionErr });
 
+        var signatureErr = await ValidateWorkflowUserSignaturesAsync(cleaned, assignees, ct);
+        if (signatureErr is not null) return BadRequest(new { message = signatureErr });
+
         entity.Name = name;
         entity.StepsJson = JsonSerializer.Serialize(cleaned);
         entity.ActionDirectionKey = dirKey;
@@ -140,7 +174,7 @@ public class AdminContractWorkflowsController(AppDbContext db) : ControllerBase
     }
 
     [HttpDelete("{id:guid}")]
-    [Authorize(Policy = "contracts.settings.update")]
+    [Authorize(Policy = "contracts.settings.delete")]
     public async Task<IActionResult> Deactivate(Guid id, CancellationToken ct)
     {
         var entity = await db.ContractWorkflowTemplates.FirstOrDefaultAsync(x => x.Id == id, ct);
@@ -219,4 +253,13 @@ public class AdminContractWorkflowsController(AppDbContext db) : ControllerBase
 
         return (key, label, assignees, null);
     }
+
+    private Task<string?> ValidateWorkflowUserSignaturesAsync(
+        List<WorkflowStepDto> steps,
+        List<Guid> assignees,
+        CancellationToken ct) =>
+        WorkflowUserSignatureValidator.ValidateUserIdsAsync(
+            db,
+            steps.Select(s => s.UserId).Concat(assignees),
+            ct);
 }

@@ -3,7 +3,9 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.StaticFiles;
 using PorslineClone.Application.Contracts;
+using PorslineClone.Application.Users;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
 using PorslineClone.Infrastructure.Services;
@@ -41,7 +43,7 @@ public class PublicFormApprovalsController(
         if (assigneeStep is null)
             return BadRequest(new { message = "این لینک به تأییدکنندهٔ این پاسخ تعلق ندارد" });
 
-        var current = steps.FirstOrDefault(s => s.Order == submission.CurrentStepOrder && s.Status == "pending");
+        var current = WorkflowStepJsonHelper.FindCurrentPending(steps, submission.CurrentStepOrder);
         var canAct = link.IsActive
             && current is not null
             && current.UserId == assigneeId;
@@ -51,12 +53,31 @@ public class PublicFormApprovalsController(
             return BadRequest(new { message = "در حال حاضر نوبت تأیید شما نیست" });
 
         await EnrichStepNamesAsync(steps, ct);
+        var approverIds = steps.Select(s => s.UserId).Where(id => id != Guid.Empty).Distinct().ToList();
+        if (approverIds.Count > 0)
+        {
+            var userSigs = await db.Users.AsNoTracking()
+                .Where(u => approverIds.Contains(u.Id))
+                .Select(u => new { u.Id, u.SignatureImagePath, u.SignatureDisplayDegree })
+                .ToDictionaryAsync(
+                    u => u.Id,
+                    u => (u.SignatureImagePath, u.SignatureDisplayDegree),
+                    ct);
+            FormApprovalSignatureHelper.BackfillApprovedStepSignatures(steps, userSigs);
+        }
+
+        FormApprovalSignatureHelper.EnrichSignatureUrls(
+            steps,
+            s => $"/api/public/forms/approve/signature?c={Uri.EscapeDataString(c)}&stepOrder={s.Order}");
 
         var fields = DeserializeFields(submission.FieldsJson);
         var fileIndices = fields
             .Select((f, i) => (f, i))
             .Where(x => IsUploadPath(x.f.Value))
             .Select(x => x.i)
+            .ToList();
+        var fileSizes = fileIndices
+            .Select(i => ResolveUploadSizeBytes(fields[i].Value))
             .ToList();
 
         var assigneeName = assigneeStep.UserName;
@@ -79,18 +100,27 @@ public class PublicFormApprovalsController(
             participated,
             fields,
             fileIndices,
+            fileSizes,
             steps = steps.Select(s => new
             {
                 s.Id,
                 s.Order,
                 s.UserId,
                 s.UserName,
+                userFirstName = s.UserFirstName,
+                userLastName = s.UserLastName,
+                userPositionTitle = s.UserPositionTitle,
+                userGender = s.UserGender,
                 s.Status,
                 s.Comment,
                 s.ActionAt,
                 s.OnReject,
                 s.Note,
-                isCurrent = s.Order == submission.CurrentStepOrder && s.Status == "pending"
+                signatureUrl = s.SignatureUrl,
+                signatureWidthPx = s.SignatureDisplayDegree is null
+                    ? UserSignatureDisplaySize.WidthPxFromDegree(null)
+                    : UserSignatureDisplaySize.WidthPxFromDegree(s.SignatureDisplayDegree),
+                isCurrent = current is not null && s.Order == current.Order
             }),
             assignee = new
             {
@@ -131,6 +161,33 @@ public class PublicFormApprovalsController(
         return PhysicalFile(filePath, contentType, Path.GetFileName(filePath), enableRangeProcessing: true);
     }
 
+    [HttpGet("approve/signature")]
+    public async Task<IActionResult> GetApproverSignature([FromQuery] string c, [FromQuery] int stepOrder, CancellationToken ct)
+    {
+        if (stepOrder < 1) return BadRequest(new { message = "stepOrder نامعتبر است" });
+        if (string.IsNullOrWhiteSpace(c)) return BadRequest(new { message = "کد لینک الزامی است" });
+
+        var link = await approvalLinks.ResolveByCodeAsync(c, ct);
+        if (link is null) return BadRequest(new { message = "لینک نامعتبر است" });
+
+        var steps = FormWorkflowProcessor.DeserializeSteps(link.FormSubmission.StepsJson);
+        if (!steps.Any(s => s.UserId == link.AssigneeUserId))
+            return Forbid();
+
+        var step = steps.FirstOrDefault(s => s.Order == stepOrder);
+        if (step is null || step.Status != "approved" || string.IsNullOrWhiteSpace(step.SignatureImagePath))
+            return NotFound(new { message = "امضای این مرحله یافت نشد" });
+
+        if (!FormApprovalSignatureHelper.TryResolveSignatureFile(env, step.SignatureImagePath, out var fullPath))
+            return NotFound(new { message = "فایل امضا موجود نیست" });
+
+        var provider = new FileExtensionContentTypeProvider();
+        if (!provider.TryGetContentType(fullPath, out var contentType))
+            contentType = "image/png";
+
+        return PhysicalFile(fullPath, contentType, enableRangeProcessing: true);
+    }
+
     [HttpPost("approve/action")]
     public async Task<IActionResult> ApproveAction([FromBody] PublicFormApproveRequest req, CancellationToken ct)
     {
@@ -162,6 +219,14 @@ public class PublicFormApprovalsController(
     private static bool IsUploadPath(string? value) =>
         !string.IsNullOrWhiteSpace(value) && value.StartsWith("/Formupload/", StringComparison.OrdinalIgnoreCase);
 
+    private long ResolveUploadSizeBytes(string? uploadPath)
+    {
+        if (!IsUploadPath(uploadPath)) return 0;
+        var relative = uploadPath!.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
+        var filePath = Path.Combine(env.ContentRootPath, relative);
+        return System.IO.File.Exists(filePath) ? new FileInfo(filePath).Length : 0;
+    }
+
     private static List<FormFieldValueDto> DeserializeFields(string? json) =>
         string.IsNullOrWhiteSpace(json)
             ? []
@@ -170,22 +235,29 @@ public class PublicFormApprovalsController(
     private async Task EnrichStepNamesAsync(List<PorslineClone.Application.Contracts.ApprovalStepDto> steps, CancellationToken ct)
     {
         var ids = steps.Select(s => s.UserId).Where(id => id != Guid.Empty).Distinct().ToList();
-        var users = await db.Users
+        var users = await db.Users.AsNoTracking()
             .Where(u => ids.Contains(u.Id))
-            .Select(u => new { u.Id, u.FirstName, u.LastName, u.UserName })
-            .ToListAsync(ct);
-        var lookup = users.ToDictionary(
-            x => x.Id,
-            x =>
+            .Select(u => new
             {
-                var full = $"{x.FirstName} {x.LastName}".Trim();
-                return string.IsNullOrWhiteSpace(full) ? x.UserName ?? "" : full;
-            });
+                u.Id,
+                u.FirstName,
+                u.LastName,
+                u.UserName,
+                u.Gender,
+                PositionTitle = u.UserPosition != null ? u.UserPosition.Name : null,
+            })
+            .ToListAsync(ct);
+        var lookup = users.ToDictionary(x => x.Id);
         foreach (var step in steps)
         {
-            if (!string.IsNullOrWhiteSpace(step.UserName)) continue;
-            if (lookup.TryGetValue(step.UserId, out var name))
-                step.UserName = name;
+            if (!lookup.TryGetValue(step.UserId, out var u)) continue;
+            if (string.IsNullOrWhiteSpace(step.UserName))
+            {
+                var full = $"{u.FirstName} {u.LastName}".Trim();
+                step.UserName = string.IsNullOrWhiteSpace(full) ? u.UserName ?? "" : full;
+            }
+            FormApprovalSignatureHelper.EnrichApproverIdentityFromProfile(
+                step, u.FirstName, u.LastName, u.PositionTitle, u.Gender);
         }
     }
 }

@@ -22,10 +22,16 @@ public class AdminSmsSettingsController(AppDbContext db) : ControllerBase
             settings.SurveyCompletedNotificationEnabled,
             settings.UserCreateSmsEnabled,
             settings.ApprovalReferralSmsEnabled,
+            settings.FormWorkflowCompletedSenderSmsEnabled,
+            settings.FormActionPhaseCompletedSenderSmsEnabled,
+            settings.FormResponderApprovedSmsEnabled,
+            settings.FormWorkflowRejectedSenderSmsEnabled,
+            settings.FormWorkflowRejectedResponderSmsEnabled,
             settings.ContractCreatorApprovalNotifySmsEnabled,
             settings.ContractAmendmentAssigneeSmsEnabled,
             settings.ContractAmendmentReturnToRejecterSmsEnabled,
             settings.ContractRejectionNotifySmsEnabled,
+            settings.ContractActionCompletedCreatorSmsEnabled,
             settings.ApprovalReminderSmsEnabled,
             settings.ApprovalReminderDelayDays,
             settings.ApprovalReminderDelayHours,
@@ -50,10 +56,16 @@ public class AdminSmsSettingsController(AppDbContext db) : ControllerBase
         settings.SurveyCompletedNotificationEnabled = dto.SurveyCompletedNotificationEnabled;
         settings.UserCreateSmsEnabled = dto.UserCreateSmsEnabled;
         settings.ApprovalReferralSmsEnabled = dto.ApprovalReferralSmsEnabled;
+        settings.FormWorkflowCompletedSenderSmsEnabled = dto.FormWorkflowCompletedSenderSmsEnabled;
+        settings.FormActionPhaseCompletedSenderSmsEnabled = dto.FormActionPhaseCompletedSenderSmsEnabled;
+        settings.FormResponderApprovedSmsEnabled = dto.FormResponderApprovedSmsEnabled;
+        settings.FormWorkflowRejectedSenderSmsEnabled = dto.FormWorkflowRejectedSenderSmsEnabled;
+        settings.FormWorkflowRejectedResponderSmsEnabled = dto.FormWorkflowRejectedResponderSmsEnabled;
         settings.ContractCreatorApprovalNotifySmsEnabled = dto.ContractCreatorApprovalNotifySmsEnabled;
         settings.ContractAmendmentAssigneeSmsEnabled = dto.ContractAmendmentAssigneeSmsEnabled;
         settings.ContractAmendmentReturnToRejecterSmsEnabled = dto.ContractAmendmentReturnToRejecterSmsEnabled;
         settings.ContractRejectionNotifySmsEnabled = dto.ContractRejectionNotifySmsEnabled;
+        settings.ContractActionCompletedCreatorSmsEnabled = dto.ContractActionCompletedCreatorSmsEnabled;
         settings.ApprovalReminderSmsEnabled = dto.ApprovalReminderSmsEnabled;
         settings.ApprovalReminderDelayDays = Math.Max(0, dto.ApprovalReminderDelayDays);
         settings.ApprovalReminderDelayHours = Math.Max(0, dto.ApprovalReminderDelayHours);

@@ -75,6 +75,10 @@ public static class DatabaseSchemaPatcher
             IF COL_LENGTH('dbo.AspNetUsers', 'SignatureImagePath') IS NULL
                 ALTER TABLE [dbo].[AspNetUsers] ADD [SignatureImagePath] nvarchar(500) NULL;
 
+            IF COL_LENGTH('dbo.AspNetUsers', 'SignatureDisplayDegree') IS NULL
+                ALTER TABLE [dbo].[AspNetUsers] ADD [SignatureDisplayDegree] int NOT NULL
+                    CONSTRAINT [DF_AspNetUsers_SignatureDisplayDegree] DEFAULT (60);
+
             IF COL_LENGTH('dbo.AspNetUsers', 'PersonnelCode') IS NULL
                 ALTER TABLE [dbo].[AspNetUsers] ADD [PersonnelCode] nvarchar(30) NULL;
 
@@ -103,6 +107,16 @@ public static class DatabaseSchemaPatcher
 
             IF COL_LENGTH('dbo.Contracts', 'OriginalFilePath') IS NULL
                 ALTER TABLE [dbo].[Contracts] ADD [OriginalFilePath] nvarchar(500) NULL;
+
+            IF COL_LENGTH('dbo.Contracts', 'IsSoftDeleted') IS NULL
+                ALTER TABLE [dbo].[Contracts] ADD [IsSoftDeleted] bit NOT NULL
+                    CONSTRAINT [DF_Contracts_IsSoftDeleted] DEFAULT (0);
+
+            IF COL_LENGTH('dbo.Contracts', 'DeletedAtUtc') IS NULL
+                ALTER TABLE [dbo].[Contracts] ADD [DeletedAtUtc] datetime2 NULL;
+
+            IF COL_LENGTH('dbo.Contracts', 'DeletedByUserId') IS NULL
+                ALTER TABLE [dbo].[Contracts] ADD [DeletedByUserId] uniqueidentifier NULL;
             """, ct);
 
         await ExecuteScriptAsync(db,
@@ -154,6 +168,26 @@ public static class DatabaseSchemaPatcher
                 ALTER TABLE [dbo].[SmsSettings] ADD [ContractRejectionNotifySmsEnabled] bit NOT NULL
                     CONSTRAINT [DF_SmsSettings_ContractRejectionNotifySmsEnabled] DEFAULT (1);
 
+            IF COL_LENGTH('dbo.SmsSettings', 'ContractActionCompletedCreatorSmsEnabled') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [ContractActionCompletedCreatorSmsEnabled] bit NOT NULL
+                    CONSTRAINT [DF_SmsSettings_ContractActionCompletedCreatorSmsEnabled] DEFAULT (1);
+
+            IF COL_LENGTH('dbo.SmsSettings', 'FormActionPhaseCompletedSenderSmsEnabled') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [FormActionPhaseCompletedSenderSmsEnabled] bit NOT NULL
+                    CONSTRAINT [DF_SmsSettings_FormActionPhaseCompletedSenderSmsEnabled] DEFAULT (1);
+
+            IF COL_LENGTH('dbo.SmsSettings', 'FormResponderApprovedSmsEnabled') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [FormResponderApprovedSmsEnabled] bit NOT NULL
+                    CONSTRAINT [DF_SmsSettings_FormResponderApprovedSmsEnabled] DEFAULT (1);
+
+            IF COL_LENGTH('dbo.SmsSettings', 'FormWorkflowRejectedSenderSmsEnabled') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [FormWorkflowRejectedSenderSmsEnabled] bit NOT NULL
+                    CONSTRAINT [DF_SmsSettings_FormWorkflowRejectedSenderSmsEnabled] DEFAULT (1);
+
+            IF COL_LENGTH('dbo.SmsSettings', 'FormWorkflowRejectedResponderSmsEnabled') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [FormWorkflowRejectedResponderSmsEnabled] bit NOT NULL
+                    CONSTRAINT [DF_SmsSettings_FormWorkflowRejectedResponderSmsEnabled] DEFAULT (1);
+
             IF COL_LENGTH('dbo.Contracts', 'AmendmentJson') IS NULL
                 ALTER TABLE [dbo].[Contracts] ADD [AmendmentJson] nvarchar(max) NULL;
 
@@ -174,6 +208,9 @@ public static class DatabaseSchemaPatcher
 
             IF COL_LENGTH('dbo.ContractApprovalLinks', 'ReminderSmsSentAtUtc') IS NULL
                 ALTER TABLE [dbo].[ContractApprovalLinks] ADD [ReminderSmsSentAtUtc] datetime2 NULL;
+
+            IF COL_LENGTH('dbo.ContractApprovalLinks', 'LinkOpenedAtUtc') IS NULL
+                ALTER TABLE [dbo].[ContractApprovalLinks] ADD [LinkOpenedAtUtc] datetime2 NULL;
 
             IF COL_LENGTH('dbo.FormSubmissionApprovalLinks', 'ReminderSmsSentAtUtc') IS NULL
                 ALTER TABLE [dbo].[FormSubmissionApprovalLinks] ADD [ReminderSmsSentAtUtc] datetime2 NULL;
@@ -427,6 +464,27 @@ public static class DatabaseSchemaPatcher
                 ALTER TABLE [dbo].[FormSubmissions] ADD [ResponderId] uniqueidentifier NULL;
             IF COL_LENGTH('dbo.FormSubmissions', 'DispatchLinkId') IS NULL
                 ALTER TABLE [dbo].[FormSubmissions] ADD [DispatchLinkId] uniqueidentifier NULL;
+            IF COL_LENGTH('dbo.FormSubmissions', 'IsArchived') IS NULL
+                ALTER TABLE [dbo].[FormSubmissions] ADD [IsArchived] bit NOT NULL CONSTRAINT DF_FormSubmissions_IsArchived DEFAULT(0);
+
+            IF COL_LENGTH('dbo.FormSubmissions', 'WorkflowRunCycle') IS NULL
+                ALTER TABLE [dbo].[FormSubmissions] ADD [WorkflowRunCycle] int NOT NULL
+                    CONSTRAINT [DF_FormSubmissions_WorkflowRunCycle] DEFAULT (0);
+
+            IF COL_LENGTH('dbo.FormSubmissions', 'WorkflowRunsHistoryJson') IS NULL
+                ALTER TABLE [dbo].[FormSubmissions] ADD [WorkflowRunsHistoryJson] nvarchar(max) NULL;
+
+            IF COL_LENGTH('dbo.FormSubmissions', 'WorkflowRejectionJson') IS NULL
+                ALTER TABLE [dbo].[FormSubmissions] ADD [WorkflowRejectionJson] nvarchar(max) NULL;
+
+            IF OBJECT_ID(N'[dbo].[FormDispatchLinks]', N'U') IS NOT NULL
+               AND COL_LENGTH('dbo.FormDispatchLinks', 'WorkflowTemplateId') IS NULL
+                ALTER TABLE [dbo].[FormDispatchLinks] ADD [WorkflowTemplateId] uniqueidentifier NULL;
+            IF COL_LENGTH('dbo.FormDispatchLinks', 'SentByUserId') IS NULL
+                ALTER TABLE [dbo].[FormDispatchLinks] ADD [SentByUserId] uniqueidentifier NULL;
+
+            IF COL_LENGTH('dbo.Responders', 'Gender') IS NULL
+                ALTER TABLE [dbo].[Responders] ADD [Gender] int NULL;
 
             IF OBJECT_ID(N'[dbo].[FormSubmissionApprovalLinks]', N'U') IS NULL
             BEGIN
@@ -530,6 +588,70 @@ public static class DatabaseSchemaPatcher
                 CREATE INDEX [IX_ContractActionLinks_ContractId_AssigneeUserId_IsActive]
                     ON [dbo].[ContractActionLinks]([ContractId], [AssigneeUserId], [IsActive]);
             END
+            """, ct);
+
+        await ExecuteScriptAsync(db,
+            """
+            IF COL_LENGTH('dbo.Responders', 'IsDeleted') IS NULL
+                ALTER TABLE [dbo].[Responders] ADD [IsDeleted] bit NOT NULL
+                    CONSTRAINT [DF_Responders_IsDeleted] DEFAULT (0);
+            IF COL_LENGTH('dbo.Responders', 'DeletedAtUtc') IS NULL
+                ALTER TABLE [dbo].[Responders] ADD [DeletedAtUtc] datetime2 NULL;
+
+            IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Responders_MobileNumber' AND object_id = OBJECT_ID(N'dbo.Responders'))
+                DROP INDEX [IX_Responders_MobileNumber] ON [dbo].[Responders];
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Responders_MobileNumber' AND object_id = OBJECT_ID(N'dbo.Responders'))
+                CREATE UNIQUE INDEX [IX_Responders_MobileNumber] ON [dbo].[Responders]([MobileNumber]) WHERE [IsDeleted] = 0;
+
+            IF COL_LENGTH('dbo.Responders', 'NationalCode') IS NULL
+                ALTER TABLE [dbo].[Responders] ADD [NationalCode] nvarchar(50) NOT NULL
+                    CONSTRAINT [DF_Responders_NationalCode] DEFAULT ('');
+            IF COL_LENGTH('dbo.Responders', 'NationalCode') IS NOT NULL
+               AND (SELECT max_length FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.Responders') AND name = N'NationalCode') < 100
+                ALTER TABLE [dbo].[Responders] ALTER COLUMN [NationalCode] nvarchar(50) NOT NULL;
+            IF COL_LENGTH('dbo.AspNetUsers', 'NationalCode') IS NOT NULL
+               AND (SELECT max_length FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.AspNetUsers') AND name = N'NationalCode') < 100
+                ALTER TABLE [dbo].[AspNetUsers] ALTER COLUMN [NationalCode] nvarchar(50) NOT NULL;
+            IF COL_LENGTH('dbo.Contracts', 'NationalId') IS NOT NULL
+               AND (SELECT max_length FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.Contracts') AND name = N'NationalId') < 100
+                ALTER TABLE [dbo].[Contracts] ALTER COLUMN [NationalId] nvarchar(50) NOT NULL;
+            IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Responders_NationalCode' AND object_id = OBJECT_ID(N'dbo.Responders'))
+                DROP INDEX [IX_Responders_NationalCode] ON [dbo].[Responders];
+
+            UPDATE [dbo].[Responders]
+            SET [NationalCode] = LTRIM(RTRIM([NationalCode]))
+            WHERE [NationalCode] IS NOT NULL;
+
+            UPDATE [r]
+            SET [NationalCode] = CONCAT(N'LEGACY-', LEFT(REPLACE(CAST([r].[Id] AS nvarchar(36)), N'-', N''), 32))
+            FROM [dbo].[Responders] AS [r]
+            WHERE [r].[IsDeleted] = 0
+              AND ([r].[NationalCode] IS NULL OR [r].[NationalCode] = N'');
+
+            ;WITH [DupNational] AS (
+                SELECT
+                    [Id],
+                    [NationalCode],
+                    ROW_NUMBER() OVER (
+                        PARTITION BY [NationalCode]
+                        ORDER BY [CreatedAtUtc], [Id]
+                    ) AS [Rn]
+                FROM [dbo].[Responders]
+                WHERE [IsDeleted] = 0
+                  AND LTRIM(RTRIM([NationalCode])) <> N''
+            )
+            UPDATE [r]
+            SET [NationalCode] = LEFT(
+                CONCAT([d].[NationalCode], N'-', LEFT(REPLACE(CAST([d].[Id] AS nvarchar(36)), N'-', N''), 8)),
+                50
+            )
+            FROM [dbo].[Responders] AS [r]
+            INNER JOIN [DupNational] AS [d] ON [r].[Id] = [d].[Id]
+            WHERE [d].[Rn] > 1;
+
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Responders_NationalCode' AND object_id = OBJECT_ID(N'dbo.Responders'))
+                CREATE UNIQUE INDEX [IX_Responders_NationalCode] ON [dbo].[Responders]([NationalCode])
+                    WHERE [IsDeleted] = 0 AND [NationalCode] <> N'';
             """, ct);
 
         logger.LogInformation("Database schema patch completed.");

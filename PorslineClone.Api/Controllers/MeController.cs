@@ -5,28 +5,37 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using PorslineClone.Application.Contracts;
+using PorslineClone.Application.Users;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
+using PorslineClone.Infrastructure.Services;
 
 namespace PorslineClone.Api.Controllers;
 
 [ApiController]
 [Route("api/me")]
 [Authorize]
-public class MyAccountController(UserManager<AppUser> userManager, AppDbContext db, IWebHostEnvironment env) : ControllerBase
+public class MyAccountController(
+    UserManager<AppUser> userManager,
+    AppDbContext db,
+    IWebHostEnvironment env) : ControllerBase
 {
     private const long MaxAvatarBytes = 5 * 1024 * 1024;
     private static readonly HashSet<string> AllowedAvatarExt = [".jpg", ".jpeg", ".png", ".webp", ".gif"];
 
-    private string? BuildAvatarUrl(string? avatarPath)
+    private async Task<string?> BuildAvatarUrlAsync(AppUser user, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(avatarPath)) return null;
-        var relative = avatarPath.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
-        var fullPath = Path.Combine(env.ContentRootPath, relative);
-        var version = System.IO.File.Exists(fullPath)
-            ? System.IO.File.GetLastWriteTimeUtc(fullPath).Ticks
-            : DateTime.UtcNow.Ticks;
-        return $"{avatarPath}?v={version}";
+        var resolved = ProfileAvatarUrlHelper.Resolve(env.ContentRootPath, user.Id, user.AvatarUrl);
+        if (resolved is null) return null;
+
+        if (resolved.RepairedDbPath is not null &&
+            !string.Equals(user.AvatarUrl, resolved.RepairedDbPath, StringComparison.OrdinalIgnoreCase))
+        {
+            user.AvatarUrl = resolved.RepairedDbPath;
+            await userManager.UpdateAsync(user);
+        }
+
+        return ProfileAvatarUrlHelper.BuildPublicUrl(env.ContentRootPath, user.Id, user.AvatarUrl);
     }
 
     [HttpGet("profile")]
@@ -44,9 +53,36 @@ public class MyAccountController(UserManager<AppUser> userManager, AppDbContext 
             MobileNumber = user.PhoneNumber ?? "",
             user.NationalCode,
             user.AboutMe,
-            AvatarUrl = BuildAvatarUrl(user.AvatarUrl)
+            AvatarUrl = await BuildAvatarUrlAsync(user, cancellationToken),
+            HasSignature = !string.IsNullOrWhiteSpace(user.SignatureImagePath),
+            SignatureDisplayDegree = user.SignatureDisplayDegree,
+            SignatureWidthPx = UserSignatureDisplaySize.WidthPxFromDegree(user.SignatureDisplayDegree),
         });
     }
+
+    [HttpGet("signature")]
+    public async Task<IActionResult> GetMySignature()
+    {
+        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        var user = userId is null ? null : await userManager.FindByIdAsync(userId);
+        if (user is null || string.IsNullOrWhiteSpace(user.SignatureImagePath)) return NotFound();
+        if (!FormApprovalSignatureHelper.TryResolveSignatureFile(env, user.SignatureImagePath, out var fullPath))
+            return NotFound();
+        return PhysicalFile(fullPath, "image/png", enableRangeProcessing: true);
+    }
+
+    [HttpPost("signature")]
+    [RequestSizeLimit(3 * 1024 * 1024)]
+    [Consumes("multipart/form-data")]
+    public IActionResult UploadMySignature([FromForm] UploadUserSignatureForm form)
+    {
+        _ = form;
+        return StatusCode(403, new { message = "امضای دیجیتال فقط توسط مدیر سامانه قابل ثبت یا تغییر است" });
+    }
+
+    [HttpDelete("signature")]
+    public IActionResult DeleteMySignature()
+        => StatusCode(403, new { message = "امضای دیجیتال فقط توسط مدیر سامانه قابل ثبت یا تغییر است" });
 
     [HttpPut("profile")]
     public async Task<IActionResult> UpdateProfile([FromBody] UpdateProfileDto dto, CancellationToken cancellationToken)
@@ -116,7 +152,7 @@ public class MyAccountController(UserManager<AppUser> userManager, AppDbContext 
         return Ok(new
         {
             message = "عکس پروفایل با موفقیت ذخیره شد",
-            avatarUrl = BuildAvatarUrl(user.AvatarUrl)
+            avatarUrl = await BuildAvatarUrlAsync(user, cancellationToken)
         });
     }
 
