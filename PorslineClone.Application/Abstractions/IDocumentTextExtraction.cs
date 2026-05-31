@@ -41,5 +41,7 @@ public interface IDocumentContentSearchService
         string query,
         int skip,
         int take,
+        DateTime? createdStartUtc = null,
+        DateTime? createdEndUtc = null,
         CancellationToken cancellationToken = default);
 }

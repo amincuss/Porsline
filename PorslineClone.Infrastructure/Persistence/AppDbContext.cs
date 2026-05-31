@@ -53,11 +53,23 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<DocumentTag> DocumentTags => Set<DocumentTag>();
     public DbSet<DocumentSystemTag> DocumentSystemTags => Set<DocumentSystemTag>();
     public DbSet<DocumentSystemCategory> DocumentSystemCategories => Set<DocumentSystemCategory>();
+    public DbSet<DocumentSystemOrganizationalUnit> DocumentSystemOrganizationalUnits => Set<DocumentSystemOrganizationalUnit>();
+    public DbSet<DocumentSystemProject> DocumentSystemProjects => Set<DocumentSystemProject>();
     public DbSet<DocumentActivity> DocumentActivities => Set<DocumentActivity>();
     public DbSet<DocumentPermissionConfig> DocumentPermissionConfigs => Set<DocumentPermissionConfig>();
     public DbSet<DocumentPermissionEntry> DocumentPermissionEntries => Set<DocumentPermissionEntry>();
     public DbSet<DocumentShareLink> DocumentShareLinks => Set<DocumentShareLink>();
     public DbSet<DocumentVersionText> DocumentVersionTexts => Set<DocumentVersionText>();
+    public DbSet<DocumentWorkflowTemplate> DocumentWorkflowTemplates => Set<DocumentWorkflowTemplate>();
+    public DbSet<DocumentApprovalLink> DocumentApprovalLinks => Set<DocumentApprovalLink>();
+    public DbSet<DocumentRetentionPolicy> DocumentRetentionPolicies => Set<DocumentRetentionPolicy>();
+    public DbSet<DocumentLifecycleSettings> DocumentLifecycleSettings => Set<DocumentLifecycleSettings>();
+    public DbSet<DocumentPublicProfile> DocumentPublicProfiles => Set<DocumentPublicProfile>();
+    public DbSet<PublicCategory> PublicCategories => Set<PublicCategory>();
+    public DbSet<PublicCollection> PublicCollections => Set<PublicCollection>();
+    public DbSet<PublicBanner> PublicBanners => Set<PublicBanner>();
+    public DbSet<PublicPortalSettings> PublicPortalSettings => Set<PublicPortalSettings>();
+    public DbSet<PublicAnalyticsEvent> PublicAnalyticsEvents => Set<PublicAnalyticsEvent>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -635,6 +647,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         builder.Entity<DocumentFolder>(entity =>
         {
             entity.Property(x => x.Name).HasMaxLength(200).IsRequired();
+            entity.Property(x => x.Description).HasMaxLength(500);
             entity.HasOne(x => x.Parent)
                 .WithMany()
                 .HasForeignKey(x => x.ParentId)
@@ -661,7 +674,84 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasIndex(x => new { x.FolderId, x.IsDeleted, x.UpdatedAtUtc });
             entity.HasIndex(x => new { x.OwnerUserId, x.UpdatedAtUtc });
             entity.HasIndex(x => new { x.Category, x.AccessLevel, x.UpdatedAtUtc });
+            entity.HasIndex(x => x.OrganizationalUnitId);
+            entity.HasIndex(x => x.ProjectId);
+            entity.HasOne(x => x.OrganizationalUnit)
+                .WithMany()
+                .HasForeignKey(x => x.OrganizationalUnitId)
+                .OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(x => x.Project)
+                .WithMany()
+                .HasForeignKey(x => x.ProjectId)
+                .OnDelete(DeleteBehavior.SetNull);
+            entity.Property(x => x.WorkflowName).HasMaxLength(200);
+            entity.Property(x => x.StepsJson).HasMaxLength(20000);
+            entity.Property(x => x.PostApprovalJson).HasColumnType("nvarchar(max)");
+            entity.Property(x => x.WorkflowStatus).HasConversion<int>();
+            entity.HasOne(x => x.WorkflowTemplate)
+                .WithMany()
+                .HasForeignKey(x => x.WorkflowTemplateId)
+                .OnDelete(DeleteBehavior.SetNull);
+            entity.HasIndex(x => x.WorkflowTemplateId)
+                .HasFilter("[WorkflowTemplateId] IS NOT NULL");
+            entity.HasIndex(x => new { x.WorkflowStatus, x.CurrentStepOrder });
+            entity.Property(x => x.LegalHoldReason).HasMaxLength(500);
+            entity.Property(x => x.ObsoleteReason).HasMaxLength(500);
+            entity.Property(x => x.ArchiveTier).HasConversion<int>();
+            entity.Property(x => x.LifecycleStatus).HasConversion<int>();
+            entity.HasOne(x => x.RetentionPolicy)
+                .WithMany()
+                .HasForeignKey(x => x.RetentionPolicyId)
+                .OnDelete(DeleteBehavior.SetNull);
+            entity.HasIndex(x => x.IsArchived);
+            entity.HasIndex(x => new { x.LifecycleStatus, x.IsArchived, x.UpdatedAtUtc });
+            entity.HasIndex(x => x.LegalHold).HasFilter("[LegalHold] = 1");
+            entity.HasIndex(x => new { x.ScheduledArchiveAtUtc, x.IsArchived })
+                .HasFilter("[ScheduledArchiveAtUtc] IS NOT NULL AND [IsArchived] = 0");
+            entity.HasIndex(x => new { x.ScheduledDeleteAtUtc, x.LegalHold, x.LongTermRetention })
+                .HasFilter("[ScheduledDeleteAtUtc] IS NOT NULL AND [LegalHold] = 0 AND [LongTermRetention] = 0");
             entity.HasQueryFilter(x => !x.IsDeleted);
+        });
+
+        builder.Entity<DocumentRetentionPolicy>(entity =>
+        {
+            entity.Property(x => x.Name).HasMaxLength(200).IsRequired();
+            entity.Property(x => x.Description).HasMaxLength(500);
+            entity.Property(x => x.CategoryMatch).HasMaxLength(120);
+            entity.Property(x => x.AccessLevelMatch).HasConversion<int?>();
+            entity.HasIndex(x => new { x.IsActive, x.IsDefault, x.SortOrder });
+            entity.HasIndex(x => x.Name).IsUnique();
+        });
+
+        builder.Entity<DocumentLifecycleSettings>(entity =>
+        {
+            entity.HasOne(x => x.DefaultRetentionPolicy)
+                .WithMany()
+                .HasForeignKey(x => x.DefaultRetentionPolicyId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        builder.Entity<DocumentWorkflowTemplate>(entity =>
+        {
+            entity.Property(x => x.Name).HasMaxLength(200).IsRequired();
+            entity.Property(x => x.StepsJson).HasMaxLength(20000);
+            entity.Property(x => x.ActionDirectionKey).HasMaxLength(80);
+            entity.Property(x => x.ActionDirectionLabel).HasMaxLength(200);
+            entity.Property(x => x.ActionAssigneeUserIdsJson).HasColumnType("nvarchar(max)");
+            entity.Property(x => x.CanvasLayoutJson).HasMaxLength(500);
+            entity.HasIndex(x => x.Name).IsUnique();
+            entity.HasIndex(x => new { x.IsActive, x.CreatedAtUtc });
+        });
+
+        builder.Entity<DocumentApprovalLink>(entity =>
+        {
+            entity.Property(x => x.Code).HasMaxLength(32).IsRequired();
+            entity.HasOne(x => x.Document)
+                .WithMany()
+                .HasForeignKey(x => x.DocumentId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(x => x.Code).IsUnique();
+            entity.HasIndex(x => new { x.DocumentId, x.AssigneeUserId, x.IsActive });
         });
 
         builder.Entity<DocumentSystemTag>(entity =>
@@ -678,6 +768,20 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasIndex(x => new { x.IsActive, x.CreatedAtUtc });
         });
 
+        builder.Entity<DocumentSystemOrganizationalUnit>(entity =>
+        {
+            entity.Property(x => x.Name).HasMaxLength(120).IsRequired();
+            entity.HasIndex(x => x.Name).IsUnique().HasFilter("[IsActive] = 1");
+            entity.HasIndex(x => new { x.IsActive, x.CreatedAtUtc });
+        });
+
+        builder.Entity<DocumentSystemProject>(entity =>
+        {
+            entity.Property(x => x.Name).HasMaxLength(120).IsRequired();
+            entity.HasIndex(x => x.Name).IsUnique().HasFilter("[IsActive] = 1");
+            entity.HasIndex(x => new { x.IsActive, x.CreatedAtUtc });
+        });
+
         builder.Entity<DocumentVersion>(entity =>
         {
             entity.Property(x => x.OriginalFileName).HasMaxLength(260).IsRequired();
@@ -685,6 +789,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.Extension).HasMaxLength(16).IsRequired();
             entity.Property(x => x.ContentHashSha256).HasMaxLength(64);
             entity.Property(x => x.ChangeLog).HasMaxLength(500);
+            entity.Property(x => x.EncryptionKeyId).HasMaxLength(32);
+            entity.Property(x => x.FileNonceBase64).HasMaxLength(32);
+            entity.Property(x => x.EncryptedDekBase64).HasMaxLength(256);
+            entity.HasIndex(x => new { x.IsEncrypted, x.EncryptionKeyId });
             entity.HasOne(x => x.Document)
                 .WithMany(x => x.Versions)
                 .HasForeignKey(x => x.DocumentId)
@@ -764,6 +872,96 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.SpecificSubjectIdsJson).HasColumnType("nvarchar(max)");
             entity.HasIndex(x => x.Token).IsUnique();
             entity.HasIndex(x => new { x.ResourceType, x.ResourceId, x.IsRevoked, x.CreatedAtUtc });
+        });
+
+        builder.Entity<DocumentPublicProfile>(entity =>
+        {
+            entity.HasKey(x => x.DocumentId);
+            entity.Property(x => x.Slug).HasMaxLength(200).IsRequired();
+            entity.Property(x => x.Summary).HasMaxLength(500);
+            entity.Property(x => x.PublicDescription).HasMaxLength(4000);
+            entity.Property(x => x.DocumentType).HasMaxLength(80).IsRequired();
+            entity.Property(x => x.CoverImagePath).HasMaxLength(500);
+            entity.Property(x => x.Language).HasMaxLength(10).IsRequired();
+            entity.Property(x => x.SeoTitle).HasMaxLength(200);
+            entity.Property(x => x.SeoDescription).HasMaxLength(500);
+            entity.Property(x => x.SeoKeywords).HasMaxLength(300);
+            entity.Property(x => x.PublicVisibilityStatus).HasConversion<int>();
+            entity.HasOne(x => x.Document)
+                .WithOne()
+                .HasForeignKey<DocumentPublicProfile>(x => x.DocumentId)
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasOne(x => x.PublicCategory)
+                .WithMany()
+                .HasForeignKey(x => x.PublicCategoryId)
+                .OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(x => x.PublicCollection)
+                .WithMany()
+                .HasForeignKey(x => x.PublicCollectionId)
+                .OnDelete(DeleteBehavior.SetNull);
+            entity.HasOne(x => x.PublicVersion)
+                .WithMany()
+                .HasForeignKey(x => x.PublicVersionId)
+                .OnDelete(DeleteBehavior.SetNull);
+            entity.HasIndex(x => x.Slug).IsUnique();
+            entity.HasIndex(x => new { x.PublicVisibilityStatus, x.PublishedAtUtc });
+            entity.HasIndex(x => new { x.PublicCategoryId, x.Featured, x.Pinned });
+            entity.HasIndex(x => new { x.PublicCollectionId, x.PublishedAtUtc });
+            entity.HasIndex(x => x.Language);
+            entity.HasIndex(x => new { x.PublishStartAtUtc, x.PublishEndAtUtc });
+        });
+
+        builder.Entity<PublicCategory>(entity =>
+        {
+            entity.Property(x => x.Name).HasMaxLength(120).IsRequired();
+            entity.Property(x => x.Slug).HasMaxLength(120).IsRequired();
+            entity.Property(x => x.Description).HasMaxLength(1000);
+            entity.Property(x => x.CoverImagePath).HasMaxLength(500);
+            entity.Property(x => x.Icon).HasMaxLength(80);
+            entity.HasIndex(x => x.Slug).IsUnique();
+            entity.HasIndex(x => new { x.IsActive, x.SortOrder });
+        });
+
+        builder.Entity<PublicCollection>(entity =>
+        {
+            entity.Property(x => x.Name).HasMaxLength(120).IsRequired();
+            entity.Property(x => x.Slug).HasMaxLength(120).IsRequired();
+            entity.Property(x => x.Description).HasMaxLength(1000);
+            entity.Property(x => x.CoverImagePath).HasMaxLength(500);
+            entity.HasIndex(x => x.Slug).IsUnique();
+            entity.HasIndex(x => new { x.IsActive, x.Featured, x.SortOrder });
+        });
+
+        builder.Entity<PublicBanner>(entity =>
+        {
+            entity.Property(x => x.Title).HasMaxLength(200).IsRequired();
+            entity.Property(x => x.Subtitle).HasMaxLength(400);
+            entity.Property(x => x.ImagePath).HasMaxLength(500);
+            entity.Property(x => x.CtaLabel).HasMaxLength(80);
+            entity.Property(x => x.CtaUrl).HasMaxLength(500);
+            entity.HasIndex(x => new { x.IsActive, x.SortOrder });
+        });
+
+        builder.Entity<PublicPortalSettings>(entity =>
+        {
+            entity.Property(x => x.SiteTitle).HasMaxLength(200).IsRequired();
+            entity.Property(x => x.LogoPath).HasMaxLength(500);
+            entity.Property(x => x.PrimaryColor).HasMaxLength(20);
+            entity.Property(x => x.SecondaryColor).HasMaxLength(20);
+            entity.Property(x => x.AboutText).HasMaxLength(2000);
+            entity.Property(x => x.ContactEmail).HasMaxLength(200);
+            entity.Property(x => x.ContactPhone).HasMaxLength(40);
+            entity.Property(x => x.FooterLinksJson).HasColumnType("nvarchar(max)");
+            entity.Property(x => x.SocialLinksJson).HasColumnType("nvarchar(max)");
+        });
+
+        builder.Entity<PublicAnalyticsEvent>(entity =>
+        {
+            entity.Property(x => x.EventType).HasConversion<int>();
+            entity.Property(x => x.VisitorKey).HasMaxLength(64);
+            entity.Property(x => x.IpHash).HasMaxLength(64);
+            entity.HasIndex(x => new { x.DocumentId, x.EventType, x.CreatedAtUtc });
+            entity.HasIndex(x => new { x.VisitorKey, x.DocumentId, x.EventType, x.CreatedAtUtc });
         });
 
         // ── Static seed data (captured in migrations via HasData) ────────────────

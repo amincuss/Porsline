@@ -8,7 +8,7 @@ namespace PorslineClone.Infrastructure.Services.Documents;
 
 public sealed class DocumentTextExtractionProcessor(
     AppDbContext db,
-    DocumentFileStorageService storage,
+    IDocumentVersionFileAccess files,
     TextExtractorResolver extractorResolver,
     IFarsiTextNormalizer normalizer,
     ILogger<DocumentTextExtractionProcessor> logger) : IDocumentTextExtractionProcessor
@@ -73,11 +73,11 @@ public sealed class DocumentTextExtractionProcessor(
                 return;
             }
 
-            var fullPath = storage.ResolveFullPath(version.StoredPath);
-            if (!File.Exists(fullPath))
-                throw new FileNotFoundException("فایل فیزیکی یافت نشد", fullPath);
+            if (!files.FileExists(version))
+                throw new FileNotFoundException("فایل فیزیکی یافت نشد", version.StoredPath);
 
-            var extracted = await extractor.ExtractAsync(fullPath, cancellationToken);
+            await using var local = await files.OpenLocalPathAsync(version, cancellationToken);
+            var extracted = await extractor.ExtractAsync(local.Path, cancellationToken);
             var normalized = normalizer.Normalize(extracted);
 
             row.ExtractedText = extracted;

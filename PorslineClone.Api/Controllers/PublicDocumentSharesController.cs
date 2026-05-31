@@ -2,9 +2,10 @@ using System.Security.Claims;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using PorslineClone.Api.Helpers;
+using PorslineClone.Application.Abstractions;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
-using PorslineClone.Infrastructure.Services;
 
 namespace PorslineClone.Api.Controllers;
 
@@ -12,7 +13,7 @@ namespace PorslineClone.Api.Controllers;
 [Route("api/public/document-shares")]
 public class PublicDocumentSharesController(
     AppDbContext db,
-    DocumentFileStorageService storage) : ControllerBase
+    IDocumentVersionFileAccess files) : ControllerBase
 {
     [HttpGet("access")]
     public async Task<IActionResult> Access([FromQuery] string t, CancellationToken ct)
@@ -96,9 +97,11 @@ public class PublicDocumentSharesController(
             .OrderByDescending(x => x.VersionNumber)
             .FirstOrDefaultAsync(ct);
         if (latest is null) return NotFound(new { message = "نسخه فایل یافت نشد" });
-        var fullPath = storage.ResolveFullPath(latest.StoredPath);
-        if (!System.IO.File.Exists(fullPath)) return NotFound(new { message = "فایل فیزیکی یافت نشد" });
-        return PhysicalFile(fullPath, "application/octet-stream", latest.OriginalFileName);
+        var served = await DocumentVersionFileHttpHelper.TryServePhysicalAsync(
+            files, latest, "application/octet-stream", latest.OriginalFileName, inline: false, Response, ct);
+        if (served is null)
+            return NotFound(new { message = "فایل فیزیکی یافت نشد" });
+        return served;
     }
 
     private static HashSet<Guid> ParseSpecificUsers(string? json)

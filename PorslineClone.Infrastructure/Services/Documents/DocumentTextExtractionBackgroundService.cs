@@ -22,31 +22,52 @@ public sealed class DocumentTextExtractionBackgroundService(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        await Task.Delay(StartupDelay, stoppingToken);
+        try
+        {
+            await Task.Delay(StartupDelay, stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            return;
+        }
 
         var channelTask = DrainChannelAsync(stoppingToken);
         var pollTask = PollDatabaseAsync(stoppingToken);
-        await Task.WhenAll(channelTask, pollTask);
+        try
+        {
+            await Task.WhenAll(channelTask, pollTask);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // shutdown عادی
+        }
     }
 
     private async Task DrainChannelAsync(CancellationToken stoppingToken)
     {
-        await foreach (var versionId in queue.Reader.ReadAllAsync(stoppingToken))
+        try
         {
-            try
+            await foreach (var versionId in queue.Reader.ReadAllAsync(stoppingToken))
             {
-                await using var scope = scopeFactory.CreateAsyncScope();
-                var processor = scope.ServiceProvider.GetRequiredService<IDocumentTextExtractionProcessor>();
-                await processor.ProcessVersionAsync(versionId, stoppingToken);
+                try
+                {
+                    await using var scope = scopeFactory.CreateAsyncScope();
+                    var processor = scope.ServiceProvider.GetRequiredService<IDocumentTextExtractionProcessor>();
+                    await processor.ProcessVersionAsync(versionId, stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Channel document text job failed version={VersionId}", versionId);
+                }
             }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Channel document text job failed version={VersionId}", versionId);
-            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // shutdown عادی
         }
     }
 
@@ -80,7 +101,14 @@ public sealed class DocumentTextExtractionBackgroundService(
                 logger.LogError(ex, "Document text extraction poll failed");
             }
 
-            await Task.Delay(PollInterval, stoppingToken);
+            try
+            {
+                await Task.Delay(PollInterval, stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
         }
     }
 }

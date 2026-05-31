@@ -34,3 +34,43 @@ public record DashboardQuickSearchItemDto(
     bool HasOriginalDocument,
     string? FileName,
     IReadOnlyList<ApprovalStepDto> Steps);
+
+public record DashboardKpiDto(
+    string Key,
+    string Label,
+    long Value,
+    string? Hint,
+    string? LinkRoute,
+    string Icon);
+
+public record DashboardTaskItemDto(
+    string Id,
+    string Kind,
+    string Title,
+    string TaskType,
+    string Status,
+    string StatusLabel,
+    DateTime? DueAtUtc,
+    bool IsOverdue,
+    string? Category,
+    string? Priority,
+    string LinkRoute);
+
+public record DashboardActivityItemDto(
+    string Id,
+    string Kind,
+    string ActionType,
+    string Title,
+    string Message,
+    string? ActorName,
+    DateTime AtUtc,
+    string LinkRoute);
+
+public record DashboardSummaryDto(
+    string? UserDisplayName,
+    IReadOnlyList<DashboardKpiDto> Kpis,
+    IReadOnlyList<DashboardTaskItemDto> MyTasks,
+    IReadOnlyList<DashboardTaskItemDto> PendingApprovals,
+    IReadOnlyList<DashboardActivityItemDto> RecentActivity,
+    int MyTasksTotal,
+    int PendingApprovalsTotal);

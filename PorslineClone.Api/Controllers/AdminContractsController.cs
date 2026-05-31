@@ -2113,8 +2113,6 @@ public class CreateContractFormRequest
 
 public record ContractActionRequest(string? Comment, string? RejectionType);
 
-public record AssignWorkflowRequest(string WorkflowTemplateId, string? StartMode, string? ScheduledStartAtUtc);
-
 public record ContractVersionDto(
     Guid Id,
     int VersionNumber,

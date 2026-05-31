@@ -3,19 +3,20 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
-using PorslineClone.Application.ContractTemplates;
-using PorslineClone.Application.FormWordTemplates;
 using PorslineClone.Application.Abstractions;
+using PorslineClone.Application.ContractTemplates;
 using PorslineClone.Application.Contracts;
+using PorslineClone.Application.FormWordTemplates;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
+using PorslineClone.Infrastructure.Services.ContractTemplates;
 
 namespace PorslineClone.Infrastructure.Services.FormWordTemplates;
 
 public class FormWordTemplateService(
     AppDbContext db,
-    IContractDocumentGenerator generator,
     FormWordTemplateFileStorage storage,
+    IContractDocumentGenerator generator,
     IWebHostEnvironment env)
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
@@ -31,6 +32,13 @@ public class FormWordTemplateService(
         return rows.Select(MapListItem).ToList();
     }
 
+    public async Task<FormWordTemplateDetailDto?> GetByFormIdAsync(Guid formId, CancellationToken ct = default)
+    {
+        var row = await db.FormWordTemplates.AsNoTracking()
+            .FirstOrDefaultAsync(x => x.FormId == formId && !x.IsDeleted, ct);
+        return row is null ? null : await GetAsync(row.Id, ct);
+    }
+
     public async Task<FormWordTemplateDetailDto?> GetAsync(Guid id, CancellationToken ct = default)
     {
         var row = await db.FormWordTemplates.AsNoTracking()
@@ -39,57 +47,58 @@ public class FormWordTemplateService(
         return row is null ? null : await MapDetailAsync(row, ct);
     }
 
-    public async Task<FormWordTemplateDetailDto?> GetByFormIdAsync(Guid formId, CancellationToken ct = default)
-    {
-        var row = await db.FormWordTemplates.AsNoTracking()
-            .Include(x => x.Form)
-            .FirstOrDefaultAsync(x => x.FormId == formId && !x.IsDeleted, ct);
-        return row is null ? null : await MapDetailAsync(row, ct);
-    }
-
     public async Task<FormWordTemplateDetailDto> CreateAsync(Guid formId, string name, CancellationToken ct = default)
     {
-        var form = await db.Forms.FirstOrDefaultAsync(x => x.Id == formId && !x.IsDeleted, ct)
+        var form = await db.Forms.AsNoTracking()
+            .FirstOrDefaultAsync(x => x.Id == formId && !x.IsDeleted, ct)
             ?? throw new InvalidOperationException("فرم یافت نشد");
 
-        var exists = await db.FormWordTemplates.AnyAsync(x => x.FormId == formId && !x.IsDeleted, ct);
-        if (exists)
-            throw new InvalidOperationException("برای این فرم قبلاً قالب تبدیل تعریف شده است");
+        if (await db.FormWordTemplates.AnyAsync(x => x.FormId == formId && !x.IsDeleted, ct))
+            throw new InvalidOperationException("برای این فرم قبلاً قالب تبدیل Word تعریف شده است");
+
+        var trashed = await db.FormWordTemplates.FirstOrDefaultAsync(x => x.FormId == formId && x.IsDeleted, ct);
+        if (trashed is not null)
+        {
+            trashed.IsDeleted = false;
+            trashed.Name = (name ?? "قالب تبدیل").Trim();
+            trashed.UpdatedAtUtc = DateTime.UtcNow;
+            await db.SaveChangesAsync(ct);
+            return (await GetAsync(trashed.Id, ct))!;
+        }
 
         var now = DateTime.UtcNow;
         var entity = new FormWordTemplate
         {
             Id = Guid.NewGuid(),
             FormId = formId,
-            Name = name.Trim(),
+            Name = string.IsNullOrWhiteSpace(name) ? "قالب تبدیل" : name.Trim(),
+            DetectedPlaceholdersJson = "[]",
+            FieldMappingsJson = "[]",
             CreatedAtUtc = now,
             UpdatedAtUtc = now,
+            IsDeleted = false,
         };
         db.FormWordTemplates.Add(entity);
         await db.SaveChangesAsync(ct);
-        entity.Form = form;
-        return (await MapDetailAsync(entity, ct))!;
+        return (await GetAsync(entity.Id, ct))!;
     }
 
     public async Task<FormWordTemplateDetailDto> UploadDocxAsync(Guid id, IFormFile file, CancellationToken ct = default)
     {
-        var entity = await db.FormWordTemplates.Include(x => x.Form)
-            .FirstOrDefaultAsync(x => x.Id == id && !x.IsDeleted, ct)
+        ValidateDocx(file);
+        var entity = await db.FormWordTemplates.FirstOrDefaultAsync(x => x.Id == id && !x.IsDeleted, ct)
             ?? throw new InvalidOperationException("قالب یافت نشد");
 
-        if (!file.FileName.EndsWith(".docx", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("فقط فایل Word (.docx) مجاز است");
-
-        var (rel, orig) = await storage.SaveDocxAsync(id, file, ct);
+        var (rel, originalName) = await storage.SaveDocxAsync(id, file, ct);
         var full = storage.ResolveFullPath(rel);
         var placeholders = generator.ScanPlaceholders(full);
 
         entity.DocxFilePath = rel;
-        entity.DocxFileName = orig;
+        entity.DocxFileName = originalName;
         entity.DetectedPlaceholdersJson = JsonSerializer.Serialize(placeholders, JsonOpts);
         entity.UpdatedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
-        return (await MapDetailAsync(entity, ct))!;
+        return (await GetAsync(id, ct))!;
     }
 
     public async Task<FormWordTemplateDetailDto> SaveMappingsAsync(
@@ -99,11 +108,10 @@ public class FormWordTemplateService(
         string? stampPlaceholderKey,
         CancellationToken ct = default)
     {
-        var entity = await db.FormWordTemplates.Include(x => x.Form)
-            .FirstOrDefaultAsync(x => x.Id == id && !x.IsDeleted, ct)
+        var entity = await db.FormWordTemplates.FirstOrDefaultAsync(x => x.Id == id && !x.IsDeleted, ct)
             ?? throw new InvalidOperationException("قالب یافت نشد");
 
-        entity.FieldMappingsJson = JsonSerializer.Serialize(mappings, JsonOpts);
+        entity.FieldMappingsJson = JsonSerializer.Serialize(mappings ?? [], JsonOpts);
         entity.SignaturePlaceholderKey = string.IsNullOrWhiteSpace(signaturePlaceholderKey)
             ? null
             : signaturePlaceholderKey.Trim();
@@ -112,42 +120,35 @@ public class FormWordTemplateService(
             : stampPlaceholderKey.Trim();
         entity.UpdatedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
-        return (await MapDetailAsync(entity, ct))!;
+        return (await GetAsync(id, ct))!;
     }
 
     public async Task<FormWordTemplateDetailDto> UploadSignatureAsync(Guid id, IFormFile file, CancellationToken ct = default)
     {
-        var entity = await db.FormWordTemplates.Include(x => x.Form)
-            .FirstOrDefaultAsync(x => x.Id == id && !x.IsDeleted, ct)
+        ValidateImage(file);
+        var entity = await db.FormWordTemplates.FirstOrDefaultAsync(x => x.Id == id && !x.IsDeleted, ct)
             ?? throw new InvalidOperationException("قالب یافت نشد");
-
-        var rel = await storage.SaveSignatureAsync(id, file, ct);
-        entity.SignatureImagePath = rel;
+        entity.SignatureImagePath = await storage.SaveSignatureAsync(id, file, ct);
         entity.UpdatedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
-        return (await MapDetailAsync(entity, ct))!;
+        return (await GetAsync(id, ct))!;
     }
 
     public async Task<FormWordTemplateDetailDto> UploadStampAsync(Guid id, IFormFile file, CancellationToken ct = default)
     {
-        var entity = await db.FormWordTemplates.Include(x => x.Form)
-            .FirstOrDefaultAsync(x => x.Id == id && !x.IsDeleted, ct)
+        ValidateImage(file);
+        var entity = await db.FormWordTemplates.FirstOrDefaultAsync(x => x.Id == id && !x.IsDeleted, ct)
             ?? throw new InvalidOperationException("قالب یافت نشد");
-
-        var rel = await storage.SaveStampAsync(id, file, ct);
-        entity.StampImagePath = rel;
+        entity.StampImagePath = await storage.SaveStampAsync(id, file, ct);
         entity.UpdatedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
-        return (await MapDetailAsync(entity, ct))!;
+        return (await GetAsync(id, ct))!;
     }
 
-    /// <summary>حذف نرم — فرم از قالب جدا می‌شود و می‌توان قالب جدید برای همان فرم ساخت.</summary>
     public async Task<bool> SoftDeleteAsync(Guid id, CancellationToken ct = default)
     {
-        var entity = await db.FormWordTemplates
-            .FirstOrDefaultAsync(x => x.Id == id && !x.IsDeleted, ct);
+        var entity = await db.FormWordTemplates.FirstOrDefaultAsync(x => x.Id == id && !x.IsDeleted, ct);
         if (entity is null) return false;
-
         entity.IsDeleted = true;
         entity.UpdatedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
@@ -156,19 +157,398 @@ public class FormWordTemplateService(
 
     public async Task<FormWordGroupedSubmissionsDto> GetGroupedSubmissionsAsync(
         Guid? formId,
-        Guid? responderGroupId,
+        Guid? groupId,
         bool ungroupedOnly,
         string? currentUserId,
         bool isAdmin,
         Guid currentUserGuid,
         CancellationToken ct = default)
     {
-        var q = db.FormSubmissions.AsNoTracking()
+        var templates = await ListAsync(ct);
+        if (formId is { } fid && fid != Guid.Empty)
+            templates = templates.Where(t => t.FormId == fid).ToList();
+
+        var q = AuthorizedSubmissionsQuery(currentUserId, currentUserGuid, isAdmin);
+        if (formId is { } formFilter && formFilter != Guid.Empty)
+            q = q.Where(x => x.FormId == formFilter);
+
+        q = ApplyResponderGroupFilter(db, q, groupId, ungroupedOnly);
+
+        var submissions = await q
+            .Include(x => x.Form)
+            .OrderByDescending(x => x.SubmittedAtUtc)
+            .ToListAsync(ct);
+
+        if (submissions.Count == 0)
+            return new FormWordGroupedSubmissionsDto([], templates);
+
+        var submissionIds = submissions.Select(x => x.Id).ToList();
+        var responderIds = submissions.Where(x => x.ResponderId != null).Select(x => x.ResponderId!.Value).Distinct().ToList();
+        var responders = responderIds.Count == 0
+            ? new Dictionary<Guid, Responder>()
+            : await db.Responders.AsNoTracking()
+                .Where(r => responderIds.Contains(r.Id))
+                .ToDictionaryAsync(r => r.Id, ct);
+
+        var latestDocs = await LoadLatestWordDocumentsAsync(submissionIds, ct);
+
+        var memberBySubmission = submissions.ToDictionary(
+            s => s.Id,
+            s =>
+            {
+                responders.TryGetValue(s.ResponderId ?? Guid.Empty, out var responder);
+                latestDocs.TryGetValue(s.Id, out var doc);
+                return MapGroupedMember(s, responder, doc);
+            });
+
+        var groups = new List<FormWordGroupedGroupDto>();
+
+        if (ungroupedOnly)
+        {
+            groups.Add(new FormWordGroupedGroupDto(
+                null,
+                "بدون گروه",
+                submissions.Select(s => memberBySubmission[s.Id]).ToList()));
+        }
+        else if (groupId is { } gid && gid != Guid.Empty)
+        {
+            var group = await db.ResponderGroups.AsNoTracking()
+                .FirstOrDefaultAsync(x => x.Id == gid && !x.IsDeleted, ct);
+            groups.Add(new FormWordGroupedGroupDto(
+                gid,
+                group?.Name ?? "گروه",
+                submissions.Select(s => memberBySubmission[s.Id]).ToList()));
+        }
+        else
+        {
+            var memberships = await (
+                from m in db.ResponderGroupMembers.AsNoTracking()
+                join g in db.ResponderGroups.AsNoTracking() on m.GroupId equals g.Id
+                where responderIds.Contains(m.ResponderId) && !g.IsDeleted && g.IsActive
+                select new { m.ResponderId, m.GroupId, g.Name }
+            ).ToListAsync(ct);
+
+            var groupedResponderIds = memberships.Select(x => x.ResponderId).ToHashSet();
+            var groupDefs = memberships
+                .GroupBy(x => x.GroupId)
+                .Select(g => new { GroupId = g.Key, Name = g.First().Name })
+                .OrderBy(x => x.Name)
+                .ToList();
+
+            foreach (var g in groupDefs)
+            {
+                var memberResponderIds = memberships.Where(x => x.GroupId == g.GroupId).Select(x => x.ResponderId).ToHashSet();
+                var members = submissions
+                    .Where(s => s.ResponderId != null && memberResponderIds.Contains(s.ResponderId.Value))
+                    .Select(s => memberBySubmission[s.Id])
+                    .ToList();
+                if (members.Count > 0)
+                    groups.Add(new FormWordGroupedGroupDto(g.GroupId, g.Name, members));
+            }
+
+            var ungroupedMembers = submissions
+                .Where(s => s.ResponderId == null || !groupedResponderIds.Contains(s.ResponderId.Value))
+                .Select(s => memberBySubmission[s.Id])
+                .ToList();
+            if (ungroupedMembers.Count > 0)
+                groups.Add(new FormWordGroupedGroupDto(null, "بدون گروه", ungroupedMembers));
+        }
+
+        return new FormWordGroupedSubmissionsDto(groups, templates);
+    }
+
+    public async Task<IReadOnlyList<FormSubmissionWordDocument>> GenerateForSubmissionsAsync(
+        Guid templateId,
+        IReadOnlyList<Guid> submissionIds,
+        IReadOnlyList<WordImageOverrideDto>? imageOverrides,
+        CancellationToken ct = default)
+    {
+        if (submissionIds.Count == 0)
+            throw new InvalidOperationException("هیچ پاسخی انتخاب نشده است");
+
+        var template = await LoadTemplateForGenerationAsync(templateId, ct);
+        var mappings = DeserializeMappings(template.FieldMappingsJson);
+        var form = await db.Forms.AsNoTracking()
+            .Include(x => x.Fields)
+            .FirstOrDefaultAsync(x => x.Id == template.FormId, ct)
+            ?? throw new InvalidOperationException("فرم یافت نشد");
+
+        var submissions = await db.FormSubmissions
+            .Where(x => submissionIds.Contains(x.Id))
+            .ToListAsync(ct);
+
+        if (submissions.Count != submissionIds.Count)
+            throw new InvalidOperationException("برخی پاسخ‌ها یافت نشد");
+
+        var responderIds = submissions.Where(x => x.ResponderId != null).Select(x => x.ResponderId!.Value).Distinct().ToList();
+        var responders = responderIds.Count == 0
+            ? new Dictionary<Guid, Responder>()
+            : await db.Responders.AsNoTracking()
+                .Where(r => responderIds.Contains(r.Id))
+                .ToDictionaryAsync(r => r.Id, ct);
+
+        var results = new List<FormSubmissionWordDocument>();
+        foreach (var submission in submissions)
+        {
+            if (submission.FormId != template.FormId)
+                throw new InvalidOperationException("پاسخ انتخاب‌شده مربوط به فرم این قالب نیست");
+
+            responders.TryGetValue(submission.ResponderId ?? Guid.Empty, out var responder);
+            var fieldValues = BuildFieldValues(template, form, submission, responder, mappings, imageOverrides);
+            var doc = await GenerateOneDocumentAsync(template, submission, responder, fieldValues, ct);
+            results.Add(doc);
+        }
+
+        return results;
+    }
+
+    public async Task<(byte[] Bytes, string ZipFileName)> GenerateZipForSubmissionsAsync(
+        Guid templateId,
+        IReadOnlyList<Guid> submissionIds,
+        IReadOnlyList<WordImageOverrideDto>? imageOverrides,
+        CancellationToken ct = default)
+    {
+        await GenerateForSubmissionsAsync(templateId, submissionIds, imageOverrides, ct);
+        return await PackZipFromLatestDocumentsAsync(templateId, submissionIds, ct);
+    }
+
+    public async Task<(byte[] Bytes, string ZipFileName)> PackZipFromLatestDocumentsAsync(
+        Guid templateId,
+        IReadOnlyList<Guid> submissionIds,
+        CancellationToken ct = default)
+    {
+        if (submissionIds.Count == 0)
+            throw new InvalidOperationException("هیچ پاسخی انتخاب نشده است");
+
+        var template = await db.FormWordTemplates.AsNoTracking()
+            .FirstOrDefaultAsync(x => x.Id == templateId && !x.IsDeleted, ct)
+            ?? throw new InvalidOperationException("قالب یافت نشد");
+
+        var latestDocs = await LoadLatestWordDocumentsAsync(submissionIds, ct, templateId);
+        if (latestDocs.Count == 0)
+            throw new InvalidOperationException("فایل Word تولیدشده‌ای یافت نشد — ابتدا تبدیل را انجام دهید");
+
+        var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using var ms = new MemoryStream();
+        using (var zip = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            foreach (var submissionId in submissionIds)
+            {
+                if (!latestDocs.TryGetValue(submissionId, out var doc)) continue;
+                var full = storage.ResolveFullPath(doc.FilePath);
+                if (!File.Exists(full)) continue;
+
+                var entryName = FormWordExportFileNameBuilder.EnsureUnique(doc.FileName, usedNames);
+                var entry = zip.CreateEntry(entryName, CompressionLevel.Fastest);
+                await using var entryStream = entry.Open();
+                await using var fileStream = File.OpenRead(full);
+                await fileStream.CopyToAsync(entryStream, ct);
+            }
+        }
+
+        var zipName = FormWordTemplateFileStorage.SanitizeFileNamePublic($"{template.Name}_{DateTime.UtcNow:yyyyMMddHHmmss}.zip");
+        return (ms.ToArray(), zipName);
+    }
+
+    public string? ResolveExportFullPath(Guid documentId)
+    {
+        var doc = db.FormSubmissionWordDocuments.AsNoTracking().FirstOrDefault(x => x.Id == documentId);
+        if (doc is null || string.IsNullOrWhiteSpace(doc.FilePath)) return null;
+        return storage.ResolveFullPath(doc.FilePath);
+    }
+
+    private async Task<FormSubmissionWordDocument> GenerateOneDocumentAsync(
+        FormWordTemplate template,
+        FormSubmission submission,
+        Responder? responder,
+        IReadOnlyDictionary<string, string> fieldValues,
+        CancellationToken ct)
+    {
+        var sourcePath = storage.ResolveFullPath(template.DocxFilePath!);
+        var tempPath = await generator.GenerateDocxAsync(sourcePath, fieldValues, ct);
+        try
+        {
+            var downloadName = FormWordExportFileNameBuilder.BuildDocxFileName(submission, responder);
+            var (rel, fileName) = await storage.SaveExportAsync(submission.Id, downloadName, tempPath, ct);
+            var entity = new FormSubmissionWordDocument
+            {
+                Id = Guid.NewGuid(),
+                SubmissionId = submission.Id,
+                TemplateId = template.Id,
+                FileName = fileName,
+                FilePath = rel,
+                GeneratedAtUtc = DateTime.UtcNow,
+            };
+            db.FormSubmissionWordDocuments.Add(entity);
+            await db.SaveChangesAsync(ct);
+            return entity;
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+                File.Delete(tempPath);
+        }
+    }
+
+    private async Task<FormWordTemplate> LoadTemplateForGenerationAsync(Guid templateId, CancellationToken ct)
+    {
+        var template = await db.FormWordTemplates.AsNoTracking()
+            .FirstOrDefaultAsync(x => x.Id == templateId && !x.IsDeleted, ct)
+            ?? throw new InvalidOperationException("قالب یافت نشد");
+
+        if (string.IsNullOrWhiteSpace(template.DocxFilePath))
+            throw new InvalidOperationException("ابتدا فایل Word قالب را بارگذاری کنید");
+
+        var full = storage.ResolveFullPath(template.DocxFilePath);
+        if (!File.Exists(full))
+            throw new InvalidOperationException("فایل قالب Word روی دیسک یافت نشد");
+
+        return template;
+    }
+
+    private Dictionary<string, string> BuildFieldValues(
+        FormWordTemplate template,
+        Form form,
+        FormSubmission submission,
+        Responder? responder,
+        IReadOnlyList<FormWordFieldMappingDto> mappings,
+        IReadOnlyList<WordImageOverrideDto>? imageOverrides)
+    {
+        var submissionValues = DeserializeSubmissionFields(submission.FieldsJson);
+        var valuesByLabel = submissionValues
+            .GroupBy(x => x.Label, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.Last().Value ?? "", StringComparer.Ordinal);
+
+        var fieldTypesByLabel = form.Fields
+            .GroupBy(x => x.Label, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.First().FieldType, StringComparer.Ordinal);
+
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var m in mappings)
+        {
+            var key = NormalizeKey(m.PlaceholderKey);
+            if (string.IsNullOrEmpty(key)) continue;
+
+            var imageOverride = imageOverrides?.FirstOrDefault(o =>
+                o.SubmissionId == submission.Id &&
+                string.Equals(o.PlaceholderKey, m.PlaceholderKey, StringComparison.OrdinalIgnoreCase));
+            if (imageOverride is not null)
+            {
+                result[key] = SerializeImageValue(imageOverride.DataUrl, imageOverride.WidthPx);
+                continue;
+            }
+
+            if (string.Equals(m.Source, "adminSignature", StringComparison.OrdinalIgnoreCase))
+            {
+                result[key] = FilePathToImageJson(template.SignatureImagePath, m.ImageWidthPx ?? ContractTemplateImageValue.DefaultWidthPx) ?? "";
+                continue;
+            }
+
+            if (string.Equals(m.Source, "adminStamp", StringComparison.OrdinalIgnoreCase))
+            {
+                result[key] = FilePathToImageJson(template.StampImagePath, m.ImageWidthPx ?? ContractTemplateImageValue.DefaultWidthPx) ?? "";
+                continue;
+            }
+
+            if (string.Equals(m.Source, "fixed", StringComparison.OrdinalIgnoreCase))
+            {
+                result[key] = m.FixedValue ?? "";
+                continue;
+            }
+
+            var label = m.FormFieldLabel?.Trim();
+            if (string.IsNullOrEmpty(label)) continue;
+
+            valuesByLabel.TryGetValue(label, out var rawValue);
+            rawValue ??= "";
+
+            fieldTypesByLabel.TryGetValue(label, out var fieldType);
+            if ((fieldType is FieldType.ImageUpload or FieldType.PersonalPhoto)
+                && FormSubmissionUploadHelper.IsUploadPath(rawValue))
+            {
+                result[key] = UploadPathToImageJson(rawValue, m.ImageWidthPx ?? ContractTemplateImageValue.DefaultWidthPx) ?? "";
+            }
+            else
+            {
+                result[key] = rawValue;
+            }
+        }
+
+        foreach (var ff in form.Fields.Where(x => x.FieldType == FieldType.FixedConstant))
+        {
+            var key = NormalizeKey(ff.Placeholder);
+            if (string.IsNullOrEmpty(key) || result.ContainsKey(key)) continue;
+            result[key] = ff.DefaultValue ?? "";
+        }
+
+        return result;
+    }
+
+    private string? UploadPathToImageJson(string? uploadPath, int widthPx)
+    {
+        if (!FormSubmissionUploadHelper.TryResolveDiskPath(env, uploadPath, out var full))
+            return null;
+        return FileBytesToImageJson(full, widthPx);
+    }
+
+    private string? FilePathToImageJson(string? relativePath, int widthPx)
+    {
+        if (string.IsNullOrWhiteSpace(relativePath)) return null;
+        var full = storage.ResolveFullPath(relativePath);
+        if (!File.Exists(full)) return null;
+        return FileBytesToImageJson(full, widthPx);
+    }
+
+    private static string FileBytesToImageJson(string fullPath, int widthPx)
+    {
+        var bytes = File.ReadAllBytes(fullPath);
+        var ext = Path.GetExtension(fullPath).ToLowerInvariant();
+        var mime = ext switch
+        {
+            ".jpg" or ".jpeg" => "image/jpeg",
+            ".gif" => "image/gif",
+            ".webp" => "image/webp",
+            ".bmp" => "image/bmp",
+            _ => "image/png",
+        };
+        var dataUrl = $"data:{mime};base64,{Convert.ToBase64String(bytes)}";
+        return SerializeImageValue(dataUrl, widthPx);
+    }
+
+    private static string SerializeImageValue(string dataUrl, int widthPx) =>
+        JsonSerializer.Serialize(new
+        {
+            dataUrl,
+            widthPx = ContractTemplateImageValue.ClampWidth(widthPx),
+        }, JsonOpts);
+
+    private async Task<Dictionary<Guid, FormSubmissionWordDocument>> LoadLatestWordDocumentsAsync(
+        IReadOnlyList<Guid> submissionIds,
+        CancellationToken ct,
+        Guid? templateId = null)
+    {
+        if (submissionIds.Count == 0) return [];
+
+        var q = db.FormSubmissionWordDocuments.AsNoTracking()
+            .Where(d => submissionIds.Contains(d.SubmissionId));
+        if (templateId is { } tid && tid != Guid.Empty)
+            q = q.Where(d => d.TemplateId == tid);
+
+        var docs = await q.OrderByDescending(d => d.GeneratedAtUtc).ToListAsync(ct);
+        return docs
+            .GroupBy(d => d.SubmissionId)
+            .ToDictionary(g => g.Key, g => g.First());
+    }
+
+    private IQueryable<FormSubmission> AuthorizedSubmissionsQuery(
+        string? currentUserId,
+        Guid currentUserGuid,
+        bool isAdmin)
+    {
+        var q = db.FormSubmissions
             .Include(x => x.Form)
             .Where(x => x.Form != null && !x.Form.IsDeleted);
-
-        if (formId is { } fid)
-            q = q.Where(x => x.FormId == fid);
 
         if (!isAdmin && currentUserGuid != Guid.Empty)
         {
@@ -179,467 +559,65 @@ public class FormWordTemplateService(
                         l.Id == x.DispatchLinkId && l.SentByUserId == currentUserGuid)));
         }
 
+        return q;
+    }
+
+    private static IQueryable<FormSubmission> ApplyResponderGroupFilter(
+        AppDbContext db,
+        IQueryable<FormSubmission> q,
+        Guid? groupId,
+        bool ungroupedOnly)
+    {
         if (ungroupedOnly)
         {
             var inAnyGroup = db.ResponderGroupMembers.Select(m => m.ResponderId);
-            q = q.Where(x => x.ResponderId == null || !inAnyGroup.Contains(x.ResponderId.Value));
+            return q.Where(x => x.ResponderId == null || !inAnyGroup.Contains(x.ResponderId.Value));
         }
-        else if (responderGroupId is { } gid && gid != Guid.Empty)
+
+        if (groupId is { } gid && gid != Guid.Empty)
         {
             var memberIds = db.ResponderGroupMembers
                 .Where(m => m.GroupId == gid)
                 .Select(m => m.ResponderId);
-            q = q.Where(x => x.ResponderId != null && memberIds.Contains(x.ResponderId.Value));
+            return q.Where(x => x.ResponderId != null && memberIds.Contains(x.ResponderId.Value));
         }
 
-        var submissions = await q.OrderByDescending(x => x.SubmittedAtUtc).ToListAsync(ct);
-        var responderIds = submissions.Where(x => x.ResponderId.HasValue).Select(x => x.ResponderId!.Value).Distinct().ToList();
-
-        var memberRows = responderIds.Count == 0
-            ? []
-            : await db.ResponderGroupMembers.AsNoTracking()
-                .Include(x => x.Group)
-                .Where(x => responderIds.Contains(x.ResponderId))
-                .ToListAsync(ct);
-
-        var groupByResponder = memberRows
-            .GroupBy(x => x.ResponderId)
-            .ToDictionary(g => g.Key, g => g.First());
-
-        var submissionIds = submissions.Select(x => x.Id).ToList();
-        var allDocs = submissionIds.Count == 0
-            ? []
-            : await db.FormSubmissionWordDocuments.AsNoTracking()
-                .Where(x => submissionIds.Contains(x.SubmissionId))
-                .OrderByDescending(x => x.GeneratedAtUtc)
-                .ToListAsync(ct);
-        var docBySubmission = allDocs
-            .GroupBy(x => x.SubmissionId)
-            .ToDictionary(g => g.Key, g => g.First());
-
-        var groupMap = new Dictionary<string, (Guid? GroupId, string GroupName, List<FormWordGroupedMemberDto> Members)>(StringComparer.Ordinal);
-
-        foreach (var s in submissions)
-        {
-            Guid? gid = null;
-            var gname = "بدون گروه";
-            if (s.ResponderId is { } rid && groupByResponder.TryGetValue(rid, out var mem))
-            {
-                gid = mem.GroupId;
-                gname = mem.Group?.Name ?? "گروه";
-            }
-
-            var key = gid?.ToString("N") ?? "_none";
-            if (!groupMap.ContainsKey(key))
-                groupMap[key] = (gid, gname, []);
-
-            docBySubmission.TryGetValue(s.Id, out var doc);
-            groupMap[key].Members.Add(new FormWordGroupedMemberDto(
-                s.Id,
-                s.FormId,
-                s.Form?.Title ?? "",
-                s.SubmitterName ?? "—",
-                s.SubmitterEmail,
-                s.TrackingCode,
-                s.SubmittedAtUtc.ToString("o"),
-                s.Status.ToString(),
-                doc?.Id,
-                doc?.FileName,
-                doc?.GeneratedAtUtc));
-        }
-
-        var groups = groupMap.Values
-            .Select(x => new FormWordGroupedGroupDto(x.GroupId, x.GroupName, x.Members))
-            .OrderBy(g => g.GroupName)
-            .ToList();
-
-        var templates = await ListAsync(ct);
-        if (formId is { } f)
-            templates = templates.Where(t => t.FormId == f).ToList();
-
-        return new FormWordGroupedSubmissionsDto(groups, templates);
+        return q;
     }
 
-    public async Task<IReadOnlyList<FormSubmissionWordDocument>> GenerateForSubmissionsAsync(
-        Guid templateId,
-        IReadOnlyList<Guid>? submissionIds,
-        IReadOnlyList<WordImageOverrideDto>? imageOverrides = null,
-        CancellationToken ct = default)
-    {
-        var template = await db.FormWordTemplates.Include(x => x.Form)
-            .FirstOrDefaultAsync(x => x.Id == templateId && !x.IsDeleted, ct)
-            ?? throw new InvalidOperationException("قالب تبدیل یافت نشد");
-
-        if (string.IsNullOrWhiteSpace(template.DocxFilePath))
-            throw new InvalidOperationException("فایل Word قالب آپلود نشده است");
-
-        var sourcePath = storage.ResolveFullPath(template.DocxFilePath);
-        if (!File.Exists(sourcePath))
-            throw new FileNotFoundException("فایل قالب Word روی سرور یافت نشد");
-
-        var mappings = DeserializeMappings(template.FieldMappingsJson);
-        if (mappings.Count == 0)
-            throw new InvalidOperationException("نگاشت فیلدها به placeholder تنظیم نشده است");
-
-        var q = db.FormSubmissions
-            .Where(x => x.FormId == template.FormId && x.Form != null && !x.Form.IsDeleted);
-
-        if (submissionIds is { Count: > 0 })
-            q = q.Where(x => submissionIds.Contains(x.Id));
-
-        var submissions = await q.ToListAsync(ct);
-        if (submissions.Count == 0)
-            throw new InvalidOperationException("پاسخی برای تولید سند یافت نشد");
-
-        var formFieldDefs = await db.FormFields.AsNoTracking()
-            .Where(f => f.FormId == template.FormId)
-            .ToListAsync(ct);
-
-        var overrideBySubmission = (imageOverrides ?? [])
-            .GroupBy(x => x.SubmissionId)
-            .ToDictionary(
-                g => g.Key,
-                g => g.ToDictionary(
-                    x => NormalizeKey(x.PlaceholderKey),
-                    x => x,
-                    StringComparer.OrdinalIgnoreCase));
-
-        var respondersById = await LoadRespondersForSubmissionsAsync(submissions, ct);
-
-        var results = new List<FormSubmissionWordDocument>();
-        foreach (var submission in submissions)
-        {
-            overrideBySubmission.TryGetValue(submission.Id, out var subOverrides);
-            var values = BuildFieldValues(submission, template, mappings, formFieldDefs, subOverrides);
-            var tempPath = await generator.GenerateDocxAsync(sourcePath, values, ct);
-            try
-            {
-                Responder? responder = null;
-                if (submission.ResponderId is { } rid)
-                    respondersById.TryGetValue(rid, out responder);
-
-                var exportBaseName = Path.GetFileNameWithoutExtension(
-                    FormWordExportFileNameBuilder.BuildDocxFileName(submission, responder));
-                var (rel, fileName) = await storage.SaveExportAsync(submission.Id, exportBaseName, tempPath, ct);
-
-                var doc = new FormSubmissionWordDocument
-                {
-                    Id = Guid.NewGuid(),
-                    SubmissionId = submission.Id,
-                    TemplateId = template.Id,
-                    FileName = fileName,
-                    FilePath = rel,
-                    GeneratedAtUtc = DateTime.UtcNow,
-                };
-                db.FormSubmissionWordDocuments.Add(doc);
-                results.Add(doc);
-            }
-            finally
-            {
-                try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { /* ignore */ }
-            }
-        }
-
-        await db.SaveChangesAsync(ct);
-        return results;
-    }
-
-    public async Task<(byte[] ZipBytes, string ZipFileName)> GenerateZipForSubmissionsAsync(
-        Guid templateId,
-        IReadOnlyList<Guid>? submissionIds,
-        IReadOnlyList<WordImageOverrideDto>? imageOverrides = null,
-        CancellationToken ct = default)
-    {
-        var docs = await GenerateForSubmissionsAsync(templateId, submissionIds, imageOverrides, ct);
-        if (docs.Count == 0)
-            throw new InvalidOperationException("فایلی برای فشرده‌سازی تولید نشد");
-
-        return await BuildZipArchiveAsync(templateId, docs, ct);
-    }
-
-    /// <summary>فقط ZIP از آخرین فایل Word تولیدشده هر پاسخ (پس از مرحله تبدیل).</summary>
-    public async Task<(byte[] ZipBytes, string ZipFileName)> PackZipFromLatestDocumentsAsync(
-        Guid templateId,
-        IReadOnlyList<Guid> submissionIds,
-        CancellationToken ct = default)
-    {
-        if (submissionIds.Count == 0)
-            throw new InvalidOperationException("پاسخی برای فشرده‌سازی انتخاب نشده است");
-
-        var template = await db.FormWordTemplates.AsNoTracking()
-            .FirstOrDefaultAsync(x => x.Id == templateId && !x.IsDeleted, ct)
-            ?? throw new InvalidOperationException("قالب تبدیل یافت نشد");
-
-        var allDocs = await db.FormSubmissionWordDocuments.AsNoTracking()
-            .Where(x => x.TemplateId == templateId && submissionIds.Contains(x.SubmissionId))
-            .OrderByDescending(x => x.GeneratedAtUtc)
-            .ToListAsync(ct);
-
-        var latestBySubmission = allDocs
-            .GroupBy(x => x.SubmissionId)
-            .ToDictionary(g => g.Key, g => g.First());
-
-        var missing = submissionIds.Where(id => !latestBySubmission.ContainsKey(id)).ToList();
-        if (missing.Count > 0)
-            throw new InvalidOperationException(
-                $"برای {missing.Count} نفر هنوز فایل Word تولید نشده — ابتدا تبدیل را کامل کنید");
-
-        var docs = submissionIds.Select(id => latestBySubmission[id]).ToList();
-        return await BuildZipArchiveAsync(templateId, docs, ct);
-    }
-
-    private async Task<(byte[] ZipBytes, string ZipFileName)> BuildZipArchiveAsync(
-        Guid templateId,
-        IReadOnlyList<FormSubmissionWordDocument> docs,
-        CancellationToken ct)
-    {
-        var template = await db.FormWordTemplates.AsNoTracking()
-            .Include(x => x.Form)
-            .FirstAsync(x => x.Id == templateId, ct);
-
-        var docSubmissionIds = docs.Select(d => d.SubmissionId).Distinct().ToList();
-        var submissionsById = await db.FormSubmissions.AsNoTracking()
-            .Where(s => docSubmissionIds.Contains(s.Id))
-            .ToDictionaryAsync(s => s.Id, ct);
-        var respondersById = await LoadRespondersForSubmissionsAsync(submissionsById.Values, ct);
-
-        var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var addedCount = 0;
-        using var ms = new MemoryStream();
-        using (var zip = new ZipArchive(ms, ZipArchiveMode.Create, leaveOpen: true))
-        {
-            foreach (var doc in docs)
-            {
-                var full = storage.ResolveFullPath(doc.FilePath);
-                if (!File.Exists(full)) continue;
-
-                Responder? responder = null;
-                if (submissionsById.TryGetValue(doc.SubmissionId, out var sub)
-                    && sub.ResponderId is { } rid)
-                    respondersById.TryGetValue(rid, out responder);
-
-                var zipEntryName = sub is not null
-                    ? FormWordExportFileNameBuilder.BuildDocxFileName(sub, responder)
-                    : doc.FileName;
-                var entryName = FormWordExportFileNameBuilder.EnsureUnique(zipEntryName, usedNames);
-                var entry = zip.CreateEntry(entryName, CompressionLevel.Fastest);
-                await using var entryStream = entry.Open();
-                await using var fileStream = File.OpenRead(full);
-                await fileStream.CopyToAsync(entryStream, ct);
-                addedCount++;
-            }
-        }
-
-        if (addedCount == 0)
-            throw new InvalidOperationException("فایل Word تولیدشده روی سرور یافت نشد");
-
-        var safeTemplate = FormWordTemplateFileStorage.SanitizeFileNamePublic(template.Name);
-        var zipName = $"{safeTemplate}_{addedCount}nafar_{DateTime.UtcNow:yyyyMMdd_HHmm}.zip";
-        return (ms.ToArray(), zipName);
-    }
-
-    private async Task<Dictionary<Guid, Responder>> LoadRespondersForSubmissionsAsync(
-        IEnumerable<FormSubmission> submissions,
-        CancellationToken ct)
-    {
-        var responderIds = submissions
-            .Where(s => s.ResponderId.HasValue)
-            .Select(s => s.ResponderId!.Value)
-            .Distinct()
-            .ToList();
-        if (responderIds.Count == 0)
-            return new Dictionary<Guid, Responder>();
-
-        return await db.Responders.AsNoTracking()
-            .Where(r => responderIds.Contains(r.Id) && !r.IsDeleted)
-            .ToDictionaryAsync(r => r.Id, ct);
-    }
-
-    public string? ResolveExportFullPath(Guid documentId)
-    {
-        var doc = db.FormSubmissionWordDocuments.AsNoTracking().FirstOrDefault(x => x.Id == documentId);
-        return doc is null ? null : storage.ResolveFullPath(doc.FilePath);
-    }
-
-    private Dictionary<string, string> BuildFieldValues(
+    private static FormWordGroupedMemberDto MapGroupedMember(
         FormSubmission submission,
-        FormWordTemplate template,
-        List<FormWordFieldMappingDto> mappings,
-        List<FormField> formFieldDefs,
-        Dictionary<string, WordImageOverrideDto>? imageOverrides = null)
+        Responder? responder,
+        FormSubmissionWordDocument? latestDoc)
     {
-        var fields = string.IsNullOrWhiteSpace(submission.FieldsJson)
-            ? new List<FormFieldValueDto>()
-            : (JsonSerializer.Deserialize<List<FormFieldValueDto>>(submission.FieldsJson) ?? []);
-
-        var byLabel = fields
-            .GroupBy(f => (f.Label ?? "").Trim(), StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(g => g.Key, g => g.Last().Value ?? "", StringComparer.OrdinalIgnoreCase);
-
-        var defByLabel = formFieldDefs
-            .GroupBy(f => (f.Label ?? "").Trim(), StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
-
-        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var ff in formFieldDefs.Where(f => f.FieldType == FieldType.FixedConstant))
-        {
-            var ph = NormalizeKey(ff.Placeholder ?? "");
-            if (string.IsNullOrEmpty(ph)) continue;
-            result[ph] = ff.DefaultValue ?? "";
-        }
-
-        foreach (var m in mappings)
-        {
-            var key = NormalizeKey(m.PlaceholderKey);
-            if (string.IsNullOrEmpty(key)) continue;
-
-            if (string.Equals(m.Source, "adminSignature", StringComparison.OrdinalIgnoreCase))
-            {
-                if (!string.IsNullOrWhiteSpace(template.SignatureImagePath)
-                    && !string.IsNullOrWhiteSpace(template.SignaturePlaceholderKey)
-                    && string.Equals(NormalizeKey(template.SignaturePlaceholderKey), key, StringComparison.OrdinalIgnoreCase))
-                {
-                    var imgVal = BuildSignatureImageValue(storage, template.SignatureImagePath);
-                    if (imgVal is not null)
-                        result[key] = imgVal;
-                }
-                continue;
-            }
-
-            if (string.Equals(m.Source, "adminStamp", StringComparison.OrdinalIgnoreCase))
-            {
-                if (!string.IsNullOrWhiteSpace(template.StampImagePath)
-                    && !string.IsNullOrWhiteSpace(template.StampPlaceholderKey)
-                    && string.Equals(NormalizeKey(template.StampPlaceholderKey), key, StringComparison.OrdinalIgnoreCase))
-                {
-                    var imgVal = BuildSignatureImageValue(storage, template.StampImagePath);
-                    if (imgVal is not null)
-                        result[key] = imgVal;
-                }
-                continue;
-            }
-
-            if (string.Equals(m.Source, "fixed", StringComparison.OrdinalIgnoreCase))
-            {
-                result[key] = m.FixedValue ?? "";
-                continue;
-            }
-
-            if (string.IsNullOrWhiteSpace(m.FormFieldLabel)) continue;
-            var label = m.FormFieldLabel.Trim();
-
-            if (defByLabel.TryGetValue(label, out var def) && def.FieldType == FieldType.FixedConstant)
-            {
-                result[key] = def.DefaultValue ?? "";
-                continue;
-            }
-
-            if (imageOverrides is not null && imageOverrides.TryGetValue(key, out var ov))
-            {
-                var cropped = BuildImageJsonFromDataUrl(ov.DataUrl, ov.WidthPx);
-                if (cropped is not null)
-                {
-                    result[key] = cropped;
-                    continue;
-                }
-            }
-
-            defByLabel.TryGetValue(label, out var fieldDef);
-            if (fieldDef is not null && IsImageFieldType(fieldDef.FieldType)
-                && byLabel.TryGetValue(label, out var uploadPath)
-                && FormSubmissionUploadHelper.IsUploadPath(uploadPath))
-            {
-                var widthPx = m.ImageWidthPx ?? ContractTemplateImageValue.DefaultWidthPx;
-                var imgVal = BuildImageJsonFromDisk(uploadPath, widthPx);
-                if (imgVal is not null)
-                {
-                    result[key] = imgVal;
-                    continue;
-                }
-            }
-
-            if (byLabel.TryGetValue(label, out var val) && !FormSubmissionUploadHelper.IsUploadPath(val))
-                result[key] = val ?? "";
-        }
-
-        return result;
-    }
-
-    private static bool IsImageFieldType(FieldType ft) =>
-        ft is FieldType.ImageUpload or FieldType.PersonalPhoto;
-
-    private string? BuildImageJsonFromDisk(string? storedPath, int widthPx)
-    {
-        if (!FormSubmissionUploadHelper.TryResolveDiskPath(env, storedPath, out var fullPath))
-            return null;
-        try
-        {
-            var bytes = File.ReadAllBytes(fullPath);
-            var ext = Path.GetExtension(fullPath).ToLowerInvariant();
-            var mime = ext switch
-            {
-                ".jpg" or ".jpeg" => "image/jpeg",
-                ".gif" => "image/gif",
-                ".webp" => "image/webp",
-                _ => "image/png",
-            };
-            var dataUrl = $"data:{mime};base64,{Convert.ToBase64String(bytes)}";
-            return BuildImageJsonFromDataUrl(dataUrl, widthPx);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static string? BuildImageJsonFromDataUrl(string dataUrl, int widthPx)
-    {
-        if (!ContractTemplateImageValue.TryParse(dataUrl, out var payload) && !dataUrl.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase))
-            return null;
-        var w = ContractTemplateImageValue.ClampWidth(widthPx > 0 ? widthPx : ContractTemplateImageValue.DefaultWidthPx);
-        if (payload is not null)
-            return JsonSerializer.Serialize(new { dataUrl = payload.DataUrl, widthPx = w });
-        return JsonSerializer.Serialize(new { dataUrl, widthPx = w });
-    }
-
-    private static string? BuildSignatureImageValue(FormWordTemplateFileStorage fileStorage, string relativeImagePath)
-    {
-        try
-        {
-            var full = fileStorage.ResolveFullPath(relativeImagePath);
-            if (!File.Exists(full)) return null;
-            var bytes = File.ReadAllBytes(full);
-            var ext = Path.GetExtension(full).ToLowerInvariant();
-            var mime = ext switch
-            {
-                ".jpg" or ".jpeg" => "image/jpeg",
-                ".gif" => "image/gif",
-                ".webp" => "image/webp",
-                _ => "image/png",
-            };
-            var dataUrl = $"data:{mime};base64,{Convert.ToBase64String(bytes)}";
-            return JsonSerializer.Serialize(new { dataUrl, widthPx = ContractTemplateImageValue.DefaultWidthPx });
-        }
-        catch
-        {
-            return null;
-        }
+        return new FormWordGroupedMemberDto(
+            submission.Id,
+            submission.FormId,
+            submission.Form?.Title ?? "",
+            submission.SubmitterName ?? responder?.FullName ?? "",
+            submission.SubmitterEmail ?? responder?.MobileNumber,
+            submission.TrackingCode,
+            submission.SubmittedAtUtc.ToString("O"),
+            ToClientStatus(submission.Status),
+            latestDoc?.Id,
+            latestDoc?.FileName,
+            latestDoc?.GeneratedAtUtc);
     }
 
     private async Task<FormWordTemplateDetailDto> MapDetailAsync(FormWordTemplate row, CancellationToken ct)
     {
+        var placeholders = DeserializePlaceholders(row.DetectedPlaceholdersJson);
+        var mappings = DeserializeMappings(row.FieldMappingsJson);
         var formFields = await db.FormFields.AsNoTracking()
-            .Where(f => f.FormId == row.FormId)
-            .OrderBy(f => f.SortOrder)
-            .Select(f => new FormWordFormFieldOptionDto(
-                f.Id,
-                f.Label,
-                (int)f.FieldType,
-                f.FieldType == FieldType.FixedConstant ? f.Placeholder : null))
+            .Where(x => x.FormId == row.FormId)
+            .OrderBy(x => x.SortOrder)
+            .Select(x => new FormWordFormFieldOptionDto(
+                x.Id,
+                x.Label,
+                (int)x.FieldType,
+                x.FieldType == FieldType.FixedConstant ? x.Placeholder : null))
             .ToListAsync(ct);
 
-        var placeholders = DeserializeStringList(row.DetectedPlaceholdersJson);
         return new FormWordTemplateDetailDto(
             row.Id,
             row.FormId,
@@ -647,7 +625,7 @@ public class FormWordTemplateService(
             row.Name,
             row.DocxFileName,
             placeholders,
-            DeserializeMappings(row.FieldMappingsJson),
+            mappings,
             row.SignaturePlaceholderKey,
             !string.IsNullOrWhiteSpace(row.SignatureImagePath),
             row.StampPlaceholderKey,
@@ -658,8 +636,13 @@ public class FormWordTemplateService(
 
     private static FormWordTemplateListItemDto MapListItem(FormWordTemplate row)
     {
-        var placeholders = DeserializeStringList(row.DetectedPlaceholdersJson);
+        var placeholders = DeserializePlaceholders(row.DetectedPlaceholdersJson);
         var mappings = DeserializeMappings(row.FieldMappingsJson);
+        var hasMappings = mappings.Any(m =>
+            !string.IsNullOrWhiteSpace(m.FormFieldLabel)
+            || !string.IsNullOrWhiteSpace(m.Source)
+            || !string.IsNullOrWhiteSpace(m.FixedValue));
+
         return new FormWordTemplateListItemDto(
             row.Id,
             row.FormId,
@@ -667,12 +650,13 @@ public class FormWordTemplateService(
             row.Name,
             placeholders.Count,
             !string.IsNullOrWhiteSpace(row.DocxFilePath),
-            mappings.Count > 0,
+            hasMappings,
             row.UpdatedAtUtc);
     }
 
-    private static List<string> DeserializeStringList(string json)
+    private static List<string> DeserializePlaceholders(string json)
     {
+        if (string.IsNullOrWhiteSpace(json)) return [];
         try
         {
             return JsonSerializer.Deserialize<List<string>>(json, JsonOpts) ?? [];
@@ -685,6 +669,7 @@ public class FormWordTemplateService(
 
     private static List<FormWordFieldMappingDto> DeserializeMappings(string json)
     {
+        if (string.IsNullOrWhiteSpace(json)) return [];
         try
         {
             return JsonSerializer.Deserialize<List<FormWordFieldMappingDto>>(json, JsonOpts) ?? [];
@@ -695,6 +680,48 @@ public class FormWordTemplateService(
         }
     }
 
-    private static string NormalizeKey(string key)
-        => (key ?? "").Trim().ToLowerInvariant().Replace(" ", "_");
+    private static List<FormFieldValueDto> DeserializeSubmissionFields(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return [];
+        try
+        {
+            return JsonSerializer.Deserialize<List<FormFieldValueDto>>(json) ?? [];
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private static string NormalizeKey(string key) =>
+        new string((key ?? "").Trim().Where(ch => char.IsLetterOrDigit(ch) || ch == '_').ToArray()).ToLowerInvariant();
+
+    private static string ToClientStatus(FormSubmissionStatus status) => status switch
+    {
+        FormSubmissionStatus.Pending => "pending",
+        FormSubmissionStatus.InProgress => "in_progress",
+        FormSubmissionStatus.Approved => "approved",
+        FormSubmissionStatus.Rejected => "rejected",
+        FormSubmissionStatus.Submitted => "submitted",
+        _ => "pending",
+    };
+
+    private static void ValidateDocx(IFormFile file)
+    {
+        if (file.Length == 0)
+            throw new InvalidOperationException("فایل خالی است");
+        if (file.Length > 15 * 1024 * 1024)
+            throw new InvalidOperationException("حداکثر حجم قالب ۱۵ مگابایت است");
+        var ext = Path.GetExtension(file.FileName);
+        if (!string.Equals(ext, ".docx", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("فقط فایل Word (.docx) مجاز است");
+    }
+
+    private static void ValidateImage(IFormFile file)
+    {
+        if (file.Length == 0)
+            throw new InvalidOperationException("فایل خالی است");
+        if (file.Length > 5 * 1024 * 1024)
+            throw new InvalidOperationException("حداکثر حجم تصویر ۵ مگابایت است");
+    }
 }

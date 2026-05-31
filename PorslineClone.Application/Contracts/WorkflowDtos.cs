@@ -73,6 +73,25 @@ public record FormWorkflowTemplateDetailDto(
     List<Guid>? ActionAssigneeUserIds = null,
     WorkflowCanvasLayoutDto? CanvasLayout = null);
 
+public record DocumentWorkflowTemplateListItemDto(
+    Guid Id,
+    string Name,
+    int StepCount,
+    bool IsActive,
+    DateTime CreatedAtUtc,
+    Guid? CreatedByUserId = null,
+    string? CreatedByName = null);
+
+public record DocumentWorkflowTemplateDetailDto(
+    Guid Id,
+    string Name,
+    bool IsActive,
+    List<WorkflowStepDto> Steps,
+    string? ActionDirectionKey = null,
+    string? ActionDirectionLabel = null,
+    List<Guid>? ActionAssigneeUserIds = null,
+    WorkflowCanvasLayoutDto? CanvasLayout = null);
+
 public record SaveFormWorkflowLinkRequest(string? WorkflowTemplateId, bool ConnectWorkflow);
 
 public record FormFieldValueDto(string Label, string Value);
@@ -119,3 +138,14 @@ public class ApprovalStepDto
     [JsonIgnore]
     public string? SignatureUrl { get; set; }
 }
+
+public record AssignWorkflowRequest(string WorkflowTemplateId, string? StartMode, string? ScheduledStartAtUtc);
+
+public record BulkAssignFormWorkflowRequest(
+    string WorkflowTemplateId,
+    string? StartMode,
+    string? ScheduledStartAtUtc,
+    List<Guid>? SubmissionIds = null,
+    bool AssignWholeGroup = false,
+    Guid? GroupId = null,
+    bool UngroupedOnly = false);

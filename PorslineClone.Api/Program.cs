@@ -189,6 +189,15 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("contracts.settings.update", p => p.RequireClaim("permission", "contracts.settings.update"));
     options.AddPolicy("contracts.settings.delete", p => p.RequireClaim("permission", "contracts.settings.delete"));
     options.AddPolicy("forms.rules.delete", p => p.RequireClaim("permission", "forms.rules.delete"));
+    options.AddPolicy("documents.workflow.read", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "documents.workflow.read") || ctx.User.HasClaim("permission", "forms.read")));
+    options.AddPolicy("documents.workflow.update", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "documents.workflow.update") || ctx.User.HasClaim("permission", "forms.update")));
+    options.AddPolicy("documents.workflow.delete", p => p.RequireClaim("permission", "documents.workflow.delete"));
+    options.AddPolicy("documents.workflow.restart", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "documents.workflow.restart")
+        || ctx.User.HasClaim("permission", "documents.workflow.update")
+        || ctx.User.HasClaim("permission", "forms.update")));
     options.AddPolicy("settings.delete", p => p.RequireAssertion(ctx =>
         ctx.User.HasClaim("permission", "settings.delete") || ctx.User.HasClaim("permission", "settings.crud")));
     options.AddPolicy("messages.read", p => p.RequireClaim("permission", "messages.read"));
@@ -292,6 +301,21 @@ if (dbStartup.RunMigrations || dbStartup.RunSeed || dbStartup.ApplySchemaPatch)
             if (!dbStartup.ContinueOnMigrationError)
                 throw;
         }
+
+        try
+        {
+            await DatabaseSchemaPatcher.EnsureDocumentWorkflowSchemaAsync(db, logger);
+            await DatabaseSchemaPatcher.EnsureDocumentLifecycleSchemaAsync(db, logger);
+            await DatabaseSchemaPatcher.EnsureDocumentEncryptionSchemaAsync(db, logger);
+            await DatabaseSchemaPatcher.EnsureDocumentClassificationSchemaAsync(db, logger);
+            await DatabaseSchemaPatcher.EnsurePublicDocumentPortalSchemaAsync(db, logger);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Document lifecycle schema patch failed.");
+            if (!dbStartup.ContinueOnMigrationError)
+                throw;
+        }
     }
 
     if (dbStartup.ApplySchemaPatch)
@@ -319,6 +343,7 @@ if (dbStartup.RunMigrations || dbStartup.RunSeed || dbStartup.ApplySchemaPatch)
             logger.LogInformation("Running database seed...");
             await DbSeeder.EnsureReferenceDataAsync(db, roleManager);
             await DbSeeder.SeedAdminUserAsync(db, userManager);
+            await PorslineClone.Infrastructure.Services.Documents.PublicPortalSeedService.SeedDemoContentAsync(db);
             logger.LogInformation("Database seed completed.");
         }
         catch (Exception ex)

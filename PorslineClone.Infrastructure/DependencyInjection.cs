@@ -23,6 +23,7 @@ public static class DependencyInjection
         services.Configure<DatabaseStartupOptions>(configuration.GetSection(DatabaseStartupOptions.SectionName));
         services.Configure<ContractSignatureOptions>(configuration.GetSection(ContractSignatureOptions.SectionName));
         services.Configure<PersianTextNormalizerOptions>(configuration.GetSection(PersianTextNormalizerOptions.SectionName));
+        services.Configure<DocumentEncryptionOptions>(configuration.GetSection(DocumentEncryptionOptions.SectionName));
         services.AddDbContext<AppDbContext>(o => o.UseSqlServer(configuration.GetConnectionString("DefaultConnection")));
 
         services.AddIdentityCore<AppUser>()
@@ -41,8 +42,16 @@ public static class DependencyInjection
         services.AddScoped<ContractActionLinkService>();
         services.AddScoped<ContractPostApprovalService>();
         services.AddScoped<ContractWorkflowProcessor>();
+        services.AddScoped<DocumentApprovalLinkService>();
+        services.AddScoped<DocumentPostApprovalService>();
+        services.AddScoped<DocumentWorkflowProcessor>();
+        services.AddScoped<DocumentWorkflowAssignService>();
+        services.AddScoped<DocumentLifecycleService>();
+        services.AddHostedService<DocumentLifecycleBackgroundService>();
+        services.AddScoped<PublicDocumentPortalService>();
         services.AddScoped<FormPostApprovalService>();
         services.AddScoped<FormWorkflowProcessor>();
+        services.AddScoped<FormSubmissionWorkflowAssignService>();
         services.AddScoped<FormWorkflowRejectionService>();
         services.AddScoped<FormDispatchSubmissionNotifier>();
         services.AddScoped<FormSubmissionApprovalLinkService>();
@@ -59,6 +68,10 @@ public static class DependencyInjection
         services.AddScoped<Services.FormWordTemplates.FormWordBatchExportService>();
         services.AddScoped<IFormWordBatchExportHangfireJob, Services.FormWordTemplates.FormWordBatchExportHangfireJob>();
         services.AddScoped<DocumentFileStorageService>();
+        services.AddSingleton<DocumentMasterKeyProvider>();
+        services.AddSingleton<DocumentEnvelopeEncryptionService>();
+        services.AddScoped<IDocumentVersionFileAccess, DocumentVersionFileAccess>();
+        services.AddScoped<IDocumentEncryptionKeyRotationService, DocumentEncryptionKeyRotationService>();
         services.AddSingleton<FarsiTextNormalizer>();
         services.AddSingleton<IFarsiTextNormalizer>(sp => sp.GetRequiredService<FarsiTextNormalizer>());
         services.AddSingleton<ITextExtractor, PdfFileTextExtractor>();

@@ -348,6 +348,8 @@ public static class DbSeeder
             "usergroups.read","usergroups.read.all","usergroups.add","usergroups.update","usergroups.delete",
             "contracts.read","contracts.read.all","contracts.add","contracts.update","contracts.delete",
             "contracts.settings.read","contracts.settings.update","contracts.settings.delete",
+            "documents.workflow.read","documents.workflow.update","documents.workflow.delete","documents.workflow.restart",
+            "documents.lifecycle.read","documents.lifecycle.update","documents.archive.read",
         }
         .Select(x => x.Trim())
         .Where(x => !string.IsNullOrWhiteSpace(x))
@@ -464,9 +466,12 @@ public static class DbSeeder
             new MenuItem { Key = "responders.groups", Title = "گروه‌بندی", Icon = "Phone", IconColor = "#2563EB", Route = "/admin/responders/groups", Order = 3, ParentId = respondersMenu.Id },
             new MenuItem { Key = "responders.send", Title = "ارسال فرم", Icon = "Send", IconColor = "#4F46E5", Route = "/admin/responders/send", Order = 4, ParentId = respondersMenu.Id },
             new MenuItem { Key = "responders.userforms", Title = "فرم کاربران", Icon = "FileText", IconColor = "#0EA5E9", Route = "/admin/responders/user-forms", Order = 5, ParentId = respondersMenu.Id },
+            new MenuItem { Key = "responders.workflows.list", Title = "گردش‌های ذخیره‌شده", Icon = "GitBranch", IconColor = "#7C3AED", Route = "/admin/forms/workflows/list", Order = 6, ParentId = respondersMenu.Id },
+            new MenuItem { Key = "responders.workflows", Title = "ایجاد گردش", Icon = "GitBranch", IconColor = "#8B5CF6", Route = "/admin/forms/workflows", Order = 7, ParentId = respondersMenu.Id },
+            new MenuItem { Key = "responders.workflow-runs", Title = "لیست گردش کار", Icon = "GitBranch", IconColor = "#0D9488", Route = "/admin/forms/workflow-runs", Order = 8, ParentId = respondersMenu.Id },
             new MenuItem { Key = "users.groups", Title = "گروه‌بندی", Icon = "Users", IconColor = "#2563EB", Route = "/admin/users/groups", Order = 3, ParentId = usersMenuForChild.Id },
             new MenuItem { Key = "settings.users", Title = "تنظیمات کاربران", Icon = "Settings2", IconColor = "#0EA5E9", Route = "/admin/settings/users", Order = 4, ParentId = usersMenuForChild.Id },
-            new MenuItem { Key = "settings.responders", Title = "تنظیمات پاسخگو", Icon = "Settings2", IconColor = "#0EA5E9", Route = "/admin/settings/responders", Order = 6, ParentId = respondersMenu.Id },
+            new MenuItem { Key = "settings.responders", Title = "تنظیمات پاسخگو", Icon = "Settings2", IconColor = "#0EA5E9", Route = "/admin/settings/responders", Order = 9, ParentId = respondersMenu.Id },
             new MenuItem { Key = "profile", Title = "پروفایل", Icon = "User", IconColor = "#0EA5E9", Route = "/admin/profile", Order = 5, ParentId = null },
             new MenuItem { Key = "messages", Title = "صندوق پیام", Icon = "Mail", IconColor = "#A855F7", Route = "/admin/messages", Order = 6, ParentId = null },
         };
@@ -476,7 +481,8 @@ public static class DbSeeder
             if (existing is null)
                 db.MenuItems.Add(new MenuItem { Id = Guid.NewGuid(), Key = rm.Key, Title = rm.Title, Icon = rm.Icon, IconColor = rm.IconColor, Route = rm.Route, Order = rm.Order, ParentId = rm.ParentId });
             else if (rm.Key is "forms.field-builder" or "forms.template-convert" or "forms.workflows" or "forms.workflows.list" or "forms.workflow-runs" or "forms.archive"
-                or "settings.users" or "settings.responders")
+                or "settings.users" or "settings.responders"
+                or "responders.workflows" or "responders.workflows.list" or "responders.workflow-runs")
             {
                 existing.Title = rm.Title;
                 existing.Route = rm.Route;
@@ -543,6 +549,47 @@ public static class DbSeeder
 
         await ReparentActionsMenuUnderContractsAsync(db, contractsMenu.Id, cancellationToken);
 
+        var documentsMenu = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "documents", cancellationToken);
+        if (documentsMenu is null)
+        {
+            documentsMenu = new MenuItem { Id = Guid.NewGuid(), Key = "documents", Title = "مدیریت اسناد", Icon = "FolderOpen", IconColor = "#0891B2", Route = null, Order = 4 };
+            db.MenuItems.Add(documentsMenu);
+            await db.SaveChangesAsync(cancellationToken);
+        }
+        else
+        {
+            documentsMenu.Title = "مدیریت اسناد";
+            documentsMenu.Icon = "FolderOpen";
+            documentsMenu.IconColor = "#0891B2";
+            documentsMenu.Route = null;
+            documentsMenu.Order = 4;
+        }
+        documentsMenu = await db.MenuItems.FirstAsync(x => x.Key == "documents", cancellationToken);
+        var documentChildMenus = new[]
+        {
+            new MenuItem { Key = "documents.explorer", Title = "مدیریت اسناد", Icon = "FolderOpen", IconColor = "#0891B2", Route = "/admin/documents", Order = 1, ParentId = documentsMenu.Id },
+            new MenuItem { Key = "documents.settings", Title = "تنظیمات اسناد", Icon = "Settings2", IconColor = "#6366F1", Route = "/admin/documents/settings", Order = 2, ParentId = documentsMenu.Id },
+            new MenuItem { Key = "documents.workflows.list", Title = "گردش‌های ذخیره‌شده", Icon = "GitBranch", IconColor = "#7C3AED", Route = "/admin/documents/workflows/list", Order = 3, ParentId = documentsMenu.Id },
+            new MenuItem { Key = "documents.workflows", Title = "ایجاد گردش", Icon = "GitBranch", IconColor = "#8B5CF6", Route = "/admin/documents/workflows", Order = 4, ParentId = documentsMenu.Id },
+            new MenuItem { Key = "documents.workflow-runs", Title = "گردش اسناد", Icon = "GitBranch", IconColor = "#0D9488", Route = "/admin/documents/workflow-runs", Order = 5, ParentId = documentsMenu.Id },
+            new MenuItem { Key = "documents.archive", Title = "بایگانی اسناد", Icon = "Archive", IconColor = "#64748B", Route = "/admin/documents/archive", Order = 6, ParentId = documentsMenu.Id },
+        };
+        foreach (var dm in documentChildMenus)
+        {
+            var existing = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == dm.Key, cancellationToken);
+            if (existing is null)
+                db.MenuItems.Add(new MenuItem { Id = Guid.NewGuid(), Key = dm.Key, Title = dm.Title, Icon = dm.Icon, IconColor = dm.IconColor, Route = dm.Route, Order = dm.Order, ParentId = dm.ParentId });
+            else
+            {
+                existing.Title = dm.Title;
+                existing.Route = dm.Route;
+                existing.Order = dm.Order;
+                existing.Icon = dm.Icon;
+                existing.IconColor = dm.IconColor;
+                existing.ParentId = dm.ParentId;
+            }
+        }
+
         // ذخیره منوها قبل از جداول قرارداد — اگر migration هنوز اعمال نشده باشد، منو همچنان ثبت می‌شود
         await db.SaveChangesAsync(cancellationToken);
 
@@ -581,7 +628,7 @@ public static class DbSeeder
         var menus = await db.MenuItems.ToDictionaryAsync(x => x.Key, x => x.Id, cancellationToken);
 
         var adminPerms = permissionNames;
-        var expertPerms = new[] { "menus.view", "profile.update", "messages.read", "messages.delete", "forms.read", "forms.add", "forms.update", "workflow-runs.read", "workflow-runs.update", "actions.read", "actions.update", "responders.send", "contracts.read", "contracts.add", "contracts.update" };
+        var expertPerms = new[] { "menus.view", "profile.update", "messages.read", "messages.delete", "forms.read", "forms.add", "forms.update", "workflow-runs.read", "workflow-runs.update", "actions.read", "actions.update", "responders.send", "contracts.read", "contracts.add", "contracts.update", "documents.workflow.read", "documents.workflow.update", "documents.lifecycle.read", "documents.lifecycle.update", "documents.archive.read" };
         foreach (var p in adminPerms)
             if (perms.TryGetValue(p, out var pid) && !await db.RolePermissions.AnyAsync(x => x.RoleId == admin.Id && x.PermissionId == pid, cancellationToken))
                 db.RolePermissions.Add(new RolePermission { RoleId = admin.Id, PermissionId = pid });
@@ -589,8 +636,8 @@ public static class DbSeeder
             if (perms.TryGetValue(p, out var pid) && !await db.RolePermissions.AnyAsync(x => x.RoleId == expert.Id && x.PermissionId == pid, cancellationToken))
                 db.RolePermissions.Add(new RolePermission { RoleId = expert.Id, PermissionId = pid });
 
-        var adminMenuKeys = new[] { "dashboard", "forms", "forms.list", "forms.field-builder", "forms.template-convert", "forms.rules", "forms.access", "forms.workflows.list", "forms.workflows", "forms.workflow-runs", "forms.archive", "contracts", "contracts.list", "contracts.create", "contracts.workflows.list", "contracts.workflows", "contracts.templates", "contracts.settings", "contracts.archive", "actions.list", "users", "users.list", "users.create", "users.groups", "responders", "responders.list", "responders.create", "responders.groups", "responders.send", "responders.userforms", "settings", "settings.site", "settings.sms", "settings.security", "settings.access", "settings.responders", "settings.users", "profile", "messages" };
-        var expertMenuKeys = new[] { "dashboard", "forms", "forms.list", "forms.rules", "forms.workflows.list", "forms.workflows", "forms.workflow-runs", "contracts", "contracts.list", "contracts.create", "actions.list", "users", "users.list", "responders", "responders.list", "responders.send", "responders.userforms", "profile", "messages" };
+        var adminMenuKeys = new[] { "dashboard", "forms", "forms.list", "forms.field-builder", "forms.template-convert", "forms.rules", "forms.access", "forms.workflows.list", "forms.workflows", "forms.workflow-runs", "forms.archive", "contracts", "contracts.list", "contracts.create", "contracts.workflows.list", "contracts.workflows", "contracts.templates", "contracts.settings", "contracts.archive", "actions.list", "documents", "documents.explorer", "documents.settings", "documents.workflows.list", "documents.workflows", "documents.workflow-runs", "documents.archive", "users", "users.list", "users.create", "users.groups", "responders", "responders.list", "responders.create", "responders.groups", "responders.send", "responders.userforms", "responders.workflows.list", "responders.workflows", "responders.workflow-runs", "settings", "settings.site", "settings.sms", "settings.security", "settings.access", "settings.responders", "settings.users", "profile", "messages" };
+        var expertMenuKeys = new[] { "dashboard", "forms", "forms.list", "forms.rules", "forms.workflows.list", "forms.workflows", "forms.workflow-runs", "contracts", "contracts.list", "contracts.create", "actions.list", "documents", "documents.explorer", "documents.workflows.list", "documents.workflows", "documents.workflow-runs", "documents.archive", "users", "users.list", "responders", "responders.list", "responders.send", "responders.userforms", "responders.workflows.list", "responders.workflows", "responders.workflow-runs", "profile", "messages" };
         foreach (var k in adminMenuKeys)
             if (menus.TryGetValue(k, out var mid) && !await db.RoleMenus.AnyAsync(x => x.RoleId == admin.Id && x.MenuId == mid, cancellationToken))
                 db.RoleMenus.Add(new RoleMenu { RoleId = admin.Id, MenuId = mid });
@@ -599,12 +646,16 @@ public static class DbSeeder
                 db.RoleMenus.Add(new RoleMenu { RoleId = expert.Id, MenuId = mid });
 
         await SyncContractMenusForRolesWithPermissionAsync(db, cancellationToken);
+        await SyncDocumentsWorkflowMenusForRolesWithPermissionAsync(db, cancellationToken);
+        await SyncDocumentsLifecycleMenusForRolesWithPermissionAsync(db, cancellationToken);
         await SyncActionsMenusForRolesWithPermissionAsync(db, cancellationToken);
         await SyncWorkflowRunsMenusForRolesWithPermissionAsync(db, cancellationToken);
+        await SyncRespondersWorkflowMenusForRolesWithPermissionAsync(db, cancellationToken);
         await SyncFormsArchiveMenusForRolesWithPermissionAsync(db, cancellationToken);
         await SyncContractsArchiveMenusForRolesWithPermissionAsync(db, cancellationToken);
 
         await Seeds.EmployerConfirmationFieldGroupSeed.EnsureAsync(db, cancellationToken);
+        await SeedDocumentLifecycleDefaultsAsync(db, cancellationToken);
 
         await db.SaveChangesAsync(cancellationToken);
     }
@@ -714,6 +765,28 @@ public static class DbSeeder
         db.MenuItems.Remove(actionsRoot);
     }
 
+    static async Task<HashSet<(Guid RoleId, Guid MenuId)>> LoadRoleMenuLinkSetAsync(
+        AppDbContext db,
+        IReadOnlyCollection<Guid> roleIds,
+        CancellationToken cancellationToken)
+    {
+        var linked = (await db.RoleMenus
+                .AsNoTracking()
+                .Where(rm => roleIds.Contains(rm.RoleId))
+                .Select(rm => new { rm.RoleId, rm.MenuId })
+                .ToListAsync(cancellationToken))
+            .Select(x => (x.RoleId, x.MenuId))
+            .ToHashSet();
+
+        foreach (var entry in db.ChangeTracker.Entries<RoleMenu>())
+        {
+            if (entry.State is EntityState.Added or EntityState.Modified or EntityState.Unchanged)
+                linked.Add((entry.Entity.RoleId, entry.Entity.MenuId));
+        }
+
+        return linked;
+    }
+
     /// <summary>منوی «اقدامات» را به نقش‌های دارای actions.read وصل می‌کند (زیر گردش قرارداد).</summary>
     public static async Task SyncActionsMenusForRolesWithPermissionAsync(
         AppDbContext db,
@@ -735,19 +808,7 @@ public static class DbSeeder
             .ToListAsync(cancellationToken);
         if (targetRoleIds.Count == 0) return;
 
-        var linked = (await db.RoleMenus
-                .AsNoTracking()
-                .Where(rm => targetRoleIds.Contains(rm.RoleId))
-                .Select(rm => new { rm.RoleId, rm.MenuId })
-                .ToListAsync(cancellationToken))
-            .Select(x => (x.RoleId, x.MenuId))
-            .ToHashSet();
-
-        foreach (var entry in db.ChangeTracker.Entries<RoleMenu>())
-        {
-            if (entry.State is EntityState.Added or EntityState.Unchanged or EntityState.Modified)
-                linked.Add((entry.Entity.RoleId, entry.Entity.MenuId));
-        }
+        var linked = await LoadRoleMenuLinkSetAsync(db, targetRoleIds, cancellationToken);
 
         foreach (var roleId in targetRoleIds)
         {
@@ -780,13 +841,7 @@ public static class DbSeeder
             .ToListAsync(cancellationToken);
         if (targetRoleIds.Count == 0) return;
 
-        var linked = (await db.RoleMenus
-                .AsNoTracking()
-                .Where(rm => targetRoleIds.Contains(rm.RoleId))
-                .Select(rm => new { rm.RoleId, rm.MenuId })
-                .ToListAsync(cancellationToken))
-            .Select(x => (x.RoleId, x.MenuId))
-            .ToHashSet();
+        var linked = await LoadRoleMenuLinkSetAsync(db, targetRoleIds, cancellationToken);
 
         foreach (var roleId in targetRoleIds)
         {
@@ -819,13 +874,7 @@ public static class DbSeeder
             .ToListAsync(cancellationToken);
         if (targetRoleIds.Count == 0) return;
 
-        var linked = (await db.RoleMenus
-                .AsNoTracking()
-                .Where(rm => targetRoleIds.Contains(rm.RoleId))
-                .Select(rm => new { rm.RoleId, rm.MenuId })
-                .ToListAsync(cancellationToken))
-            .Select(x => (x.RoleId, x.MenuId))
-            .ToHashSet();
+        var linked = await LoadRoleMenuLinkSetAsync(db, targetRoleIds, cancellationToken);
 
         foreach (var roleId in targetRoleIds)
         {
@@ -858,17 +907,209 @@ public static class DbSeeder
             .ToListAsync(cancellationToken);
         if (targetRoleIds.Count == 0) return;
 
-        var linked = (await db.RoleMenus
-                .AsNoTracking()
-                .Where(rm => targetRoleIds.Contains(rm.RoleId))
-                .Select(rm => new { rm.RoleId, rm.MenuId })
-                .ToListAsync(cancellationToken))
-            .Select(x => (x.RoleId, x.MenuId))
-            .ToHashSet();
+        var linked = await LoadRoleMenuLinkSetAsync(db, targetRoleIds, cancellationToken);
 
         foreach (var roleId in targetRoleIds)
         {
             foreach (var key in new[] { "forms", "forms.workflow-runs" })
+            {
+                if (!menus.TryGetValue(key, out var menuId)) continue;
+                if (linked.Contains((roleId, menuId))) continue;
+                db.RoleMenus.Add(new RoleMenu { RoleId = roleId, MenuId = menuId });
+                linked.Add((roleId, menuId));
+            }
+        }
+    }
+
+    /// <summary>منوی گردش سند را به نقش‌های دارای documents.workflow.read یا forms.read وصل می‌کند.</summary>
+    public static async Task SyncDocumentsWorkflowMenusForRolesWithPermissionAsync(AppDbContext db, CancellationToken cancellationToken = default)
+    {
+        var menus = await db.MenuItems.ToDictionaryAsync(x => x.Key, x => x.Id, cancellationToken);
+        if (!menus.ContainsKey("documents")) return;
+
+        var permIds = await db.Permissions
+            .Where(p => p.Name == "documents.workflow.read" || p.Name == "documents.workflow.update"
+                || p.Name == "forms.read" || p.Name == "forms.rules.read")
+            .Select(p => p.Id)
+            .ToListAsync(cancellationToken);
+        if (permIds.Count == 0) return;
+
+        var targetRoleIds = await db.RolePermissions
+            .Where(rp => permIds.Contains(rp.PermissionId))
+            .Select(rp => rp.RoleId)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+        if (targetRoleIds.Count == 0) return;
+
+        var linked = await LoadRoleMenuLinkSetAsync(db, targetRoleIds, cancellationToken);
+
+        var settingsPermIds = await db.Permissions
+            .Where(p => p.Name == "documents.workflow.update" || p.Name == "forms.update")
+            .Select(p => p.Id)
+            .ToListAsync(cancellationToken);
+        var roleIdsWithSettings = settingsPermIds.Count == 0
+            ? []
+            : await db.RolePermissions.Where(rp => settingsPermIds.Contains(rp.PermissionId))
+                .Select(rp => rp.RoleId).Distinct().ToListAsync(cancellationToken);
+
+        var menuKeys = new[]
+        {
+            "documents",
+            "documents.explorer",
+            "documents.workflows.list",
+            "documents.workflows",
+            "documents.workflow-runs",
+        };
+
+        foreach (var roleId in targetRoleIds)
+        {
+            foreach (var key in menuKeys)
+            {
+                if (!menus.TryGetValue(key, out var menuId)) continue;
+                if (linked.Contains((roleId, menuId))) continue;
+                db.RoleMenus.Add(new RoleMenu { RoleId = roleId, MenuId = menuId });
+                linked.Add((roleId, menuId));
+            }
+
+            if (roleIdsWithSettings.Contains(roleId) && menus.ContainsKey("documents.settings"))
+            {
+                var settingsMenuId = menus["documents.settings"];
+                if (!linked.Contains((roleId, settingsMenuId)))
+                {
+                    db.RoleMenus.Add(new RoleMenu { RoleId = roleId, MenuId = settingsMenuId });
+                    linked.Add((roleId, settingsMenuId));
+                }
+            }
+        }
+    }
+
+    /// <summary>منوی بایگانی و چرخه عمر سند را به نقش‌های دارای documents.lifecycle.read یا forms.read وصل می‌کند.</summary>
+    public static async Task SyncDocumentsLifecycleMenusForRolesWithPermissionAsync(AppDbContext db, CancellationToken cancellationToken = default)
+    {
+        var menus = await db.MenuItems.ToDictionaryAsync(x => x.Key, x => x.Id, cancellationToken);
+        if (!menus.ContainsKey("documents")) return;
+
+        var permIds = await db.Permissions
+            .Where(p => p.Name == "documents.lifecycle.read" || p.Name == "documents.archive.read"
+                || p.Name == "forms.read")
+            .Select(p => p.Id)
+            .ToListAsync(cancellationToken);
+        if (permIds.Count == 0) return;
+
+        var targetRoleIds = await db.RolePermissions
+            .Where(rp => permIds.Contains(rp.PermissionId))
+            .Select(rp => rp.RoleId)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+        if (targetRoleIds.Count == 0) return;
+
+        var linked = await LoadRoleMenuLinkSetAsync(db, targetRoleIds, cancellationToken);
+        var menuKeys = new[] { "documents", "documents.explorer", "documents.archive" };
+
+        foreach (var roleId in targetRoleIds)
+        {
+            foreach (var key in menuKeys)
+            {
+                if (!menus.TryGetValue(key, out var menuId)) continue;
+                if (linked.Contains((roleId, menuId))) continue;
+                db.RoleMenus.Add(new RoleMenu { RoleId = roleId, MenuId = menuId });
+                linked.Add((roleId, menuId));
+            }
+        }
+    }
+
+    private static async Task SeedDocumentLifecycleDefaultsAsync(AppDbContext db, CancellationToken cancellationToken)
+    {
+        var settingsId = Guid.Parse("a1b2c3d4-e5f6-7890-abcd-ef1234567890");
+        if (!await db.DocumentLifecycleSettings.AnyAsync(cancellationToken))
+        {
+            db.DocumentLifecycleSettings.Add(new DocumentLifecycleSettings
+            {
+                Id = settingsId,
+                AutoProcessEnabled = true,
+                DefaultExpirationWarningDays = 30,
+                ProcessIntervalHours = 6,
+                UpdatedAtUtc = DateTime.UtcNow,
+            });
+        }
+
+        if (!await db.DocumentRetentionPolicies.AnyAsync(cancellationToken))
+        {
+            var standardId = Guid.NewGuid();
+            var longTermId = Guid.NewGuid();
+            var now = DateTime.UtcNow;
+            db.DocumentRetentionPolicies.AddRange(
+                new DocumentRetentionPolicy
+                {
+                    Id = standardId,
+                    Name = "نگهداری استاندارد",
+                    Description = "آرشیو گرم پس از ۱ سال، بایگانی سرد پس از ۲ سال، حذف پس از ۵ سال",
+                    ArchiveAfterDays = 365,
+                    MoveToColdAfterDays = 365,
+                    DeleteAfterDays = 1825,
+                    ExpirationWarningDays = 30,
+                    IsDefault = true,
+                    IsActive = true,
+                    SortOrder = 1,
+                    CreatedAtUtc = now,
+                    UpdatedAtUtc = now,
+                },
+                new DocumentRetentionPolicy
+                {
+                    Id = longTermId,
+                    Name = "نگهداری بلندمدت",
+                    Description = "بدون حذف خودکار — مناسب اسناد حقوقی و تاریخی",
+                    LongTermRetention = true,
+                    IsActive = true,
+                    SortOrder = 2,
+                    CreatedAtUtc = now,
+                    UpdatedAtUtc = now,
+                });
+
+            var settings = await db.DocumentLifecycleSettings.FirstOrDefaultAsync(x => x.Id == settingsId, cancellationToken);
+            if (settings is not null)
+            {
+                settings.DefaultRetentionPolicyId = standardId;
+                settings.UpdatedAtUtc = now;
+            }
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    /// <summary>منوی گردش فرم را زیر «مدیریت پاسخگو» به نقش‌های دارای forms.rules.read یا responders.userforms.workflow وصل می‌کند.</summary>
+    public static async Task SyncRespondersWorkflowMenusForRolesWithPermissionAsync(AppDbContext db, CancellationToken cancellationToken = default)
+    {
+        var menus = await db.MenuItems.ToDictionaryAsync(x => x.Key, x => x.Id, cancellationToken);
+        if (!menus.ContainsKey("responders")) return;
+
+        var permIds = await db.Permissions
+            .Where(p => p.Name == "forms.rules.read" || p.Name == "forms.rules.update"
+                || p.Name == "responders.userforms.workflow" || p.Name == "workflow-runs.read")
+            .Select(p => p.Id)
+            .ToListAsync(cancellationToken);
+        if (permIds.Count == 0) return;
+
+        var targetRoleIds = await db.RolePermissions
+            .Where(rp => permIds.Contains(rp.PermissionId))
+            .Select(rp => rp.RoleId)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+        if (targetRoleIds.Count == 0) return;
+
+        var linked = await LoadRoleMenuLinkSetAsync(db, targetRoleIds, cancellationToken);
+
+        var menuKeys = new[]
+        {
+            "responders",
+            "responders.workflows.list",
+            "responders.workflows",
+            "responders.workflow-runs",
+        };
+
+        foreach (var roleId in targetRoleIds)
+        {
+            foreach (var key in menuKeys)
             {
                 if (!menus.TryGetValue(key, out var menuId)) continue;
                 if (linked.Contains((roleId, menuId))) continue;
@@ -901,19 +1142,7 @@ public static class DbSeeder
 
         if (targetRoleIds.Count == 0) return;
 
-        var linked = (await db.RoleMenus
-                .AsNoTracking()
-                .Where(rm => targetRoleIds.Contains(rm.RoleId))
-                .Select(rm => new { rm.RoleId, rm.MenuId })
-                .ToListAsync(cancellationToken))
-            .Select(x => (x.RoleId, x.MenuId))
-            .ToHashSet();
-
-        foreach (var entry in db.ChangeTracker.Entries<RoleMenu>())
-        {
-            if (entry.State is EntityState.Added or EntityState.Unchanged or EntityState.Modified)
-                linked.Add((entry.Entity.RoleId, entry.Entity.MenuId));
-        }
+        var linked = await LoadRoleMenuLinkSetAsync(db, targetRoleIds, cancellationToken);
 
         foreach (var roleId in targetRoleIds)
         {
@@ -984,19 +1213,7 @@ public static class DbSeeder
         var targetRoleIds = roleIdsWithRead.Union(roleIdsWithAdd).Union(roleIdsWithSettings).Distinct().ToList();
         if (targetRoleIds.Count == 0) return;
 
-        var linked = (await db.RoleMenus
-                .AsNoTracking()
-                .Where(rm => targetRoleIds.Contains(rm.RoleId))
-                .Select(rm => new { rm.RoleId, rm.MenuId })
-                .ToListAsync(cancellationToken))
-            .Select(x => (x.RoleId, x.MenuId))
-            .ToHashSet();
-
-        foreach (var entry in db.ChangeTracker.Entries<RoleMenu>())
-        {
-            if (entry.State is EntityState.Added or EntityState.Unchanged or EntityState.Modified)
-                linked.Add((entry.Entity.RoleId, entry.Entity.MenuId));
-        }
+        var linked = await LoadRoleMenuLinkSetAsync(db, targetRoleIds, cancellationToken);
 
         foreach (var roleId in targetRoleIds)
         {

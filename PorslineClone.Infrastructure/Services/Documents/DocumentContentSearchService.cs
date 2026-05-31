@@ -17,6 +17,8 @@ public sealed class DocumentContentSearchService(
         string query,
         int skip,
         int take,
+        DateTime? createdStartUtc = null,
+        DateTime? createdEndUtc = null,
         CancellationToken cancellationToken = default)
     {
         take = Math.Clamp(take, 1, 100);
@@ -25,16 +27,18 @@ public sealed class DocumentContentSearchService(
         if (string.IsNullOrWhiteSpace(term))
             return (0, Array.Empty<DocumentContentSearchHit>());
 
-        if (await TryFullTextSearchAsync(term, skip, take, cancellationToken) is { } fts)
+        if (await TryFullTextSearchAsync(term, skip, take, createdStartUtc, createdEndUtc, cancellationToken) is { } fts)
             return fts;
 
-        return await FallbackLikeSearchAsync(term, skip, take, cancellationToken);
+        return await FallbackLikeSearchAsync(term, skip, take, createdStartUtc, createdEndUtc, cancellationToken);
     }
 
     private async Task<(int Total, IReadOnlyList<DocumentContentSearchHit>)?> TryFullTextSearchAsync(
         string term,
         int skip,
         int take,
+        DateTime? createdStartUtc,
+        DateTime? createdEndUtc,
         CancellationToken cancellationToken)
     {
         try
@@ -44,16 +48,23 @@ public sealed class DocumentContentSearchService(
             if (conn.State != System.Data.ConnectionState.Open)
                 await conn.OpenAsync(cancellationToken);
 
-            const string countSql = """
+            var dateFilterSql = """
+                AND (@createdStart IS NULL OR d.[CreatedAtUtc] >= @createdStart)
+                AND (@createdEnd IS NULL OR d.[CreatedAtUtc] <= @createdEnd)
+                AND d.[IsArchived] = 0 AND d.[IsObsolete] = 0 AND d.[LifecycleStatus] = 0
+                """;
+
+            var countSql = $"""
                 SELECT COUNT(DISTINCT d.Id)
                 FROM CONTAINSTABLE([dbo].[DocumentVersionTexts], [NormalizedText], @q) AS ft
                 INNER JOIN [dbo].[DocumentVersionTexts] t ON t.[DocumentVersionId] = ft.[KEY]
                 INNER JOIN [dbo].[DocumentVersions] dv ON dv.[Id] = t.[DocumentVersionId]
                 INNER JOIN [dbo].[Documents] d ON d.[Id] = t.[DocumentId]
                 WHERE d.[IsDeleted] = 0 AND t.[ProcessingStatus] = 2
+                {dateFilterSql}
                 """;
 
-            const string dataSql = """
+            var dataSql = $"""
                 SELECT d.[Id], d.[Title], d.[ReferenceNumber], dv.[VersionNumber], dv.[Extension],
                        ft.[Rank] AS [Rank], t.[NormalizedText], t.[ProcessingStatus]
                 FROM CONTAINSTABLE([dbo].[DocumentVersionTexts], [NormalizedText], @q) AS ft
@@ -61,6 +72,7 @@ public sealed class DocumentContentSearchService(
                 INNER JOIN [dbo].[DocumentVersions] dv ON dv.[Id] = t.[DocumentVersionId]
                 INNER JOIN [dbo].[Documents] d ON d.[Id] = t.[DocumentId]
                 WHERE d.[IsDeleted] = 0 AND t.[ProcessingStatus] = 2
+                {dateFilterSql}
                 ORDER BY ft.[Rank] DESC, d.[UpdatedAtUtc] DESC
                 OFFSET @skip ROWS FETCH NEXT @take ROWS ONLY
                 """;
@@ -68,6 +80,7 @@ public sealed class DocumentContentSearchService(
             await using var countCmd = conn.CreateCommand();
             countCmd.CommandText = countSql;
             AddQueryParam(countCmd, "@q", ftsQuery);
+            AddDateFilterParams(countCmd, createdStartUtc, createdEndUtc);
             var totalObj = await countCmd.ExecuteScalarAsync(cancellationToken);
             var total = totalObj is int i ? i : Convert.ToInt32(totalObj ?? 0);
 
@@ -77,6 +90,7 @@ public sealed class DocumentContentSearchService(
             AddQueryParam(dataCmd, "@q", ftsQuery);
             AddQueryParam(dataCmd, "@skip", skip);
             AddQueryParam(dataCmd, "@take", take);
+            AddDateFilterParams(dataCmd, createdStartUtc, createdEndUtc);
 
             await using var reader = await dataCmd.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
@@ -107,6 +121,8 @@ public sealed class DocumentContentSearchService(
         string term,
         int skip,
         int take,
+        DateTime? createdStartUtc,
+        DateTime? createdEndUtc,
         CancellationToken cancellationToken)
     {
         var like = $"%{term}%";
@@ -115,6 +131,12 @@ public sealed class DocumentContentSearchService(
                         && x.NormalizedText != null
                         && EF.Functions.Like(x.NormalizedText, like))
             .Join(db.Documents.AsNoTracking(), t => t.DocumentId, d => d.Id, (t, d) => new { t, d })
+            .Where(x =>
+                x.d.LifecycleStatus == DocumentLifecycleStatus.Active
+                && !x.d.IsArchived
+                && !x.d.IsObsolete)
+            .Where(x => !createdStartUtc.HasValue || x.d.CreatedAtUtc >= createdStartUtc.Value)
+            .Where(x => !createdEndUtc.HasValue || x.d.CreatedAtUtc <= createdEndUtc.Value)
             .Join(db.DocumentVersions.AsNoTracking(), x => x.t.DocumentVersionId, v => v.Id, (x, v) => new
             {
                 x.d.Id,
@@ -156,6 +178,15 @@ public sealed class DocumentContentSearchService(
 
     private static string EscapeFts(string token)
         => token.Replace("\"", "\"\"");
+
+    private static void AddDateFilterParams(
+        System.Data.Common.DbCommand cmd,
+        DateTime? createdStartUtc,
+        DateTime? createdEndUtc)
+    {
+        AddQueryParam(cmd, "@createdStart", createdStartUtc.HasValue ? createdStartUtc.Value : DBNull.Value);
+        AddQueryParam(cmd, "@createdEnd", createdEndUtc.HasValue ? createdEndUtc.Value : DBNull.Value);
+    }
 
     private static void AddQueryParam(System.Data.Common.DbCommand cmd, string name, object value)
     {

@@ -8,8 +8,10 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using PorslineClone.Application.Abstractions;
+using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
+using PorslineClone.Api.Helpers;
 using PorslineClone.Api.Http;
 using PorslineClone.Infrastructure.Services;
 using PorslineClone.Infrastructure.Services.Documents;
@@ -21,10 +23,13 @@ namespace PorslineClone.Api.Controllers;
 [Authorize(Policy = "forms.read")]
 public class AdminDocumentsController(
     AppDbContext db,
-    DocumentFileStorageService storage,
+    IDocumentVersionFileAccess files,
     ILibreOfficeDocumentService libreOffice,
     IDocumentTextExtractionQueue textExtractionQueue,
-    IDocumentContentSearchService contentSearch) : ControllerBase
+    IDocumentContentSearchService contentSearch,
+    DocumentWorkflowProcessor workflowProcessor,
+    DocumentWorkflowAssignService workflowAssignService,
+    DocumentLifecycleService lifecycleService) : ControllerBase
 {
     private const long MaxUploadBytes = 50L * 1024 * 1024;
     private static readonly HashSet<string> AllowedExt = new(StringComparer.OrdinalIgnoreCase)
@@ -42,7 +47,7 @@ public class AdminDocumentsController(
             .OrderBy(x => x.CreatedAtUtc)
             .ToListAsync(ct);
 
-        var fileCounts = await db.Documents.AsNoTracking()
+        var fileCounts = await WhereVisibleInExplorer(db.Documents.AsNoTracking())
             .GroupBy(x => x.FolderId)
             .Select(g => new { FolderId = g.Key, Count = g.Count() })
             .ToDictionaryAsync(x => x.FolderId, x => x.Count, ct);
@@ -64,7 +69,7 @@ public class AdminDocumentsController(
 
         var childFoldersQ = db.DocumentFolders.AsNoTracking()
             .Where(x => x.ParentId == effectiveFolderId);
-        var filesQ = db.Documents.AsNoTracking()
+        var filesQ = WhereVisibleInExplorer(db.Documents.AsNoTracking())
             .Where(x => x.FolderId == effectiveFolderId);
 
         if (!string.IsNullOrWhiteSpace(search))
@@ -92,6 +97,10 @@ public class AdminDocumentsController(
                 x.ReferenceNumber,
                 x.AccessLevel,
                 x.OwnerUserId,
+                x.OrganizationalUnitId,
+                x.ProjectId,
+                organizationalUnitName = x.OrganizationalUnit != null ? x.OrganizationalUnit.Name : null,
+                projectName = x.Project != null ? x.Project.Name : null,
                 x.CreatedAtUtc,
                 x.UpdatedAtUtc,
                 Latest = x.Versions.OrderByDescending(v => v.VersionNumber).Select(v => new
@@ -126,6 +135,10 @@ public class AdminDocumentsController(
                 ext = x.Latest?.Extension,
                 size = x.Latest?.SizeBytes ?? 0,
                 category = x.Category,
+                organizationalUnitId = x.OrganizationalUnitId,
+                organizationalUnitName = x.organizationalUnitName,
+                projectId = x.ProjectId,
+                projectName = x.projectName,
                 referenceNumber = x.ReferenceNumber,
                 accessLevel = x.AccessLevel.ToString(),
                 owner = owners.TryGetValue(x.OwnerUserId, out var ownerName) && !string.IsNullOrWhiteSpace(ownerName)
@@ -300,6 +313,138 @@ public class AdminDocumentsController(
         return Ok(new { message = "دسته‌بندی حذف شد" });
     }
 
+    [HttpGet("settings/organizational-units")]
+    public async Task<IActionResult> GetOrganizationalUnits([FromQuery] string? q, [FromQuery] int take = 100, CancellationToken ct = default)
+    {
+        var term = (q ?? "").Trim();
+        take = Math.Clamp(take, 1, 200);
+        var query = db.DocumentSystemOrganizationalUnits.AsNoTracking().Where(x => x.IsActive);
+        if (!string.IsNullOrWhiteSpace(term))
+        {
+            var like = $"%{term}%";
+            query = query.Where(x => EF.Functions.Like(x.Name, like));
+        }
+
+        var items = await query.OrderBy(x => x.Name).Take(take).Select(x => new { x.Id, x.Name }).ToListAsync(ct);
+        return Ok(items);
+    }
+
+    [HttpPost("settings/organizational-units")]
+    public async Task<IActionResult> CreateOrganizationalUnit([FromBody] CreateSystemTagRequest req, CancellationToken ct)
+    {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var name = (req.Name ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(name)) return BadRequest(new { message = "نام واحد سازمانی الزامی است" });
+        if (name.Length > 120) return BadRequest(new { message = "نام واحد حداکثر ۱۲۰ کاراکتر است" });
+        if (await db.DocumentSystemOrganizationalUnits.AsNoTracking().AnyAsync(x => x.IsActive && x.Name == name, ct))
+            return Conflict(new { message = "این واحد سازمانی قبلا ثبت شده است" });
+
+        var row = new DocumentSystemOrganizationalUnit
+        {
+            Id = Guid.NewGuid(),
+            Name = name,
+            IsActive = true,
+            CreatedByUserId = userId,
+            CreatedAtUtc = DateTime.UtcNow,
+        };
+        db.DocumentSystemOrganizationalUnits.Add(row);
+        await db.SaveChangesAsync(ct);
+        return Ok(new { row.Id, row.Name, message = "واحد سازمانی اضافه شد" });
+    }
+
+    [HttpPatch("settings/organizational-units/{id:guid}")]
+    public async Task<IActionResult> UpdateOrganizationalUnit(Guid id, [FromBody] CreateSystemTagRequest req, CancellationToken ct)
+    {
+        if (!TryGetUserId(out _)) return Unauthorized();
+        var name = (req.Name ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(name)) return BadRequest(new { message = "نام واحد سازمانی الزامی است" });
+        var row = await db.DocumentSystemOrganizationalUnits.FirstOrDefaultAsync(x => x.Id == id && x.IsActive, ct);
+        if (row is null) return NotFound(new { message = "واحد سازمانی یافت نشد" });
+        if (await db.DocumentSystemOrganizationalUnits.AsNoTracking().AnyAsync(x => x.IsActive && x.Name == name && x.Id != id, ct))
+            return Conflict(new { message = "واحد دیگری با این نام وجود دارد" });
+        row.Name = name;
+        await db.SaveChangesAsync(ct);
+        return Ok(new { row.Id, row.Name, message = "واحد سازمانی بروزرسانی شد" });
+    }
+
+    [HttpDelete("settings/organizational-units/{id:guid}")]
+    [Authorize(Policy = "forms.delete")]
+    public async Task<IActionResult> DeleteOrganizationalUnit(Guid id, CancellationToken ct)
+    {
+        if (!TryGetUserId(out _)) return Unauthorized();
+        var row = await db.DocumentSystemOrganizationalUnits.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (row is null) return NotFound(new { message = "واحد سازمانی یافت نشد" });
+        row.IsActive = false;
+        await db.SaveChangesAsync(ct);
+        return Ok(new { message = "واحد سازمانی حذف شد" });
+    }
+
+    [HttpGet("settings/projects")]
+    public async Task<IActionResult> GetProjects([FromQuery] string? q, [FromQuery] int take = 100, CancellationToken ct = default)
+    {
+        var term = (q ?? "").Trim();
+        take = Math.Clamp(take, 1, 200);
+        var query = db.DocumentSystemProjects.AsNoTracking().Where(x => x.IsActive);
+        if (!string.IsNullOrWhiteSpace(term))
+        {
+            var like = $"%{term}%";
+            query = query.Where(x => EF.Functions.Like(x.Name, like));
+        }
+
+        var items = await query.OrderBy(x => x.Name).Take(take).Select(x => new { x.Id, x.Name }).ToListAsync(ct);
+        return Ok(items);
+    }
+
+    [HttpPost("settings/projects")]
+    public async Task<IActionResult> CreateProject([FromBody] CreateSystemTagRequest req, CancellationToken ct)
+    {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var name = (req.Name ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(name)) return BadRequest(new { message = "نام پروژه الزامی است" });
+        if (name.Length > 120) return BadRequest(new { message = "نام پروژه حداکثر ۱۲۰ کاراکتر است" });
+        if (await db.DocumentSystemProjects.AsNoTracking().AnyAsync(x => x.IsActive && x.Name == name, ct))
+            return Conflict(new { message = "این پروژه قبلا ثبت شده است" });
+
+        var row = new DocumentSystemProject
+        {
+            Id = Guid.NewGuid(),
+            Name = name,
+            IsActive = true,
+            CreatedByUserId = userId,
+            CreatedAtUtc = DateTime.UtcNow,
+        };
+        db.DocumentSystemProjects.Add(row);
+        await db.SaveChangesAsync(ct);
+        return Ok(new { row.Id, row.Name, message = "پروژه اضافه شد" });
+    }
+
+    [HttpPatch("settings/projects/{id:guid}")]
+    public async Task<IActionResult> UpdateProject(Guid id, [FromBody] CreateSystemTagRequest req, CancellationToken ct)
+    {
+        if (!TryGetUserId(out _)) return Unauthorized();
+        var name = (req.Name ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(name)) return BadRequest(new { message = "نام پروژه الزامی است" });
+        var row = await db.DocumentSystemProjects.FirstOrDefaultAsync(x => x.Id == id && x.IsActive, ct);
+        if (row is null) return NotFound(new { message = "پروژه یافت نشد" });
+        if (await db.DocumentSystemProjects.AsNoTracking().AnyAsync(x => x.IsActive && x.Name == name && x.Id != id, ct))
+            return Conflict(new { message = "پروژه دیگری با این نام وجود دارد" });
+        row.Name = name;
+        await db.SaveChangesAsync(ct);
+        return Ok(new { row.Id, row.Name, message = "پروژه بروزرسانی شد" });
+    }
+
+    [HttpDelete("settings/projects/{id:guid}")]
+    [Authorize(Policy = "forms.delete")]
+    public async Task<IActionResult> DeleteProject(Guid id, CancellationToken ct)
+    {
+        if (!TryGetUserId(out _)) return Unauthorized();
+        var row = await db.DocumentSystemProjects.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (row is null) return NotFound(new { message = "پروژه یافت نشد" });
+        row.IsActive = false;
+        await db.SaveChangesAsync(ct);
+        return Ok(new { message = "پروژه حذف شد" });
+    }
+
     [HttpPost("settings/reference-preview")]
     public IActionResult PreviewSystemReferences([FromBody] PreviewReferenceRequest? req)
     {
@@ -315,8 +460,9 @@ public class AdminDocumentsController(
         var owners = (req.OwnerIds ?? []).Where(x => x != Guid.Empty).Distinct().ToList();
         var tags = (req.Tags ?? []).Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct().ToList();
         var types = (req.Types ?? []).Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim().ToLowerInvariant()).Distinct().ToList();
+        var categoryFilter = (req.Category ?? "").Trim();
 
-        var q = db.Documents.AsNoTracking().AsQueryable();
+        var q = WhereVisibleInExplorer(db.Documents.AsNoTracking());
         if (req.CreatedStartUtc.HasValue)
             q = q.Where(x => x.CreatedAtUtc >= req.CreatedStartUtc.Value);
         if (req.CreatedEndUtc.HasValue)
@@ -332,6 +478,12 @@ public class AdminDocumentsController(
             q = q.Where(x => x.Tags.Any(t => tags.Contains(t.Tag)));
         if (types.Count > 0)
             q = q.Where(x => x.Versions.OrderByDescending(v => v.VersionNumber).Select(v => v.Extension).Take(1).Any(ext => types.Contains(ext)));
+        if (!string.IsNullOrWhiteSpace(categoryFilter))
+            q = q.Where(x => x.Category == categoryFilter);
+        if (req.OrganizationalUnitId.HasValue)
+            q = q.Where(x => x.OrganizationalUnitId == req.OrganizationalUnitId.Value);
+        if (req.ProjectId.HasValue)
+            q = q.Where(x => x.ProjectId == req.ProjectId.Value);
 
         var rows = await q
             .Select(x => new
@@ -339,6 +491,8 @@ public class AdminDocumentsController(
                 x.Id,
                 x.Title,
                 x.Category,
+                organizationalUnitName = x.OrganizationalUnit != null ? x.OrganizationalUnit.Name : null,
+                projectName = x.Project != null ? x.Project.Name : null,
                 x.ReferenceNumber,
                 x.ManualReferenceNumber,
                 x.OwnerUserId,
@@ -376,6 +530,8 @@ public class AdminDocumentsController(
                     x.Id,
                     x.Title,
                     x.Category,
+                    x.organizationalUnitName,
+                    x.projectName,
                     x.ReferenceNumber,
                     x.ManualReferenceNumber,
                     owner = ownerName,
@@ -392,6 +548,42 @@ public class AdminDocumentsController(
             })
             .Where(x => x.isMatch)
             .ToList();
+
+        if (!string.IsNullOrWhiteSpace(query))
+        {
+            var (_, contentHits) = await contentSearch.SearchAsync(
+                query, 0, 200, req.CreatedStartUtc, req.CreatedEndUtc, ct);
+            var rowById = rows.ToDictionary(x => x.Id);
+            var existingIds = matched.Select(x => x.Id).ToHashSet();
+            foreach (var hit in contentHits)
+            {
+                if (existingIds.Contains(hit.DocumentId)) continue;
+                if (!rowById.TryGetValue(hit.DocumentId, out var row)) continue;
+                var ownerName = ownerMap.GetValueOrDefault(row.OwnerUserId, "—");
+                if (string.IsNullOrWhiteSpace(ownerName)) ownerName = "—";
+                matched.Add(new
+                {
+                    row.Id,
+                    row.Title,
+                    row.Category,
+                    row.organizationalUnitName,
+                    row.projectName,
+                    row.ReferenceNumber,
+                    row.ManualReferenceNumber,
+                    owner = ownerName,
+                    row.CreatedAtUtc,
+                    row.UpdatedAtUtc,
+                    row.accessLevel,
+                    ext = row.latest?.Extension,
+                    size = row.latest?.SizeBytes ?? 0,
+                    tags = row.tags,
+                    snippet = hit.Snippet,
+                    isMatch = true,
+                    relevance = (int)Math.Round(hit.Rank),
+                });
+                existingIds.Add(hit.DocumentId);
+            }
+        }
 
         var sort = (req.Sort ?? "relevance").Trim().ToLowerInvariant();
         matched = sort switch
@@ -445,10 +637,15 @@ public class AdminDocumentsController(
         if (exists)
             return Conflict(new { message = "پوشه‌ای با همین نام از قبل وجود دارد" });
 
+        var description = string.IsNullOrWhiteSpace(req.Description) ? null : req.Description.Trim();
+        if (description?.Length > 500)
+            return BadRequest(new { message = "توضیح پوشه حداکثر ۵۰۰ کاراکتر است" });
+
         var folder = new DocumentFolder
         {
             Id = Guid.NewGuid(),
             Name = name,
+            Description = description,
             ParentId = parentId,
             CreatedByUserId = userId,
             CreatedAtUtc = DateTime.UtcNow,
@@ -549,25 +746,38 @@ public class AdminDocumentsController(
                 CreatedAtUtc = DateTime.UtcNow,
                 UpdatedAtUtc = DateTime.UtcNow,
             };
+            if (md?.OrganizationalUnitId is Guid ouId)
+            {
+                if (!await db.DocumentSystemOrganizationalUnits.AsNoTracking().AnyAsync(x => x.Id == ouId && x.IsActive, ct))
+                    return BadRequest(new { message = $"واحد سازمانی نامعتبر برای فایل {file.FileName}" });
+                doc.OrganizationalUnitId = ouId;
+            }
+            if (md?.ProjectId is Guid projId)
+            {
+                if (!await db.DocumentSystemProjects.AsNoTracking().AnyAsync(x => x.Id == projId && x.IsActive, ct))
+                    return BadRequest(new { message = $"پروژه نامعتبر برای فایل {file.FileName}" });
+                doc.ProjectId = projId;
+            }
             db.Documents.Add(doc);
 
             var versionId = Guid.NewGuid();
             var contentHash = await DocumentTextIndexHelper.ComputeSha256HexAsync(file, ct);
-            var saved = await storage.SaveAsync(doc.Id, 1, file, ct);
-            db.DocumentVersions.Add(new DocumentVersion
+            var saved = await files.SaveFromFormFileAsync(doc.Id, 1, file, ct);
+            var version = new DocumentVersion
             {
                 Id = versionId,
                 DocumentId = doc.Id,
                 VersionNumber = 1,
-                OriginalFileName = saved.originalFileName,
-                StoredPath = saved.relativePath,
-                Extension = saved.extension,
-                SizeBytes = file.Length,
+                OriginalFileName = saved.OriginalFileName,
+                StoredPath = saved.RelativePath,
+                Extension = saved.Extension,
                 ContentHashSha256 = contentHash,
                 ChangeLog = string.IsNullOrWhiteSpace(md?.ChangeLog) ? "نسخه اولیه" : md!.ChangeLog!.Trim(),
                 UploadedByUserId = userId,
                 UploadedAtUtc = DateTime.UtcNow,
-            });
+            };
+            DocumentVersionEncryptionMetadata.Apply(version, saved);
+            db.DocumentVersions.Add(version);
 
             foreach (var tag in (md?.Tags ?? []).Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct())
             {
@@ -591,6 +801,13 @@ public class AdminDocumentsController(
         }
 
         await db.SaveChangesAsync(ct);
+        foreach (var docId in createdIds)
+        {
+            var doc = await db.Documents.FirstAsync(x => x.Id == docId, ct);
+            await lifecycleService.ApplyMatchingPolicyAsync(doc, ct);
+        }
+        if (createdIds.Count > 0)
+            await db.SaveChangesAsync(ct);
         await DocumentTextIndexHelper.EnqueueAfterSaveAsync(textExtractionQueue, versionIdsToIndex, ct);
         return Ok(new { message = "آپلود اسناد با موفقیت انجام شد", ids = createdIds });
     }
@@ -640,12 +857,12 @@ public class AdminDocumentsController(
             .Select(x => new { id = x.Id, name = x.Name, parentId = x.ParentId })
             .ToListAsync(ct);
 
-        var files = await db.Documents.AsNoTracking()
-            .Where(x => !x.IsDeleted && (
+        var files = await WhereVisibleInExplorer(db.Documents.AsNoTracking())
+            .Where(x =>
                 EF.Functions.Like(x.Title, like)
                 || EF.Functions.Like(x.ReferenceNumber ?? "", like)
                 || EF.Functions.Like(x.ManualReferenceNumber ?? "", like)
-                || x.Versions.Any(v => EF.Functions.Like(v.OriginalFileName, like))))
+                || x.Versions.Any(v => EF.Functions.Like(v.OriginalFileName, like)))
             .OrderByDescending(x => x.UpdatedAtUtc)
             .Take(take)
             .Select(x => new
@@ -667,9 +884,11 @@ public class AdminDocumentsController(
         [FromQuery] string q,
         [FromQuery] int skip = 0,
         [FromQuery] int take = 20,
+        [FromQuery] DateTime? createdStartUtc = null,
+        [FromQuery] DateTime? createdEndUtc = null,
         CancellationToken ct = default)
     {
-        var (total, items) = await contentSearch.SearchAsync(q, skip, take, ct);
+        var (total, items) = await contentSearch.SearchAsync(q, skip, take, createdStartUtc, createdEndUtc, ct);
         return Ok(new
         {
             total,
@@ -690,6 +909,8 @@ public class AdminDocumentsController(
     [HttpGet("{id:guid}")]
     public async Task<IActionResult> Detail(Guid id, CancellationToken ct)
     {
+        await ProcessDueScheduledWorkflowStartsAsync(ct);
+
         var doc = await db.Documents.AsNoTracking()
             .Where(x => x.Id == id)
             .Select(x => new
@@ -698,6 +919,10 @@ public class AdminDocumentsController(
                 x.FolderId,
                 x.Title,
                 x.Category,
+                x.OrganizationalUnitId,
+                organizationalUnitName = x.OrganizationalUnit != null ? x.OrganizationalUnit.Name : null,
+                x.ProjectId,
+                projectName = x.Project != null ? x.Project.Name : null,
                 x.DocumentDateUtc,
                 x.ReferenceNumber,
                 x.ManualReferenceNumber,
@@ -706,6 +931,34 @@ public class AdminDocumentsController(
                 x.OwnerUserId,
                 x.CreatedAtUtc,
                 x.UpdatedAtUtc,
+                x.WorkflowStatus,
+                x.WorkflowTemplateId,
+                x.WorkflowName,
+                x.StepsJson,
+                x.CurrentStepOrder,
+                x.WorkflowStartedAtUtc,
+                x.WorkflowScheduledStartAtUtc,
+                x.PostApprovalJson,
+                x.WorkflowRunCycle,
+                x.WorkflowRunsHistoryJson,
+                x.WorkflowRejectionJson,
+                x.ExpiresAtUtc,
+                x.RetentionPolicyId,
+                retentionPolicyName = x.RetentionPolicy != null ? x.RetentionPolicy.Name : null,
+                archiveTier = x.ArchiveTier.ToString(),
+                lifecycleStatus = x.LifecycleStatus.ToString(),
+                x.IsArchived,
+                x.ArchivedAtUtc,
+                x.LegalHold,
+                x.LegalHoldReason,
+                x.LegalHoldStartedAtUtc,
+                x.IsObsolete,
+                x.ObsoleteAtUtc,
+                x.ObsoleteReason,
+                x.ScheduledArchiveAtUtc,
+                x.ScheduledDeleteAtUtc,
+                x.LongTermRetention,
+                x.LifecycleWarningSentAtUtc,
                 versions = x.Versions.OrderByDescending(v => v.VersionNumber).Select(v => new
                 {
                     v.Id,
@@ -743,12 +996,36 @@ public class AdminDocumentsController(
             db.DocumentActivities.Add(CreateAudit(id, "Read/View", "نمایش جزئیات سند", readerId));
             await db.SaveChangesAsync(ct);
         }
+
+        var steps = DocumentWorkflowProcessor.DeserializeSteps(doc.StepsJson);
+        Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var currentUserGuid);
+        var isOwner = doc.OwnerUserId == currentUserGuid;
+        var workflowDocument = new Document
+        {
+            Id = doc.Id,
+            WorkflowStatus = doc.WorkflowStatus,
+            WorkflowTemplateId = doc.WorkflowTemplateId,
+            WorkflowName = doc.WorkflowName,
+            StepsJson = doc.StepsJson,
+            CurrentStepOrder = doc.CurrentStepOrder,
+            WorkflowStartedAtUtc = doc.WorkflowStartedAtUtc,
+            WorkflowScheduledStartAtUtc = doc.WorkflowScheduledStartAtUtc,
+            WorkflowRejectionJson = doc.WorkflowRejectionJson,
+            WorkflowRunCycle = doc.WorkflowRunCycle,
+            OwnerUserId = doc.OwnerUserId,
+        };
+        var actionState = PostApprovalJsonHelper.DeserializeState(doc.PostApprovalJson);
+
         return Ok(new
         {
             doc.Id,
             folderId = doc.FolderId,
             doc.Title,
             doc.Category,
+            organizationalUnitId = doc.OrganizationalUnitId,
+            organizationalUnitName = doc.organizationalUnitName,
+            projectId = doc.ProjectId,
+            projectName = doc.projectName,
             doc.DocumentDateUtc,
             doc.ReferenceNumber,
             doc.ManualReferenceNumber,
@@ -760,7 +1037,160 @@ public class AdminDocumentsController(
             doc.versions,
             doc.tags,
             activity,
+            workflowStatus = ToWorkflowClientStatus(doc.WorkflowStatus),
+            doc.WorkflowName,
+            doc.WorkflowTemplateId,
+            doc.WorkflowStartedAtUtc,
+            doc.WorkflowScheduledStartAtUtc,
+            doc.CurrentStepOrder,
+            doc.WorkflowRunCycle,
+            CanAssignWorkflow = DocumentWorkflowAccessRules.CanAssignWorkflow(workflowDocument),
+            CanUnassignWorkflow = DocumentWorkflowAccessRules.CanUnassignWorkflow(workflowDocument),
+            CanStartWorkflow = DocumentWorkflowAccessRules.CanStartWorkflow(workflowDocument),
+            WorkflowRejection = DocumentWorkflowRejectionHelper.BuildView(workflowDocument, isOwner),
+            WorkflowRunsHistory = DocumentWorkflowRunHistoryHelper.Deserialize(doc.WorkflowRunsHistoryJson),
+            HasActionPhase = actionState is { AssigneeUserIds.Count: > 0 },
+            ActionDirectionLabel = actionState?.ActionDirectionLabel,
+            ActionPhaseStatus = actionState?.Status,
+            doc.ExpiresAtUtc,
+            doc.RetentionPolicyId,
+            doc.retentionPolicyName,
+            doc.archiveTier,
+            doc.lifecycleStatus,
+            doc.IsArchived,
+            doc.ArchivedAtUtc,
+            doc.LegalHold,
+            doc.LegalHoldReason,
+            doc.LegalHoldStartedAtUtc,
+            doc.IsObsolete,
+            doc.ObsoleteAtUtc,
+            doc.ObsoleteReason,
+            doc.ScheduledArchiveAtUtc,
+            doc.ScheduledDeleteAtUtc,
+            doc.LongTermRetention,
+            doc.LifecycleWarningSentAtUtc,
+            CanArchive = !doc.IsArchived && !doc.LegalHold,
+            CanRestoreFromArchive = doc.IsArchived,
+            Steps = steps.Select(s => new
+            {
+                s.Order,
+                s.UserId,
+                s.UserName,
+                s.Status,
+                s.ActionAt,
+                s.Note,
+                s.Comment,
+            }),
         });
+    }
+
+    [HttpPost("{id:guid}/assign-workflow")]
+    [Authorize(Policy = "documents.workflow.update")]
+    public async Task<IActionResult> AssignWorkflow(Guid id, [FromBody] AssignWorkflowRequest req, CancellationToken ct)
+    {
+        var document = await db.Documents.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (document is null) return NotFound(new { message = "سند یافت نشد" });
+        if (!DocumentWorkflowAccessRules.CanAssignWorkflow(document))
+            return BadRequest(new { message = BuildAssignWorkflowDeniedMessage(document) });
+
+        if (!Guid.TryParse(req.WorkflowTemplateId, out var templateId))
+            return BadRequest(new { message = "گردش انتخاب‌شده نامعتبر است" });
+
+        var template = await db.DocumentWorkflowTemplates
+            .FirstOrDefaultAsync(x => x.Id == templateId && x.IsActive, ct);
+        if (template is null)
+            return BadRequest(new { message = "گردش یافت نشد یا غیرفعال است" });
+
+        var (ok, err, message) = await workflowAssignService.AssignAsync(document, template, req, User, ct);
+        if (!ok) return BadRequest(new { message = err ?? "انتصاب گردش ناموفق بود" });
+
+        return Ok(new
+        {
+            message,
+            workflowStartedAtUtc = document.WorkflowStartedAtUtc,
+            workflowScheduledStartAtUtc = document.WorkflowScheduledStartAtUtc,
+            workflowRunCycle = document.WorkflowRunCycle,
+            canStartWorkflow = DocumentWorkflowAccessRules.CanStartWorkflow(document),
+        });
+    }
+
+    [HttpPost("{id:guid}/unassign-workflow")]
+    [Authorize(Policy = "documents.workflow.update")]
+    public async Task<IActionResult> UnassignWorkflow(Guid id, CancellationToken ct)
+    {
+        var document = await db.Documents.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (document is null) return NotFound(new { message = "سند یافت نشد" });
+        if (!DocumentWorkflowAccessRules.CanUnassignWorkflow(document))
+            return BadRequest(new { message = "در وضعیت فعلی امکان حذف گردش وجود ندارد" });
+
+        document.WorkflowTemplateId = null;
+        document.WorkflowName = null;
+        document.WorkflowStartedAtUtc = null;
+        document.WorkflowScheduledStartAtUtc = null;
+        document.StepsJson = null;
+        document.WorkflowStatus = DocumentWorkflowStatus.None;
+        document.CurrentStepOrder = 0;
+        document.WorkflowRejectionJson = null;
+        document.PostApprovalJson = null;
+
+        var links = await db.DocumentApprovalLinks
+            .Where(x => x.DocumentId == id && x.IsActive)
+            .ToListAsync(ct);
+        foreach (var link in links)
+            link.IsActive = false;
+
+        await db.SaveChangesAsync(ct);
+        return Ok(new { message = "گردش از سند حذف شد" });
+    }
+
+    [HttpPost("{id:guid}/start-workflow")]
+    [Authorize(Policy = "documents.workflow.update")]
+    public async Task<IActionResult> StartWorkflow(Guid id, CancellationToken ct)
+    {
+        var document = await db.Documents.FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (document is null) return NotFound(new { message = "سند یافت نشد" });
+        if (document.WorkflowTemplateId is null && string.IsNullOrWhiteSpace(document.StepsJson))
+            return BadRequest(new { message = "برای این سند گردش تأیید تعریف نشده است" });
+        if (document.WorkflowStartedAtUtc is not null)
+            return BadRequest(new { message = "گردش این سند قبلاً شروع شده است" });
+        if (document.WorkflowStatus != DocumentWorkflowStatus.Pending)
+            return BadRequest(new { message = "گردش این سند قبلاً شروع شده یا به پایان رسیده است" });
+
+        var (ok, err) = await workflowProcessor.TryStartWorkflowAsync(document, ct);
+        if (!ok) return BadRequest(new { message = err ?? "شروع گردش ناموفق بود" });
+
+        return Ok(new { message = $"گردش «{document.WorkflowName ?? "تأیید"}» شروع شد" });
+    }
+
+    [HttpPost("{id:guid}/approve")]
+    [Authorize(Policy = "documents.workflow.update")]
+    public async Task<IActionResult> Approve(Guid id, [FromBody] WorkflowRunActionRequest req, CancellationToken ct)
+    {
+        if (!Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
+            return Unauthorized();
+
+        var result = await workflowProcessor.ProcessActionAsync(id, userId, true, req.Comment, ct);
+        if (!result.Success)
+        {
+            var code = result.Message?.Contains("امضا", StringComparison.Ordinal) == true
+                ? "signature_required"
+                : "workflow_action_failed";
+            return StatusCode(result.HttpStatus ?? 400, new { message = result.Message, code });
+        }
+        return Ok(new { message = result.Message });
+    }
+
+    [HttpPost("{id:guid}/reject")]
+    [Authorize(Policy = "documents.workflow.update")]
+    public async Task<IActionResult> Reject(Guid id, [FromBody] WorkflowRunActionRequest req, CancellationToken ct)
+    {
+        if (!Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var userId))
+            return Unauthorized();
+
+        var result = await workflowProcessor.ProcessActionAsync(id, userId, false, req.Comment, ct);
+        if (!result.Success)
+            return StatusCode(result.HttpStatus ?? 400, new { message = result.Message, code = "workflow_action_failed" });
+        return Ok(new { message = result.Message });
     }
 
     [HttpGet("{id:guid}/download")]
@@ -779,9 +1209,6 @@ public class AdminDocumentsController(
             : await q.OrderByDescending(x => x.VersionNumber).FirstOrDefaultAsync(ct);
         if (version is null) return NotFound(new { message = "نسخه فایل یافت نشد" });
 
-        var fullPath = storage.ResolveFullPath(version.StoredPath);
-        if (!System.IO.File.Exists(fullPath)) return NotFound(new { message = "فایل فیزیکی موجود نیست" });
-
         if (TryGetUserId(out var downloaderId))
         {
             var action = inline ? "Read/View" : "Download";
@@ -795,14 +1222,11 @@ public class AdminDocumentsController(
             ? $"document-v{version.VersionNumber}"
             : version.OriginalFileName;
 
-        if (inline)
-        {
-            ContentDispositionHelper.SetInline(Response, downloadName);
-            return PhysicalFile(fullPath, contentType);
-        }
-
-        ContentDispositionHelper.SetAttachment(Response, downloadName);
-        return PhysicalFile(fullPath, contentType);
+        var served = await DocumentVersionFileHttpHelper.TryServePhysicalAsync(
+            files, version, contentType, downloadName, inline, Response, ct);
+        if (served is null)
+            return NotFound(new { message = "فایل فیزیکی موجود نیست" });
+        return served;
     }
 
     [HttpGet("{id:guid}/preview")]
@@ -820,14 +1244,17 @@ public class AdminDocumentsController(
             : await q.OrderByDescending(x => x.VersionNumber).FirstOrDefaultAsync(ct);
         if (version is null) return NotFound(new { message = "نسخه فایل یافت نشد" });
 
-        var fullPath = storage.ResolveFullPath(version.StoredPath);
-        if (!System.IO.File.Exists(fullPath)) return NotFound(new { message = "فایل فیزیکی موجود نیست" });
+        if (!files.FileExists(version))
+            return NotFound(new { message = "فایل فیزیکی موجود نیست" });
 
         if (TryGetUserId(out var viewerId))
         {
             db.DocumentActivities.Add(CreateAudit(id, "Read/View", "پیش‌نمایش سند", viewerId, reason: $"versionId={version.Id}"));
             await db.SaveChangesAsync(ct);
         }
+
+        await using var localFile = await files.OpenLocalPathAsync(version, ct);
+        var fullPath = localFile.Path;
 
         var ext = NormalizeFileExtension(version.Extension, version.OriginalFileName);
         if (ext == ".zip")
@@ -948,21 +1375,22 @@ public class AdminDocumentsController(
 
         var versionId = Guid.NewGuid();
         var contentHash = await DocumentTextIndexHelper.ComputeSha256HexAsync(form.File, ct);
-        var saved = await storage.SaveAsync(doc.Id, nextVersion, form.File, ct);
-        db.DocumentVersions.Add(new DocumentVersion
+        var saved = await files.SaveFromFormFileAsync(doc.Id, nextVersion, form.File, ct);
+        var newVersion = new DocumentVersion
         {
             Id = versionId,
             DocumentId = doc.Id,
             VersionNumber = nextVersion,
-            OriginalFileName = saved.originalFileName,
-            StoredPath = saved.relativePath,
-            Extension = saved.extension,
-            SizeBytes = form.File.Length,
+            OriginalFileName = saved.OriginalFileName,
+            StoredPath = saved.RelativePath,
+            Extension = saved.Extension,
             ContentHashSha256 = contentHash,
             ChangeLog = string.IsNullOrWhiteSpace(form.ChangeLog) ? null : form.ChangeLog.Trim(),
             UploadedByUserId = userId,
             UploadedAtUtc = DateTime.UtcNow,
-        });
+        };
+        DocumentVersionEncryptionMetadata.Apply(newVersion, saved);
+        db.DocumentVersions.Add(newVersion);
         doc.UpdatedAtUtc = DateTime.UtcNow;
         DocumentTextIndexHelper.AddPendingVersionText(db, doc.Id, versionId);
         db.DocumentActivities.Add(CreateAudit(
@@ -991,10 +1419,13 @@ public class AdminDocumentsController(
         var newer = versions.First(x => x.Id == req.NewVersionId);
         var older = versions.First(x => x.Id == req.OldVersionId);
 
-        var newPath = storage.ResolveFullPath(newer.StoredPath);
-        var oldPath = storage.ResolveFullPath(older.StoredPath);
-        if (!System.IO.File.Exists(newPath) || !System.IO.File.Exists(oldPath))
+        if (!files.FileExists(newer) || !files.FileExists(older))
             return NotFound(new { message = "فایل یکی از نسخه‌ها موجود نیست" });
+
+        await using var newerLocal = await files.OpenLocalPathAsync(newer, ct);
+        await using var olderLocal = await files.OpenLocalPathAsync(older, ct);
+        var newPath = newerLocal.Path;
+        var oldPath = olderLocal.Path;
 
         if (!IsDocxExtension(older.Extension) || !IsDocxExtension(newer.Extension))
         {
@@ -1064,15 +1495,16 @@ public class AdminDocumentsController(
         if (!IsDocxExtension(older.Extension) || !IsDocxExtension(newer.Extension))
             return BadRequest(new { message = "مقایسه OpenXml فقط برای فایل Word (docx) پشتیبانی می‌شود" });
 
-        var oldPath = storage.ResolveFullPath(older.StoredPath);
-        var newPath = storage.ResolveFullPath(newer.StoredPath);
-        if (!System.IO.File.Exists(oldPath) || !System.IO.File.Exists(newPath))
+        if (!files.FileExists(older) || !files.FileExists(newer))
             return NotFound(new { message = "فایل یکی از نسخه‌ها موجود نیست" });
+
+        await using var olderLocal2 = await files.OpenLocalPathAsync(older, ct);
+        await using var newerLocal2 = await files.OpenLocalPathAsync(newer, ct);
 
         try
         {
-            var oldText = DocxTextExtractor.ExtractPlainText(oldPath);
-            var newText = DocxTextExtractor.ExtractPlainText(newPath);
+            var oldText = DocxTextExtractor.ExtractPlainText(olderLocal2.Path);
+            var newText = DocxTextExtractor.ExtractPlainText(newerLocal2.Path);
             return Ok(new
             {
                 documentId = id,
@@ -1101,37 +1533,31 @@ public class AdminDocumentsController(
         var source = await db.DocumentVersions.AsNoTracking()
             .FirstOrDefaultAsync(x => x.DocumentId == id && x.Id == versionId, ct);
         if (source is null) return NotFound(new { message = "نسخه موردنظر یافت نشد" });
-        var sourcePath = storage.ResolveFullPath(source.StoredPath);
-        if (!System.IO.File.Exists(sourcePath)) return NotFound(new { message = "فایل نسخه انتخاب‌شده موجود نیست" });
+        if (!files.FileExists(source))
+            return NotFound(new { message = "فایل نسخه انتخاب‌شده موجود نیست" });
 
         var currentMax = await db.DocumentVersions
             .Where(x => x.DocumentId == id)
             .MaxAsync(x => (int?)x.VersionNumber, ct) ?? 0;
         var nextVersion = currentMax + 1;
 
-        await using var src = System.IO.File.OpenRead(sourcePath);
-        var mem = new MemoryStream();
-        await src.CopyToAsync(mem, ct);
-        mem.Position = 0;
-        var formFile = new FormFile(mem, 0, mem.Length, "file", source.OriginalFileName)
-        {
-            Headers = new HeaderDictionary(),
-            ContentType = "application/octet-stream",
-        };
-        var saved = await storage.SaveAsync(doc.Id, nextVersion, formFile, ct);
-        db.DocumentVersions.Add(new DocumentVersion
+        await using var sourceLocal = await files.OpenLocalPathAsync(source, ct);
+        await using var src = System.IO.File.OpenRead(sourceLocal.Path);
+        var saved = await files.SaveFromStreamAsync(doc.Id, nextVersion, src, source.OriginalFileName, ct);
+        var restoredVersion = new DocumentVersion
         {
             Id = Guid.NewGuid(),
             DocumentId = doc.Id,
             VersionNumber = nextVersion,
             OriginalFileName = source.OriginalFileName,
-            StoredPath = saved.relativePath,
+            StoredPath = saved.RelativePath,
             Extension = source.Extension,
-            SizeBytes = source.SizeBytes,
             ChangeLog = $"Restore از نسخه v{source.VersionNumber}",
             UploadedByUserId = userId,
             UploadedAtUtc = DateTime.UtcNow,
-        });
+        };
+        DocumentVersionEncryptionMetadata.Apply(restoredVersion, saved);
+        db.DocumentVersions.Add(restoredVersion);
         doc.UpdatedAtUtc = DateTime.UtcNow;
         db.DocumentActivities.Add(CreateAudit(
             doc.Id,
@@ -1142,6 +1568,74 @@ public class AdminDocumentsController(
             newValues: JsonSerializer.Serialize(new { newCurrentVersion = nextVersion })));
         await db.SaveChangesAsync(ct);
         return Ok(new { message = "بازیابی نسخه انجام شد", newVersion = nextVersion });
+    }
+
+    [HttpPatch("{id:guid}/metadata")]
+    public async Task<IActionResult> UpdateMetadata(Guid id, [FromBody] UpdateDocumentMetadataRequest req, CancellationToken ct)
+    {
+        if (!TryGetUserId(out var userId)) return Unauthorized();
+        var doc = await db.Documents
+            .Include(x => x.Tags)
+            .FirstOrDefaultAsync(x => x.Id == id, ct);
+        if (doc is null) return NotFound(new { message = "سند یافت نشد" });
+
+        if (req.Category is not null)
+        {
+            var category = req.Category.Trim();
+            if (string.IsNullOrWhiteSpace(category))
+                return BadRequest(new { message = "دسته‌بندی موضوعی نمی‌تواند خالی باشد" });
+            doc.Category = category;
+        }
+
+        if (req.ApplyClassification)
+        {
+            if (req.OrganizationalUnitId is Guid ouId)
+            {
+                if (!await db.DocumentSystemOrganizationalUnits.AsNoTracking().AnyAsync(x => x.Id == ouId && x.IsActive, ct))
+                    return BadRequest(new { message = "واحد سازمانی نامعتبر است" });
+                doc.OrganizationalUnitId = ouId;
+            }
+            else
+                doc.OrganizationalUnitId = null;
+
+            if (req.ProjectId is Guid projId)
+            {
+                if (!await db.DocumentSystemProjects.AsNoTracking().AnyAsync(x => x.Id == projId && x.IsActive, ct))
+                    return BadRequest(new { message = "پروژه نامعتبر است" });
+                doc.ProjectId = projId;
+            }
+            else
+                doc.ProjectId = null;
+        }
+
+        if (req.Description is not null)
+            doc.Description = string.IsNullOrWhiteSpace(req.Description) ? null : req.Description.Trim();
+        if (req.ManualReferenceNumber is not null)
+            doc.ManualReferenceNumber = string.IsNullOrWhiteSpace(req.ManualReferenceNumber) ? null : req.ManualReferenceNumber.Trim();
+        if (req.DocumentDate is not null)
+            doc.DocumentDateUtc = TryParseDate(req.DocumentDate);
+        if (!string.IsNullOrWhiteSpace(req.Confidentiality))
+            doc.AccessLevel = ParseAccessLevel(req.Confidentiality);
+
+        if (req.Tags is not null)
+        {
+            var newTags = req.Tags.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            db.DocumentTags.RemoveRange(doc.Tags);
+            foreach (var tag in newTags)
+            {
+                db.DocumentTags.Add(new DocumentTag
+                {
+                    DocumentId = doc.Id,
+                    Tag = tag,
+                    CreatedAtUtc = DateTime.UtcNow,
+                });
+            }
+        }
+
+        doc.UpdatedAtUtc = DateTime.UtcNow;
+        db.DocumentActivities.Add(CreateAudit(doc.Id, "Update", "متادیتا و طبقه‌بندی سند بروزرسانی شد", userId));
+        await db.SaveChangesAsync(ct);
+        return Ok(new { message = "اطلاعات سند ذخیره شد" });
     }
 
     [HttpPatch("{id:guid}/rename")]
@@ -1175,6 +1669,8 @@ public class AdminDocumentsController(
         if (!TryGetUserId(out var userId)) return Unauthorized();
         var doc = await db.Documents.FirstOrDefaultAsync(x => x.Id == id, ct);
         if (doc is null) return NotFound(new { message = "سند یافت نشد" });
+        if (doc.LegalHold)
+            return BadRequest(new { message = "سند در Legal Hold است و قابل حذف نیست" });
         doc.IsDeleted = true;
         doc.UpdatedAtUtc = DateTime.UtcNow;
         db.DocumentActivities.Add(CreateAudit(doc.Id, "Delete", "سند حذف شد", userId));
@@ -1301,6 +1797,13 @@ public class AdminDocumentsController(
         }
     }
 
+    /// <summary>اسناد فعال برای کاوشگر و جستجوی اصلی — بدون بایگانی و منسوخ.</summary>
+    private static IQueryable<Document> WhereVisibleInExplorer(IQueryable<Document> query) =>
+        query.Where(x =>
+            x.LifecycleStatus == DocumentLifecycleStatus.Active
+            && !x.IsArchived
+            && !x.IsObsolete);
+
     private static string GenerateSystemReferenceNumber()
     {
         var now = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(3.5));
@@ -1403,6 +1906,39 @@ public class AdminDocumentsController(
         return snippet;
     }
 
+    private async Task ProcessDueScheduledWorkflowStartsAsync(CancellationToken ct)
+    {
+        var due = await db.Documents
+            .Where(x => x.WorkflowScheduledStartAtUtc != null
+                && x.WorkflowScheduledStartAtUtc <= DateTime.UtcNow
+                && x.WorkflowStartedAtUtc == null
+                && x.WorkflowTemplateId != null
+                && x.WorkflowStatus == DocumentWorkflowStatus.Pending)
+            .ToListAsync(ct);
+        foreach (var document in due)
+            await workflowProcessor.TryStartWorkflowAsync(document, ct);
+    }
+
+    private static string BuildAssignWorkflowDeniedMessage(Document document)
+    {
+        if (document.WorkflowStatus == DocumentWorkflowStatus.InProgress)
+            return "این پرونده در حال گردش است؛ تا پایان گردش فعلی امکان اتصال گردش جدید وجود ندارد";
+        if (DocumentWorkflowAccessRules.HasAssignedWorkflow(document) && document.WorkflowStartedAtUtc is null)
+            return "گردش قبلاً انتصاب شده است؛ ابتدا آن را شروع کنید یا لغو کنید";
+        if (DocumentWorkflowAccessRules.HasWorkflowActivity(document) && document.WorkflowStatus != DocumentWorkflowStatus.Rejected)
+            return "در وضعیت فعلی امکان انتصاب گردش وجود ندارد";
+        return "در وضعیت فعلی امکان انتصاب گردش وجود ندارد";
+    }
+
+    private static string ToWorkflowClientStatus(DocumentWorkflowStatus status) => status switch
+    {
+        DocumentWorkflowStatus.Pending => "pending",
+        DocumentWorkflowStatus.InProgress => "in_progress",
+        DocumentWorkflowStatus.Approved => "approved",
+        DocumentWorkflowStatus.Rejected => "rejected",
+        _ => "none",
+    };
+
     private DocumentActivity CreateAudit(
         Guid documentId,
         string action,
@@ -1434,6 +1970,7 @@ public class AdminDocumentsController(
 public sealed class CreateFolderRequest
 {
     public string? Name { get; set; }
+    public string? Description { get; set; }
     public Guid? ParentId { get; set; }
 }
 
@@ -1464,10 +2001,25 @@ public sealed class UploadDocumentsForm
     public List<IFormFile> Files { get; set; } = [];
 }
 
+public sealed class UpdateDocumentMetadataRequest
+{
+    public bool ApplyClassification { get; set; }
+    public string? Category { get; set; }
+    public Guid? OrganizationalUnitId { get; set; }
+    public Guid? ProjectId { get; set; }
+    public string? Description { get; set; }
+    public string? ManualReferenceNumber { get; set; }
+    public string? DocumentDate { get; set; }
+    public string? Confidentiality { get; set; }
+    public List<string>? Tags { get; set; }
+}
+
 public sealed class UploadMetadataItem
 {
     public string? Title { get; set; }
     public string? Category { get; set; }
+    public Guid? OrganizationalUnitId { get; set; }
+    public Guid? ProjectId { get; set; }
     public string? DocumentDate { get; set; }
     public string? ManualReferenceNumber { get; set; }
     public string? Description { get; set; }
@@ -1496,6 +2048,9 @@ public sealed class DocumentSearchRequest
     public List<string>? Types { get; set; }
     public List<Guid>? OwnerIds { get; set; }
     public string? Confidentiality { get; set; }
+    public string? Category { get; set; }
+    public Guid? OrganizationalUnitId { get; set; }
+    public Guid? ProjectId { get; set; }
     public List<string>? Tags { get; set; }
     public string? Sort { get; set; }
 }

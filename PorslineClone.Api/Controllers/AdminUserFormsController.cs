@@ -23,6 +23,7 @@ public class AdminUserFormsController(
     AppDbContext db,
     IWebHostEnvironment env,
     FormWorkflowProcessor workflowProcessor,
+    FormSubmissionWorkflowAssignService workflowAssignService,
     FormWorkflowRejectionService rejectionService,
     FormWordTemplateService wordTemplateService,
     FormWordBatchExportService wordBatchExportService,
@@ -407,12 +408,6 @@ public class AdminUserFormsController(
         if (!CanAssignWorkflow(submission))
             return BadRequest(new { message = BuildAssignWorkflowDeniedMessage(submission) });
 
-        var isRestart = CanRestartWorkflowAfterReject(submission);
-        if (isRestart && !User.HasClaim("permission", "responders.userforms.workflow.restart")
-            && !User.HasClaim("permission", "responders.userforms.workflow")
-            && !User.HasClaim("permission", "forms.update"))
-            return StatusCode(403, new { message = "مجوز «گردش مجدد» ندارید" });
-
         if (!Guid.TryParse(req.WorkflowTemplateId, out var templateId))
             return BadRequest(new { message = "گردش انتخاب‌شده نامعتبر است" });
 
@@ -421,84 +416,97 @@ public class AdminUserFormsController(
         if (template is null)
             return BadRequest(new { message = "گردش یافت نشد یا غیرفعال است" });
 
-        var mode = (req.StartMode ?? "manual").Trim().ToLowerInvariant();
-        DateTime? scheduledUtc = null;
-        if (mode == "scheduled")
-        {
-            if (string.IsNullOrWhiteSpace(req.ScheduledStartAtUtc) ||
-                !DateTime.TryParse(req.ScheduledStartAtUtc, null, System.Globalization.DateTimeStyles.RoundtripKind, out var parsed))
-                return BadRequest(new { message = "تاریخ شروع گردش نامعتبر است" });
-            scheduledUtc = parsed.Kind == DateTimeKind.Unspecified
-                ? DateTime.SpecifyKind(parsed, DateTimeKind.Utc)
-                : parsed.ToUniversalTime();
-            if (scheduledUtc <= DateTime.UtcNow)
-                return BadRequest(new { message = "تاریخ شروع باید در آینده باشد" });
-        }
-
-        if (isRestart)
-        {
-            FormWorkflowRunHistoryHelper.SnapshotCurrentRun(submission);
-            submission.WorkflowRunCycle = Math.Max(1, submission.WorkflowRunCycle) + 1;
-            submission.IsArchived = false;
-            submission.PostApprovalJson = null;
-
-            var links = await db.FormSubmissionApprovalLinks
-                .Where(x => x.FormSubmissionId == id && x.IsActive)
-                .ToListAsync(ct);
-            foreach (var link in links)
-                link.IsActive = false;
-        }
-
-        submission.WorkflowTemplateId = template.Id;
-        submission.WorkflowName = template.Name;
-        submission.WorkflowStartedAtUtc = null;
-        submission.WorkflowScheduledStartAtUtc = mode == "scheduled" ? scheduledUtc : null;
-        submission.Status = FormSubmissionStatus.Pending;
-        submission.CurrentStepOrder = 1;
-        var reviewCycle = isRestart ? submission.WorkflowRunCycle : 0;
-        submission.StepsJson = WorkflowStepJsonHelper.Serialize(
-            WorkflowStepBuilder.BuildApprovalStepsFromTemplate(template.StepsJson, startImmediately: false, reviewCycle));
-
-        await db.SaveChangesAsync(ct);
-
-        var cycleLabel = submission.WorkflowRunCycle > 1
-            ? $" (دور {submission.WorkflowRunCycle})"
-            : "";
-
-        if (mode == "now")
-        {
-            await db.Entry(submission).ReloadAsync(ct);
-            var (ok, err) = await workflowProcessor.TryStartWorkflowAsync(submission, ct);
-            if (!ok) return BadRequest(new { message = err ?? "شروع گردش ناموفق بود" });
-            return Ok(new
-            {
-                message = isRestart
-                    ? $"گردش مجدد «{submission.WorkflowName}»{cycleLabel} انتصاب و شروع شد"
-                    : $"گردش «{submission.WorkflowName}» انتصاب و شروع شد",
-                workflowStartedAtUtc = submission.WorkflowStartedAtUtc,
-                workflowRunCycle = submission.WorkflowRunCycle,
-            });
-        }
-
-        if (mode == "scheduled")
-        {
-            return Ok(new
-            {
-                message = isRestart
-                    ? $"گردش مجدد «{submission.WorkflowName}»{cycleLabel} انتصاب شد و در تاریخ برنامه‌ریزی‌شده شروع می‌شود"
-                    : $"گردش «{submission.WorkflowName}» انتصاب شد و در تاریخ برنامه‌ریزی‌شده شروع می‌شود",
-                workflowScheduledStartAtUtc = submission.WorkflowScheduledStartAtUtc,
-                workflowRunCycle = submission.WorkflowRunCycle,
-            });
-        }
+        var (ok, err, message) = await workflowAssignService.AssignAsync(submission, template, req, User, ct);
+        if (!ok) return BadRequest(new { message = err ?? "انتصاب گردش ناموفق بود" });
 
         return Ok(new
         {
-            message = isRestart
-                ? $"گردش مجدد «{submission.WorkflowName}»{cycleLabel} انتصاب شد. برای شروع دکمه «شروع گردش» را بزنید"
-                : $"گردش «{submission.WorkflowName}» انتصاب شد. برای شروع دکمه «شروع گردش» را بزنید",
-            canStartWorkflow = true,
+            message,
+            workflowStartedAtUtc = submission.WorkflowStartedAtUtc,
+            workflowScheduledStartAtUtc = submission.WorkflowScheduledStartAtUtc,
             workflowRunCycle = submission.WorkflowRunCycle,
+            canStartWorkflow = submission.WorkflowStartedAtUtc is null && submission.Status == FormSubmissionStatus.Pending,
+        });
+    }
+
+    [HttpPost("bulk-assign-workflow")]
+    [Authorize(Policy = "responders.userforms.workflow")]
+    public async Task<IActionResult> BulkAssignWorkflow([FromBody] BulkAssignFormWorkflowRequest req, CancellationToken ct)
+    {
+        if (!Guid.TryParse(req.WorkflowTemplateId, out var templateId))
+            return BadRequest(new { message = "گردش انتخاب‌شده نامعتبر است" });
+
+        var template = await db.FormWorkflowTemplates
+            .FirstOrDefaultAsync(x => x.Id == templateId && x.IsActive, ct);
+        if (template is null)
+            return BadRequest(new { message = "گردش یافت نشد یا غیرفعال است" });
+
+        List<Guid> submissionIds;
+        if (req.AssignWholeGroup)
+        {
+            var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+            Guid.TryParse(currentUserId, out var currentUserGuid);
+            var isAdmin = User.IsInRole("Admin");
+            var q = AuthorizedSubmissionsQuery(currentUserId, currentUserGuid, isAdmin);
+            q = ApplyResponderGroupFilter(db, q, req.GroupId, req.UngroupedOnly);
+            submissionIds = await q.Select(x => x.Id).ToListAsync(ct);
+        }
+        else
+        {
+            submissionIds = (req.SubmissionIds ?? [])
+                .Where(x => x != Guid.Empty)
+                .Distinct()
+                .ToList();
+        }
+
+        if (submissionIds.Count == 0)
+            return BadRequest(new { message = "هیچ پاسخی برای انتصاب گردش انتخاب نشده است" });
+
+        var assignReq = new AssignWorkflowRequest(req.WorkflowTemplateId, req.StartMode, req.ScheduledStartAtUtc);
+        var assignedCount = 0;
+        var skippedCount = 0;
+        var errors = new List<object>();
+
+        foreach (var sid in submissionIds)
+        {
+            var submission = await GetAuthorizedSubmissionAsync(sid, ct);
+            if (submission is null)
+            {
+                skippedCount++;
+                errors.Add(new { submissionId = sid, message = "پاسخ یافت نشد یا دسترسی ندارید" });
+                continue;
+            }
+
+            if (!CanAssignWorkflow(submission))
+            {
+                skippedCount++;
+                errors.Add(new { submissionId = sid, message = BuildAssignWorkflowDeniedMessage(submission) });
+                continue;
+            }
+
+            var (ok, err, _) = await workflowAssignService.AssignAsync(submission, template, assignReq, User, ct);
+            if (!ok)
+            {
+                skippedCount++;
+                errors.Add(new { submissionId = sid, message = err ?? "انتصاب ناموفق بود" });
+                continue;
+            }
+
+            assignedCount++;
+        }
+
+        var summary = assignedCount > 0
+            ? $"{assignedCount} پاسخ به گردش «{template.Name}» متصل شد"
+            : "هیچ پاسخی متصل نشد";
+        if (skippedCount > 0)
+            summary += $" ({skippedCount} مورد رد شد)";
+
+        return Ok(new
+        {
+            message = summary,
+            assignedCount,
+            skippedCount,
+            errors = errors.Take(20),
         });
     }
 

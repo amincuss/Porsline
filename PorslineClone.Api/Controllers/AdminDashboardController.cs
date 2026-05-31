@@ -15,7 +15,7 @@ namespace PorslineClone.Api.Controllers;
 [ApiController]
 [Route("api/admin/dashboard")]
 [Authorize]
-public class AdminDashboardController(AppDbContext db, UserManager<AppUser> userManager) : ControllerBase
+public partial class AdminDashboardController(AppDbContext db, UserManager<AppUser> userManager) : ControllerBase
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
