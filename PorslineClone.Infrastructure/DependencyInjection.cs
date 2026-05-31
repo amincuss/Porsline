@@ -9,6 +9,8 @@ using PorslineClone.Infrastructure.Options;
 using PorslineClone.Infrastructure.Persistence;
 using PorslineClone.Infrastructure.Services;
 using PorslineClone.Infrastructure.Services.ContractTemplates;
+using PorslineClone.Infrastructure.Services.Contracts;
+using PorslineClone.Infrastructure.Services.Documents;
 
 namespace PorslineClone.Infrastructure;
 
@@ -20,6 +22,7 @@ public static class DependencyInjection
         services.Configure<SmsGatewayOptions>(configuration.GetSection(SmsGatewayOptions.SectionName));
         services.Configure<DatabaseStartupOptions>(configuration.GetSection(DatabaseStartupOptions.SectionName));
         services.Configure<ContractSignatureOptions>(configuration.GetSection(ContractSignatureOptions.SectionName));
+        services.Configure<PersianTextNormalizerOptions>(configuration.GetSection(PersianTextNormalizerOptions.SectionName));
         services.AddDbContext<AppDbContext>(o => o.UseSqlServer(configuration.GetConnectionString("DefaultConnection")));
 
         services.AddIdentityCore<AppUser>()
@@ -46,10 +49,30 @@ public static class DependencyInjection
         services.AddScoped<FormActionLinkService>();
         services.AddScoped<ApprovalReminderService>();
         services.AddHostedService<ApprovalReminderBackgroundService>();
+        services.AddSingleton<ILibreOfficeDocumentService, LibreOfficeDocumentService>();
         services.AddSingleton<IDocxToPdfConverter, DocxToPdfConverterService>();
         services.AddScoped<IContractDocumentGenerator, ContractDocumentGeneratorService>();
         services.AddScoped<ContractTemplateFileStorageService>();
         services.AddScoped<ContractDocumentTemplateService>();
+        services.AddScoped<Services.FormWordTemplates.FormWordTemplateFileStorage>();
+        services.AddScoped<Services.FormWordTemplates.FormWordTemplateService>();
+        services.AddScoped<Services.FormWordTemplates.FormWordBatchExportService>();
+        services.AddScoped<IFormWordBatchExportHangfireJob, Services.FormWordTemplates.FormWordBatchExportHangfireJob>();
+        services.AddScoped<DocumentFileStorageService>();
+        services.AddSingleton<FarsiTextNormalizer>();
+        services.AddSingleton<IFarsiTextNormalizer>(sp => sp.GetRequiredService<FarsiTextNormalizer>());
+        services.AddSingleton<ITextExtractor, PdfFileTextExtractor>();
+        services.AddSingleton<ITextExtractor, DocxFileTextExtractor>();
+        services.AddSingleton<TextExtractorResolver>();
+        services.AddSingleton<DocumentTextExtractionQueue>();
+        services.AddSingleton<IDocumentTextExtractionQueue>(sp => sp.GetRequiredService<DocumentTextExtractionQueue>());
+        services.AddScoped<IDocumentTextExtractionProcessor, DocumentTextExtractionProcessor>();
+        services.AddScoped<IDocumentContentSearchService, DocumentContentSearchService>();
+        services.AddHostedService<DocumentTextExtractionBackgroundService>();
+        services.AddSingleton<PersianTextNormalizer>();
+        services.AddSingleton<IPersianTextNormalizer>(sp => sp.GetRequiredService<PersianTextNormalizer>());
+        services.AddScoped<IContractExtractAndIndexJob, ContractExtractAndIndexJob>();
+        services.AddScoped<IContractContentSearchService, ContractContentSearchService>();
         return services;
     }
 }

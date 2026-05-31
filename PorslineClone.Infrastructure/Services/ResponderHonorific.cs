@@ -10,8 +10,8 @@ public static class ResponderHonorific
         var t = raw.Trim().ToLowerInvariant();
         return t switch
         {
-            "male" or "m" or "1" or "آقا" or "آقای" or "mr" => UserGender.Male,
-            "female" or "f" or "2" or "خانم" or "ms" => UserGender.Female,
+            "male" or "m" or "1" or "آقا" or "آقای" or "مرد" or "mr" => UserGender.Male,
+            "female" or "f" or "2" or "0" or "۰" or "خانم" or "خانوم" or "زن" or "ms" => UserGender.Female,
             _ => null,
         };
     }

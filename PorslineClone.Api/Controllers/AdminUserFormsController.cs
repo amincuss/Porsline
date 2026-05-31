@@ -9,6 +9,10 @@ using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
 using PorslineClone.Infrastructure.Services;
+using PorslineClone.Api.Http;
+using PorslineClone.Api.HangfireJobs;
+using PorslineClone.Application.FormWordTemplates;
+using PorslineClone.Infrastructure.Services.FormWordTemplates;
 
 namespace PorslineClone.Api.Controllers;
 
@@ -19,7 +23,10 @@ public class AdminUserFormsController(
     AppDbContext db,
     IWebHostEnvironment env,
     FormWorkflowProcessor workflowProcessor,
-    FormWorkflowRejectionService rejectionService) : ControllerBase
+    FormWorkflowRejectionService rejectionService,
+    FormWordTemplateService wordTemplateService,
+    FormWordBatchExportService wordBatchExportService,
+    IFormWordBatchExportEnqueue wordBatchExportEnqueue) : ControllerBase
 {
     private async Task<FormSubmission?> GetAuthorizedSubmissionAsync(Guid id, CancellationToken ct)
     {
@@ -43,6 +50,52 @@ public class AdminUserFormsController(
         return submission;
     }
 
+    [HttpGet("groups-sidebar")]
+    [Authorize(Policy = "responders.read")]
+    public async Task<IActionResult> GroupsSidebar(CancellationToken ct = default)
+    {
+        var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        Guid.TryParse(currentUserId, out var currentUserGuid);
+        var isAdmin = User.IsInRole("Admin");
+
+        var q = AuthorizedSubmissionsQuery(currentUserId, currentUserGuid, isAdmin);
+
+        var countRows = await (
+            from s in q
+            where s.ResponderId != null
+            join m in db.ResponderGroupMembers.AsNoTracking() on s.ResponderId equals m.ResponderId
+            join g in db.ResponderGroups.AsNoTracking() on m.GroupId equals g.Id
+            where !g.IsDeleted && g.IsActive
+            group s by m.GroupId into grp
+            select new { GroupId = grp.Key, Count = grp.Count() }
+        ).ToListAsync(ct);
+
+        var countByGroup = countRows.ToDictionary(x => x.GroupId, x => x.Count);
+
+        var groups = await db.ResponderGroups.AsNoTracking()
+            .Where(x => !x.IsDeleted && x.IsActive)
+            .OrderBy(x => x.Name)
+            .Select(x => new { x.Id, x.Name })
+            .ToListAsync(ct);
+
+        var items = groups
+            .Select(g => new
+            {
+                g.Id,
+                g.Name,
+                submissionCount = countByGroup.GetValueOrDefault(g.Id),
+            })
+            .Where(x => x.submissionCount > 0)
+            .ToList();
+
+        var inAnyGroup = db.ResponderGroupMembers.AsNoTracking().Select(m => m.ResponderId);
+        var ungroupedCount = await q.CountAsync(
+            x => x.ResponderId == null || !inAnyGroup.Contains(x.ResponderId.Value),
+            ct);
+
+        return Ok(new { groups = items, ungroupedCount });
+    }
+
     [HttpGet]
     [Authorize(Policy = "responders.read")]
     public async Task<IActionResult> List(
@@ -51,6 +104,8 @@ public class AdminUserFormsController(
         [FromQuery] string? search = null,
         [FromQuery] string? sortBy = "submitted_desc",
         [FromQuery] string? status = null,
+        [FromQuery] Guid? groupId = null,
+        [FromQuery] bool ungroupedOnly = false,
         CancellationToken ct = default)
     {
         page = Math.Max(1, page);
@@ -59,10 +114,7 @@ public class AdminUserFormsController(
         Guid.TryParse(currentUserId, out var currentUserGuid);
         var isAdmin = User.IsInRole("Admin");
 
-        var q = db.FormSubmissions
-            .Include(x => x.Form)
-            .Where(x => x.Form != null && !x.Form.IsDeleted)
-            .AsQueryable();
+        var q = AuthorizedSubmissionsQuery(currentUserId, currentUserGuid, isAdmin);
 
         if (!string.IsNullOrWhiteSpace(search))
         {
@@ -71,17 +123,10 @@ public class AdminUserFormsController(
                 (x.SubmitterName ?? "").Contains(s) ||
                 (x.SubmitterEmail ?? "").Contains(s) ||
                 (x.TrackingCode ?? "").Contains(s) ||
-                x.Form.Title.Contains(s));
+                x.Form!.Title.Contains(s));
         }
 
-        if (!isAdmin && currentUserGuid != Guid.Empty)
-        {
-            q = q.Where(x =>
-                x.Form.UserId == currentUserId
-                || (x.DispatchLinkId != null
-                    && db.FormDispatchLinks.Any(l =>
-                        l.Id == x.DispatchLinkId && l.SentByUserId == currentUserGuid)));
-        }
+        q = ApplyResponderGroupFilter(db, q, groupId, ungroupedOnly);
 
         if (!string.IsNullOrWhiteSpace(status))
         {
@@ -699,7 +744,214 @@ public class AdminUserFormsController(
         await db.SaveChangesAsync(ct);
         return Ok(new { message = "پاسخ فرم بروزرسانی شد" });
     }
+
+    [HttpGet("grouped")]
+    [Authorize(Policy = "responders.read")]
+    public async Task<IActionResult> Grouped(
+        [FromQuery] Guid? formId,
+        [FromQuery] Guid? groupId = null,
+        [FromQuery] bool ungroupedOnly = false,
+        CancellationToken ct = default)
+    {
+        var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        Guid.TryParse(currentUserId, out var currentUserGuid);
+        var isAdmin = User.IsInRole("Admin");
+        var data = await wordTemplateService.GetGroupedSubmissionsAsync(
+            formId, groupId, ungroupedOnly, currentUserId, isAdmin, currentUserGuid, ct);
+        return Ok(data);
+    }
+
+    private IQueryable<FormSubmission> AuthorizedSubmissionsQuery(
+        string? currentUserId,
+        Guid currentUserGuid,
+        bool isAdmin)
+    {
+        var q = db.FormSubmissions
+            .Include(x => x.Form)
+            .Where(x => x.Form != null && !x.Form.IsDeleted);
+
+        if (!isAdmin && currentUserGuid != Guid.Empty)
+        {
+            q = q.Where(x =>
+                x.Form!.UserId == currentUserId
+                || (x.DispatchLinkId != null
+                    && db.FormDispatchLinks.Any(l =>
+                        l.Id == x.DispatchLinkId && l.SentByUserId == currentUserGuid)));
+        }
+
+        return q;
+    }
+
+    private static IQueryable<FormSubmission> ApplyResponderGroupFilter(
+        AppDbContext db,
+        IQueryable<FormSubmission> q,
+        Guid? groupId,
+        bool ungroupedOnly)
+    {
+        if (ungroupedOnly)
+        {
+            var inAnyGroup = db.ResponderGroupMembers.Select(m => m.ResponderId);
+            return q.Where(x =>
+                x.ResponderId == null || !inAnyGroup.Contains(x.ResponderId.Value));
+        }
+
+        if (groupId is { } gid && gid != Guid.Empty)
+        {
+            var memberIds = db.ResponderGroupMembers
+                .Where(m => m.GroupId == gid)
+                .Select(m => m.ResponderId);
+            return q.Where(x => x.ResponderId != null && memberIds.Contains(x.ResponderId.Value));
+        }
+
+        return q;
+    }
+
+    [HttpPost("word-export-jobs")]
+    [Authorize(Policy = "responders.update")]
+    public async Task<IActionResult> StartWordExportJob(
+        [FromBody] StartFormWordBatchExportRequest req,
+        CancellationToken ct)
+    {
+        try
+        {
+            if (req.SubmissionIds is null || req.SubmissionIds.Count == 0)
+                return BadRequest(new { message = "هیچ پاسخی انتخاب نشده است" });
+
+            Guid? userId = Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var uid) ? uid : null;
+
+            var job = await wordBatchExportService.CreateQueuedJobAsync(
+                req.TemplateId,
+                req.SubmissionIds,
+                req.ImageOverrides,
+                userId,
+                ct);
+
+            var hangfireId = wordBatchExportEnqueue.Enqueue(job.Id);
+            await wordBatchExportService.SetHangfireJobIdAsync(job.Id, hangfireId, ct);
+
+            return Ok(new StartFormWordBatchExportResponse(
+                job.Id,
+                "تبدیل در پس‌زمینه شروع شد — پس از اتمام پیام دانلود ZIP نمایش داده می‌شود"));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
+
+    [HttpGet("word-export-jobs/{jobId:guid}")]
+    [Authorize(Policy = "responders.read")]
+    public async Task<IActionResult> GetWordExportJobStatus(Guid jobId, CancellationToken ct)
+    {
+        var status = await wordBatchExportService.GetStatusAsync(jobId, ct);
+        return status is null ? NotFound(new { message = "کار یافت نشد" }) : Ok(status);
+    }
+
+    [HttpGet("word-export-jobs/{jobId:guid}/download")]
+    [Authorize(Policy = "responders.read")]
+    public IActionResult DownloadWordExportJobZip(Guid jobId)
+    {
+        var full = wordBatchExportService.ResolveZipFullPath(jobId);
+        if (full is null || !System.IO.File.Exists(full))
+            return NotFound(new { message = "فایل ZIP یافت نشد" });
+
+        var fileName = Path.GetFileName(full);
+        ContentDispositionHelper.SetAttachment(Response, fileName);
+        return PhysicalFile(full, "application/zip", fileName);
+    }
+
+    [HttpPost("generate-word-documents")]
+    [Authorize(Policy = "responders.update")]
+    public async Task<IActionResult> GenerateWordDocuments(
+        [FromBody] GenerateWordDocumentsRequest req,
+        CancellationToken ct)
+    {
+        try
+        {
+            var docs = await wordTemplateService.GenerateForSubmissionsAsync(
+                req.TemplateId, req.SubmissionIds, req.ImageOverrides, ct);
+            return Ok(new
+            {
+                message = $"{docs.Count} فایل Word تولید شد",
+                items = docs.Select(d => new
+                {
+                    d.Id,
+                    d.SubmissionId,
+                    d.FileName,
+                    downloadUrl = $"/api/admin/user-forms/word-documents/{d.Id}/download",
+                }),
+            });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
+
+    [HttpPost("generate-word-documents-zip")]
+    [Authorize(Policy = "responders.update")]
+    public async Task<IActionResult> GenerateWordDocumentsZip(
+        [FromBody] GenerateWordDocumentsRequest req,
+        CancellationToken ct)
+    {
+        try
+        {
+            var (bytes, zipName) = await wordTemplateService.GenerateZipForSubmissionsAsync(
+                req.TemplateId, req.SubmissionIds, req.ImageOverrides, ct);
+            return ZipFileResult(bytes, zipName);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
+
+    [HttpPost("pack-word-documents-zip")]
+    [Authorize(Policy = "responders.update")]
+    public async Task<IActionResult> PackWordDocumentsZip(
+        [FromBody] PackWordDocumentsZipRequest req,
+        CancellationToken ct)
+    {
+        try
+        {
+            if (req.SubmissionIds is null || req.SubmissionIds.Count == 0)
+                return BadRequest(new { message = "هیچ پاسخی انتخاب نشده است" });
+
+            var (bytes, zipName) = await wordTemplateService.PackZipFromLatestDocumentsAsync(
+                req.TemplateId, req.SubmissionIds, ct);
+            return ZipFileResult(bytes, zipName);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
+
+    private IActionResult ZipFileResult(byte[] bytes, string zipName)
+    {
+        ContentDispositionHelper.SetAttachment(Response, zipName);
+        return File(bytes, "application/zip", zipName);
+    }
+
+    [HttpGet("word-documents/{documentId:guid}/download")]
+    [Authorize(Policy = "responders.read")]
+    public IActionResult DownloadWordDocument(Guid documentId)
+    {
+        var full = wordTemplateService.ResolveExportFullPath(documentId);
+        if (full is null || !System.IO.File.Exists(full))
+            return NotFound(new { message = "فایل یافت نشد" });
+
+        var fileName = Path.GetFileName(full);
+        return PhysicalFile(full, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", fileName);
+    }
 }
+
+public record GenerateWordDocumentsRequest(
+    Guid TemplateId,
+    List<Guid>? SubmissionIds,
+    List<WordImageOverrideDto>? ImageOverrides = null);
+
+public record PackWordDocumentsZipRequest(Guid TemplateId, List<Guid> SubmissionIds);
 
 public record UpdateUserFormFieldRequest(string Label, string? Value);
 public record UpdateUserFormRequest(string? SubmitterName, string? SubmitterMobile, List<UpdateUserFormFieldRequest>? Fields);

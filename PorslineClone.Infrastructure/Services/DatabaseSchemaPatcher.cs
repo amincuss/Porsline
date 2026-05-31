@@ -62,9 +62,32 @@ public static class DatabaseSchemaPatcher
                     [CreatedAtUtc] datetime2 NOT NULL,
                     CONSTRAINT [PK_UserPositions] PRIMARY KEY ([Id])
                 );
-                CREATE UNIQUE INDEX [IX_UserPositions_Name] ON [dbo].[UserPositions]([Name]);
+                CREATE UNIQUE INDEX [IX_UserPositions_Name] ON [dbo].[UserPositions]([Name]) WHERE [IsDeleted] = 0;
                 CREATE INDEX [IX_UserPositions_IsActive_SortOrder] ON [dbo].[UserPositions]([IsActive], [SortOrder]);
             END
+            """, ct);
+
+        await ExecuteScriptAsync(db,
+            """
+            IF COL_LENGTH('dbo.UserPositions', 'IsDeleted') IS NULL
+                ALTER TABLE [dbo].[UserPositions] ADD [IsDeleted] bit NOT NULL
+                    CONSTRAINT [DF_UserPositions_IsDeleted] DEFAULT (0);
+
+            IF COL_LENGTH('dbo.UserPositions', 'DeletedAtUtc') IS NULL
+                ALTER TABLE [dbo].[UserPositions] ADD [DeletedAtUtc] datetime2 NULL;
+
+            IF EXISTS (
+                SELECT 1 FROM sys.indexes
+                WHERE name = N'IX_UserPositions_Name' AND object_id = OBJECT_ID(N'[dbo].[UserPositions]')
+                  AND has_filter = 0
+            )
+                DROP INDEX [IX_UserPositions_Name] ON [dbo].[UserPositions];
+
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.indexes
+                WHERE name = N'IX_UserPositions_Name' AND object_id = OBJECT_ID(N'[dbo].[UserPositions]')
+            )
+                CREATE UNIQUE INDEX [IX_UserPositions_Name] ON [dbo].[UserPositions]([Name]) WHERE [IsDeleted] = 0;
             """, ct);
 
         await ExecuteScriptAsync(db,
@@ -239,9 +262,42 @@ public static class DatabaseSchemaPatcher
                     [UpdatedAtUtc] datetime2 NULL,
                     CONSTRAINT [PK_ContractDocumentTemplates] PRIMARY KEY ([Id])
                 );
-                CREATE UNIQUE INDEX [IX_ContractDocumentTemplates_Name] ON [dbo].[ContractDocumentTemplates]([Name]);
+                CREATE UNIQUE INDEX [IX_ContractDocumentTemplates_Name] ON [dbo].[ContractDocumentTemplates]([Name]) WHERE [IsDeleted] = 0;
                 CREATE INDEX [IX_ContractDocumentTemplates_IsActive_CreatedAtUtc] ON [dbo].[ContractDocumentTemplates]([IsActive], [CreatedAtUtc]);
             END
+            """, ct);
+
+        await ExecuteScriptAsync(db,
+            """
+            IF COL_LENGTH('dbo.ContractDocumentTemplates', 'IsDeleted') IS NULL
+                ALTER TABLE [dbo].[ContractDocumentTemplates] ADD [IsDeleted] bit NOT NULL
+                    CONSTRAINT [DF_ContractDocumentTemplates_IsDeleted] DEFAULT (0);
+
+            IF COL_LENGTH('dbo.ContractDocumentTemplates', 'DeletedAtUtc') IS NULL
+                ALTER TABLE [dbo].[ContractDocumentTemplates] ADD [DeletedAtUtc] datetime2 NULL;
+
+            IF EXISTS (
+                SELECT 1 FROM sys.indexes
+                WHERE name = N'IX_ContractDocumentTemplates_Name'
+                  AND object_id = OBJECT_ID(N'[dbo].[ContractDocumentTemplates]')
+                  AND has_filter = 0
+            )
+                DROP INDEX [IX_ContractDocumentTemplates_Name] ON [dbo].[ContractDocumentTemplates];
+
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.indexes
+                WHERE name = N'IX_ContractDocumentTemplates_Name'
+                  AND object_id = OBJECT_ID(N'[dbo].[ContractDocumentTemplates]')
+            )
+                CREATE UNIQUE INDEX [IX_ContractDocumentTemplates_Name]
+                    ON [dbo].[ContractDocumentTemplates]([Name]) WHERE [IsDeleted] = 0;
+
+            IF COL_LENGTH('dbo.ContractDocumentTemplateVersions', 'IsDeleted') IS NULL
+                ALTER TABLE [dbo].[ContractDocumentTemplateVersions] ADD [IsDeleted] bit NOT NULL
+                    CONSTRAINT [DF_ContractDocumentTemplateVersions_IsDeleted] DEFAULT (0);
+
+            IF COL_LENGTH('dbo.ContractDocumentTemplateVersions', 'DeletedAtUtc') IS NULL
+                ALTER TABLE [dbo].[ContractDocumentTemplateVersions] ADD [DeletedAtUtc] datetime2 NULL;
             """, ct);
 
         await ExecuteScriptAsync(db,
@@ -744,7 +800,387 @@ public static class DatabaseSchemaPatcher
                     WHERE [IsDeleted] = 0 AND [NationalCode] <> N'';
             """, ct);
 
+        await ExecuteScriptAsync(db,
+            """
+            IF OBJECT_ID(N'[dbo].[DocumentFolders]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[DocumentFolders] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [Name] nvarchar(200) NOT NULL,
+                    [ParentId] uniqueidentifier NULL,
+                    [IsDeleted] bit NOT NULL CONSTRAINT [DF_DocumentFolders_IsDeleted] DEFAULT (0),
+                    [CreatedByUserId] uniqueidentifier NOT NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    CONSTRAINT [PK_DocumentFolders] PRIMARY KEY ([Id]),
+                    CONSTRAINT [FK_DocumentFolders_DocumentFolders_ParentId]
+                        FOREIGN KEY ([ParentId]) REFERENCES [dbo].[DocumentFolders]([Id]) ON DELETE NO ACTION
+                );
+                CREATE UNIQUE INDEX [IX_DocumentFolders_ParentId_Name_IsDeleted]
+                    ON [dbo].[DocumentFolders]([ParentId], [Name], [IsDeleted])
+                    WHERE [IsDeleted] = 0;
+                CREATE INDEX [IX_DocumentFolders_ParentId_CreatedAtUtc]
+                    ON [dbo].[DocumentFolders]([ParentId], [CreatedAtUtc]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[Documents]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[Documents] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [FolderId] uniqueidentifier NOT NULL,
+                    [Title] nvarchar(300) NOT NULL,
+                    [Category] nvarchar(120) NOT NULL,
+                    [DocumentDateUtc] datetime2 NULL,
+                    [ReferenceNumber] nvarchar(80) NULL,
+                    [ManualReferenceNumber] nvarchar(80) NULL,
+                    [AccessLevel] int NOT NULL,
+                    [IsDeleted] bit NOT NULL CONSTRAINT [DF_Documents_IsDeleted] DEFAULT (0),
+                    [OwnerUserId] uniqueidentifier NOT NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    [UpdatedAtUtc] datetime2 NOT NULL,
+                    CONSTRAINT [PK_Documents] PRIMARY KEY ([Id]),
+                    CONSTRAINT [FK_Documents_DocumentFolders_FolderId]
+                        FOREIGN KEY ([FolderId]) REFERENCES [dbo].[DocumentFolders]([Id]) ON DELETE NO ACTION
+                );
+                CREATE INDEX [IX_Documents_FolderId_IsDeleted_UpdatedAtUtc]
+                    ON [dbo].[Documents]([FolderId], [IsDeleted], [UpdatedAtUtc]);
+                CREATE INDEX [IX_Documents_OwnerUserId_UpdatedAtUtc]
+                    ON [dbo].[Documents]([OwnerUserId], [UpdatedAtUtc]);
+                CREATE INDEX [IX_Documents_Category_AccessLevel_UpdatedAtUtc]
+                    ON [dbo].[Documents]([Category], [AccessLevel], [UpdatedAtUtc]);
+            END
+            IF OBJECT_ID(N'[dbo].[Documents]', N'U') IS NOT NULL
+               AND COL_LENGTH('dbo.Documents', 'ManualReferenceNumber') IS NULL
+            BEGIN
+                ALTER TABLE [dbo].[Documents] ADD [ManualReferenceNumber] nvarchar(80) NULL;
+            END
+            IF OBJECT_ID(N'[dbo].[Documents]', N'U') IS NOT NULL
+               AND COL_LENGTH('dbo.Documents', 'Description') IS NULL
+            BEGIN
+                ALTER TABLE [dbo].[Documents] ADD [Description] nvarchar(2000) NULL;
+            END
+
+            IF OBJECT_ID(N'[dbo].[DocumentVersions]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[DocumentVersions] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [DocumentId] uniqueidentifier NOT NULL,
+                    [VersionNumber] int NOT NULL,
+                    [OriginalFileName] nvarchar(260) NOT NULL,
+                    [StoredPath] nvarchar(500) NOT NULL,
+                    [Extension] nvarchar(16) NOT NULL,
+                    [SizeBytes] bigint NOT NULL,
+                    [ContentHashSha256] nvarchar(64) NULL,
+                    [ChangeLog] nvarchar(500) NULL,
+                    [UploadedByUserId] uniqueidentifier NOT NULL,
+                    [UploadedAtUtc] datetime2 NOT NULL,
+                    CONSTRAINT [PK_DocumentVersions] PRIMARY KEY ([Id]),
+                    CONSTRAINT [FK_DocumentVersions_Documents_DocumentId]
+                        FOREIGN KEY ([DocumentId]) REFERENCES [dbo].[Documents]([Id]) ON DELETE CASCADE
+                );
+                CREATE UNIQUE INDEX [IX_DocumentVersions_DocumentId_VersionNumber]
+                    ON [dbo].[DocumentVersions]([DocumentId], [VersionNumber]);
+                CREATE INDEX [IX_DocumentVersions_DocumentId_UploadedAtUtc]
+                    ON [dbo].[DocumentVersions]([DocumentId], [UploadedAtUtc]);
+            END
+            IF OBJECT_ID(N'[dbo].[DocumentVersions]', N'U') IS NOT NULL
+               AND COL_LENGTH('dbo.DocumentVersions', 'ChangeLog') IS NULL
+            BEGIN
+                ALTER TABLE [dbo].[DocumentVersions] ADD [ChangeLog] nvarchar(500) NULL;
+            END
+
+            IF OBJECT_ID(N'[dbo].[DocumentVersionTexts]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[DocumentVersionTexts] (
+                    [DocumentVersionId] uniqueidentifier NOT NULL,
+                    [DocumentId] uniqueidentifier NOT NULL,
+                    [ExtractedText] nvarchar(max) NULL,
+                    [NormalizedText] nvarchar(max) NULL,
+                    [ProcessingStatus] int NOT NULL CONSTRAINT [DF_DocumentVersionTexts_Status] DEFAULT (0),
+                    [AttemptCount] int NOT NULL CONSTRAINT [DF_DocumentVersionTexts_Attempts] DEFAULT (0),
+                    [ErrorMessage] nvarchar(2000) NULL,
+                    [CharCount] int NOT NULL CONSTRAINT [DF_DocumentVersionTexts_CharCount] DEFAULT (0),
+                    [ProcessedAtUtc] datetime2 NULL,
+                    [UpdatedAtUtc] datetime2 NOT NULL CONSTRAINT [DF_DocumentVersionTexts_UpdatedAtUtc] DEFAULT (GETUTCDATE()),
+                    CONSTRAINT [PK_DocumentVersionTexts] PRIMARY KEY ([DocumentVersionId]),
+                    CONSTRAINT [FK_DocumentVersionTexts_DocumentVersions]
+                        FOREIGN KEY ([DocumentVersionId]) REFERENCES [dbo].[DocumentVersions]([Id]) ON DELETE CASCADE,
+                    CONSTRAINT [FK_DocumentVersionTexts_Documents]
+                        FOREIGN KEY ([DocumentId]) REFERENCES [dbo].[Documents]([Id]) ON DELETE NO ACTION
+                );
+                CREATE INDEX [IX_DocumentVersionTexts_DocumentId]
+                    ON [dbo].[DocumentVersionTexts]([DocumentId]);
+                CREATE INDEX [IX_DocumentVersionTexts_Status_UpdatedAtUtc]
+                    ON [dbo].[DocumentVersionTexts]([ProcessingStatus], [UpdatedAtUtc]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[DocumentTags]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[DocumentTags] (
+                    [DocumentId] uniqueidentifier NOT NULL,
+                    [Tag] nvarchar(80) NOT NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    CONSTRAINT [PK_DocumentTags] PRIMARY KEY ([DocumentId], [Tag]),
+                    CONSTRAINT [FK_DocumentTags_Documents_DocumentId]
+                        FOREIGN KEY ([DocumentId]) REFERENCES [dbo].[Documents]([Id]) ON DELETE CASCADE
+                );
+                CREATE INDEX [IX_DocumentTags_Tag] ON [dbo].[DocumentTags]([Tag]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[DocumentSystemTags]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[DocumentSystemTags] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [Name] nvarchar(80) NOT NULL,
+                    [IsActive] bit NOT NULL CONSTRAINT [DF_DocumentSystemTags_IsActive] DEFAULT (1),
+                    [CreatedByUserId] uniqueidentifier NOT NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    CONSTRAINT [PK_DocumentSystemTags] PRIMARY KEY ([Id])
+                );
+                CREATE UNIQUE INDEX [IX_DocumentSystemTags_Name]
+                    ON [dbo].[DocumentSystemTags]([Name])
+                    WHERE [IsActive] = 1;
+                CREATE INDEX [IX_DocumentSystemTags_IsActive_CreatedAtUtc]
+                    ON [dbo].[DocumentSystemTags]([IsActive], [CreatedAtUtc]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[DocumentSystemCategories]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[DocumentSystemCategories] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [Name] nvarchar(80) NOT NULL,
+                    [IsActive] bit NOT NULL CONSTRAINT [DF_DocumentSystemCategories_IsActive] DEFAULT (1),
+                    [CreatedByUserId] uniqueidentifier NOT NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    CONSTRAINT [PK_DocumentSystemCategories] PRIMARY KEY ([Id])
+                );
+                CREATE UNIQUE INDEX [IX_DocumentSystemCategories_Name]
+                    ON [dbo].[DocumentSystemCategories]([Name])
+                    WHERE [IsActive] = 1;
+                CREATE INDEX [IX_DocumentSystemCategories_IsActive_CreatedAtUtc]
+                    ON [dbo].[DocumentSystemCategories]([IsActive], [CreatedAtUtc]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[DocumentActivities]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[DocumentActivities] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [DocumentId] uniqueidentifier NOT NULL,
+                    [EventType] nvarchar(40) NOT NULL,
+                    [Message] nvarchar(1000) NOT NULL,
+                    [ActorUserId] uniqueidentifier NULL,
+                    [IpAddress] nvarchar(45) NULL,
+                    [UserAgent] nvarchar(500) NULL,
+                    [Reason] nvarchar(500) NULL,
+                    [OldValuesJson] nvarchar(max) NULL,
+                    [NewValuesJson] nvarchar(max) NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    CONSTRAINT [PK_DocumentActivities] PRIMARY KEY ([Id]),
+                    CONSTRAINT [FK_DocumentActivities_Documents_DocumentId]
+                        FOREIGN KEY ([DocumentId]) REFERENCES [dbo].[Documents]([Id]) ON DELETE CASCADE
+                );
+                CREATE INDEX [IX_DocumentActivities_DocumentId_CreatedAtUtc]
+                    ON [dbo].[DocumentActivities]([DocumentId], [CreatedAtUtc]);
+                CREATE INDEX [IX_DocumentActivities_EventType_CreatedAtUtc]
+                    ON [dbo].[DocumentActivities]([EventType], [CreatedAtUtc]);
+                CREATE INDEX [IX_DocumentActivities_ActorUserId_CreatedAtUtc]
+                    ON [dbo].[DocumentActivities]([ActorUserId], [CreatedAtUtc]);
+            END
+            IF OBJECT_ID(N'[dbo].[DocumentActivities]', N'U') IS NOT NULL
+            BEGIN
+                IF COL_LENGTH('dbo.DocumentActivities', 'IpAddress') IS NULL
+                    ALTER TABLE [dbo].[DocumentActivities] ADD [IpAddress] nvarchar(45) NULL;
+                IF COL_LENGTH('dbo.DocumentActivities', 'UserAgent') IS NULL
+                    ALTER TABLE [dbo].[DocumentActivities] ADD [UserAgent] nvarchar(500) NULL;
+                IF COL_LENGTH('dbo.DocumentActivities', 'Reason') IS NULL
+                    ALTER TABLE [dbo].[DocumentActivities] ADD [Reason] nvarchar(500) NULL;
+                IF COL_LENGTH('dbo.DocumentActivities', 'OldValuesJson') IS NULL
+                    ALTER TABLE [dbo].[DocumentActivities] ADD [OldValuesJson] nvarchar(max) NULL;
+                IF COL_LENGTH('dbo.DocumentActivities', 'NewValuesJson') IS NULL
+                    ALTER TABLE [dbo].[DocumentActivities] ADD [NewValuesJson] nvarchar(max) NULL;
+                IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_DocumentActivities_EventType_CreatedAtUtc' AND object_id = OBJECT_ID(N'[dbo].[DocumentActivities]'))
+                    CREATE INDEX [IX_DocumentActivities_EventType_CreatedAtUtc] ON [dbo].[DocumentActivities]([EventType], [CreatedAtUtc]);
+                IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_DocumentActivities_ActorUserId_CreatedAtUtc' AND object_id = OBJECT_ID(N'[dbo].[DocumentActivities]'))
+                    CREATE INDEX [IX_DocumentActivities_ActorUserId_CreatedAtUtc] ON [dbo].[DocumentActivities]([ActorUserId], [CreatedAtUtc]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[DocumentPermissionConfigs]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[DocumentPermissionConfigs] (
+                    [ResourceType] int NOT NULL,
+                    [ResourceId] uniqueidentifier NOT NULL,
+                    [InheritFromParent] bit NOT NULL CONSTRAINT [DF_DocumentPermissionConfigs_InheritFromParent] DEFAULT (1),
+                    [UpdatedByUserId] uniqueidentifier NOT NULL,
+                    [UpdatedAtUtc] datetime2 NOT NULL,
+                    CONSTRAINT [PK_DocumentPermissionConfigs] PRIMARY KEY ([ResourceType], [ResourceId])
+                );
+                CREATE UNIQUE INDEX [IX_DocumentPermissionConfigs_ResourceType_ResourceId]
+                    ON [dbo].[DocumentPermissionConfigs]([ResourceType], [ResourceId]);
+                CREATE INDEX [IX_DocumentPermissionConfigs_UpdatedAtUtc]
+                    ON [dbo].[DocumentPermissionConfigs]([UpdatedAtUtc]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[DocumentPermissionEntries]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[DocumentPermissionEntries] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [ResourceType] int NOT NULL,
+                    [ResourceId] uniqueidentifier NOT NULL,
+                    [SubjectType] int NOT NULL,
+                    [SubjectId] uniqueidentifier NOT NULL,
+                    [Level] int NOT NULL,
+                    [CreatedByUserId] uniqueidentifier NOT NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    CONSTRAINT [PK_DocumentPermissionEntries] PRIMARY KEY ([Id])
+                );
+                CREATE UNIQUE INDEX [IX_DocumentPermissionEntries_Resource_Subject]
+                    ON [dbo].[DocumentPermissionEntries]([ResourceType], [ResourceId], [SubjectType], [SubjectId]);
+                CREATE INDEX [IX_DocumentPermissionEntries_Resource_Level]
+                    ON [dbo].[DocumentPermissionEntries]([ResourceType], [ResourceId], [Level]);
+                CREATE INDEX [IX_DocumentPermissionEntries_Subject]
+                    ON [dbo].[DocumentPermissionEntries]([SubjectType], [SubjectId]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[DocumentShareLinks]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[DocumentShareLinks] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [ResourceType] int NOT NULL,
+                    [ResourceId] uniqueidentifier NOT NULL,
+                    [Scope] int NOT NULL,
+                    [Token] nvarchar(64) NOT NULL,
+                    [SpecificSubjectIdsJson] nvarchar(max) NULL,
+                    [ExpiresAtUtc] datetime2 NULL,
+                    [IsRevoked] bit NOT NULL CONSTRAINT [DF_DocumentShareLinks_IsRevoked] DEFAULT (0),
+                    [CreatedByUserId] uniqueidentifier NOT NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    CONSTRAINT [PK_DocumentShareLinks] PRIMARY KEY ([Id])
+                );
+                CREATE UNIQUE INDEX [IX_DocumentShareLinks_Token] ON [dbo].[DocumentShareLinks]([Token]);
+                CREATE INDEX [IX_DocumentShareLinks_Resource]
+                    ON [dbo].[DocumentShareLinks]([ResourceType], [ResourceId], [IsRevoked], [CreatedAtUtc]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[Contracts]', N'U') IS NOT NULL
+               AND COL_LENGTH('dbo.Contracts', 'IndexStatus') IS NULL
+            BEGIN
+                ALTER TABLE [dbo].[Contracts]
+                    ADD [IndexStatus] int NOT NULL CONSTRAINT [DF_Contracts_IndexStatus] DEFAULT (0);
+            END
+
+            IF OBJECT_ID(N'[dbo].[ContractTextIndexes]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[ContractTextIndexes] (
+                    [ContractId] uniqueidentifier NOT NULL,
+                    [ExtractedText] nvarchar(max) NULL,
+                    [NormalizedText] nvarchar(max) NULL,
+                    [ExtractedAt] datetime2 NULL,
+                    [LastError] nvarchar(2000) NULL,
+                    [ExtractorVersion] nvarchar(20) NOT NULL CONSTRAINT [DF_ContractTextIndexes_ExtractorVersion] DEFAULT (N'1'),
+                    [ContractVersionNumber] int NOT NULL CONSTRAINT [DF_ContractTextIndexes_Version] DEFAULT (1),
+                    CONSTRAINT [PK_ContractTextIndexes] PRIMARY KEY ([ContractId]),
+                    CONSTRAINT [FK_ContractTextIndexes_Contracts]
+                        FOREIGN KEY ([ContractId]) REFERENCES [dbo].[Contracts]([Id]) ON DELETE CASCADE
+                );
+                CREATE INDEX [IX_ContractTextIndexes_ExtractedAt]
+                    ON [dbo].[ContractTextIndexes]([ExtractedAt]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[FormFieldGroupTemplates]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[FormFieldGroupTemplates] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [Name] nvarchar(200) NOT NULL,
+                    [Description] nvarchar(1000) NULL,
+                    [FieldsJson] nvarchar(max) NOT NULL CONSTRAINT [DF_FormFieldGroupTemplates_FieldsJson] DEFAULT (N'[]'),
+                    [CreatedByUserId] uniqueidentifier NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    [UpdatedAtUtc] datetime2 NOT NULL,
+                    CONSTRAINT [PK_FormFieldGroupTemplates] PRIMARY KEY ([Id])
+                );
+                CREATE INDEX [IX_FormFieldGroupTemplates_Name] ON [dbo].[FormFieldGroupTemplates]([Name]);
+                CREATE INDEX [IX_FormFieldGroupTemplates_UpdatedAtUtc] ON [dbo].[FormFieldGroupTemplates]([UpdatedAtUtc] DESC);
+            END
+
+            IF COL_LENGTH('dbo.FormFieldGroupTemplates', 'IsDeleted') IS NULL
+                ALTER TABLE [dbo].[FormFieldGroupTemplates] ADD [IsDeleted] bit NOT NULL
+                    CONSTRAINT [DF_FormFieldGroupTemplates_IsDeleted] DEFAULT (0);
+
+            IF COL_LENGTH('dbo.FormFieldGroupTemplates', 'DeletedAtUtc') IS NULL
+                ALTER TABLE [dbo].[FormFieldGroupTemplates] ADD [DeletedAtUtc] datetime2 NULL;
+
+            IF COL_LENGTH('dbo.FormFieldGroupTemplates', 'FieldCount') IS NULL
+                ALTER TABLE [dbo].[FormFieldGroupTemplates] ADD [FieldCount] int NOT NULL
+                    CONSTRAINT [DF_FormFieldGroupTemplates_FieldCount] DEFAULT (0);
+
+            IF COL_LENGTH('dbo.FormFields', 'DefaultValue') IS NULL
+                ALTER TABLE [dbo].[FormFields] ADD [DefaultValue] nvarchar(2000) NULL;
+
+            IF COL_LENGTH('dbo.FormFields', 'IsReadOnly') IS NULL
+                ALTER TABLE [dbo].[FormFields] ADD [IsReadOnly] bit NOT NULL
+                    CONSTRAINT [DF_FormFields_IsReadOnly] DEFAULT (0);
+
+            IF OBJECT_ID(N'[dbo].[FormWordBatchExportJobs]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[FormWordBatchExportJobs] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [TemplateId] uniqueidentifier NOT NULL,
+                    [SubmissionIdsJson] nvarchar(max) NOT NULL,
+                    [ImageOverridesJson] nvarchar(max) NULL,
+                    [Status] int NOT NULL,
+                    [TotalCount] int NOT NULL,
+                    [ProcessedCount] int NOT NULL,
+                    [ZipFilePath] nvarchar(500) NULL,
+                    [ZipFileName] nvarchar(260) NULL,
+                    [ErrorMessage] nvarchar(2000) NULL,
+                    [CreatedByUserId] uniqueidentifier NULL,
+                    [HangfireJobId] nvarchar(64) NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    [CompletedAtUtc] datetime2 NULL,
+                    CONSTRAINT [PK_FormWordBatchExportJobs] PRIMARY KEY ([Id])
+                );
+                CREATE INDEX [IX_FormWordBatchExportJobs_CreatedAtUtc] ON [dbo].[FormWordBatchExportJobs]([CreatedAtUtc]);
+                CREATE INDEX [IX_FormWordBatchExportJobs_CreatedByUserId] ON [dbo].[FormWordBatchExportJobs]([CreatedByUserId]);
+                CREATE INDEX [IX_FormWordBatchExportJobs_Status] ON [dbo].[FormWordBatchExportJobs]([Status]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[FormWordBatchExportJobs]', N'U') IS NOT NULL
+               AND NOT EXISTS (
+                    SELECT 1 FROM [dbo].[__EFMigrationsHistory]
+                    WHERE [MigrationId] = N'20260531120000_AddFormWordBatchExportJobs')
+                INSERT INTO [dbo].[__EFMigrationsHistory] ([MigrationId], [ProductVersion])
+                VALUES (N'20260531120000_AddFormWordBatchExportJobs', N'10.0.0');
+            """, ct);
+
+        await BackfillFormFieldGroupFieldCountsAsync(db, logger, ct);
+
         logger.LogInformation("Database schema patch completed.");
+    }
+
+    private static async Task BackfillFormFieldGroupFieldCountsAsync(
+        AppDbContext db,
+        ILogger logger,
+        CancellationToken ct)
+    {
+        if (!await db.Database.CanConnectAsync(ct)) return;
+
+        var rows = await db.FormFieldGroupTemplates
+            .Where(x => !x.IsDeleted && x.FieldsJson != "[]")
+            .ToListAsync(ct);
+
+        var updated = 0;
+        foreach (var row in rows)
+        {
+            var count = FormFieldGroupJsonHelper.CountNonHeaderFields(row.FieldsJson);
+            if (row.FieldCount == count) continue;
+            row.FieldCount = count;
+            updated++;
+        }
+
+        if (updated > 0)
+        {
+            await db.SaveChangesAsync(ct);
+            logger.LogInformation("Backfilled FieldCount for {Count} field group template(s).", updated);
+        }
     }
 
     /// <summary>حذف ستون‌های اشتباه و ایندکس‌های پرکاربرد (هم‌راستا با مایگریشن fix_schema_redundancy_and_indexes).</summary>

@@ -66,6 +66,25 @@ public class AdminResponderGroupsController(AppDbContext db) : ControllerBase
         return Ok(items);
     }
 
+    /// <summary>لیست سبک گروه‌ها برای سایدبار صفحه پاسخگوها.</summary>
+    [HttpGet("sidebar")]
+    [Authorize(Policy = "responders.read")]
+    public async Task<IActionResult> Sidebar(CancellationToken ct)
+    {
+        var items = await db.ResponderGroups
+            .AsNoTracking()
+            .Where(x => !x.IsDeleted && x.IsActive)
+            .OrderBy(x => x.Name)
+            .Select(x => new
+            {
+                x.Id,
+                x.Name,
+                MemberCount = x.Members.Count(m => !m.Responder.IsDeleted),
+            })
+            .ToListAsync(ct);
+        return Ok(items);
+    }
+
     [HttpPost]
     [Authorize(Policy = "respondergroups.add")]
     public async Task<IActionResult> Create([FromBody] ResponderGroupUpsertDto dto, CancellationToken ct)

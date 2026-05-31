@@ -15,7 +15,7 @@ public class AdminUserSettingsController(AppDbContext db) : ControllerBase
     [Authorize(Policy = "settings.read")]
     public async Task<IActionResult> ListPositions([FromQuery] bool activeOnly = false, CancellationToken ct = default)
     {
-        var q = db.UserPositions.AsQueryable();
+        var q = db.UserPositions.Where(x => !x.IsDeleted);
         if (activeOnly) q = q.Where(x => x.IsActive);
         var items = await q
             .OrderBy(x => x.SortOrder)
@@ -32,16 +32,32 @@ public class AdminUserSettingsController(AppDbContext db) : ControllerBase
         var name = (req.Name ?? "").Trim();
         if (string.IsNullOrWhiteSpace(name))
             return BadRequest(new { message = "نام سمت الزامی است" });
-        if (await db.UserPositions.AnyAsync(x => x.Name == name, ct))
+
+        if (await db.UserPositions.AnyAsync(x => x.Name == name && !x.IsDeleted, ct))
             return BadRequest(new { message = "این سمت قبلاً ثبت شده است" });
 
-        var maxOrder = await db.UserPositions.MaxAsync(x => (int?)x.SortOrder, ct) ?? 0;
+        var trashed = await db.UserPositions
+            .FirstOrDefaultAsync(x => x.Name == name && x.IsDeleted, ct);
+        if (trashed is not null)
+        {
+            trashed.IsDeleted = false;
+            trashed.DeletedAtUtc = null;
+            trashed.IsActive = true;
+            if (req.SortOrder > 0) trashed.SortOrder = req.SortOrder;
+            await db.SaveChangesAsync(ct);
+            return Ok(new UserPositionDto(trashed.Id, trashed.Name, trashed.SortOrder, trashed.IsActive));
+        }
+
+        var maxOrder = await db.UserPositions
+            .Where(x => !x.IsDeleted)
+            .MaxAsync(x => (int?)x.SortOrder, ct) ?? 0;
         var entity = new UserPosition
         {
             Id = Guid.NewGuid(),
             Name = name,
             SortOrder = req.SortOrder > 0 ? req.SortOrder : maxOrder + 1,
             IsActive = true,
+            IsDeleted = false,
             CreatedAtUtc = DateTime.UtcNow
         };
         db.UserPositions.Add(entity);
@@ -53,13 +69,13 @@ public class AdminUserSettingsController(AppDbContext db) : ControllerBase
     [Authorize(Policy = "settings.update")]
     public async Task<IActionResult> UpdatePosition(Guid id, [FromBody] UpsertUserPositionRequest req, CancellationToken ct)
     {
-        var entity = await db.UserPositions.FirstOrDefaultAsync(x => x.Id == id, ct);
+        var entity = await db.UserPositions.FirstOrDefaultAsync(x => x.Id == id && !x.IsDeleted, ct);
         if (entity is null) return NotFound(new { message = "سمت یافت نشد" });
 
         var name = (req.Name ?? "").Trim();
         if (string.IsNullOrWhiteSpace(name))
             return BadRequest(new { message = "نام سمت الزامی است" });
-        if (await db.UserPositions.AnyAsync(x => x.Name == name && x.Id != id, ct))
+        if (await db.UserPositions.AnyAsync(x => x.Name == name && x.Id != id && !x.IsDeleted, ct))
             return BadRequest(new { message = "این سمت قبلاً ثبت شده است" });
 
         entity.Name = name;
@@ -71,13 +87,15 @@ public class AdminUserSettingsController(AppDbContext db) : ControllerBase
 
     [HttpDelete("positions/{id:guid}")]
     [Authorize(Policy = "settings.delete")]
-    public async Task<IActionResult> DeactivatePosition(Guid id, CancellationToken ct)
+    public async Task<IActionResult> SoftDeletePosition(Guid id, CancellationToken ct)
     {
-        var entity = await db.UserPositions.FirstOrDefaultAsync(x => x.Id == id, ct);
+        var entity = await db.UserPositions.FirstOrDefaultAsync(x => x.Id == id && !x.IsDeleted, ct);
         if (entity is null) return NotFound(new { message = "سمت یافت نشد" });
+        entity.IsDeleted = true;
         entity.IsActive = false;
+        entity.DeletedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
-        return Ok(new { message = "سمت غیرفعال شد" });
+        return Ok(new { message = "سمت به‌صورت حذف نرم حذف شد" });
     }
 }
 

@@ -86,6 +86,8 @@ public class PublicFormsController(
                 Options = f.OptionsJson != null ? JsonSerializer.Deserialize<List<string>>(f.OptionsJson) : null,
                 HasGuideFile = f.FieldType == FieldType.Guide && !string.IsNullOrWhiteSpace(f.Placeholder),
                 GuideFileName = f.FieldType == FieldType.Guide ? f.HelpText : null,
+                f.DefaultValue,
+                f.IsReadOnly,
             })
         });
     }
@@ -302,7 +304,7 @@ public class PublicFormsController(
         var responderForNotify = await db.Responders.AsNoTracking()
             .FirstOrDefaultAsync(x => x.Id == responderId, ct);
         await dispatchNotifier.NotifySenderAfterSubmitAsync(submission, form, link, responderForNotify, ct);
-        await dispatchNotifier.NotifyResponderTrackingCodeAsync(submission, form, link, responderForNotify, ct);
+        await dispatchNotifier.NotifyRegistrantTrackingCodeAsync(submission, form, link, responderForNotify, ct);
 
         return Ok(new { message = "فرم با موفقیت ثبت شد", trackingCode = submission.TrackingCode });
     }

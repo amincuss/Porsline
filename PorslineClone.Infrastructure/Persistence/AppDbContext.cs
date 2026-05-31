@@ -26,6 +26,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<UserPosition> UserPositions => Set<UserPosition>();
     public DbSet<Form> Forms => Set<Form>();
     public DbSet<FormField> FormFields => Set<FormField>();
+    public DbSet<FormFieldGroupTemplate> FormFieldGroupTemplates => Set<FormFieldGroupTemplate>();
+    public DbSet<FormWordTemplate> FormWordTemplates => Set<FormWordTemplate>();
+    public DbSet<FormSubmissionWordDocument> FormSubmissionWordDocuments => Set<FormSubmissionWordDocument>();
+    public DbSet<FormWordBatchExportJob> FormWordBatchExportJobs => Set<FormWordBatchExportJob>();
     public DbSet<FormSubmission> FormSubmissions => Set<FormSubmission>();
     public DbSet<FormDispatchLink> FormDispatchLinks => Set<FormDispatchLink>();
     public DbSet<FormUserAccess> FormUserAccesses => Set<FormUserAccess>();
@@ -37,11 +41,23 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<ContractWorkflowTemplate> ContractWorkflowTemplates => Set<ContractWorkflowTemplate>();
     public DbSet<Contract> Contracts => Set<Contract>();
     public DbSet<ContractVersion> ContractVersions => Set<ContractVersion>();
+    public DbSet<ContractTextIndex> ContractTextIndexes => Set<ContractTextIndex>();
     public DbSet<ContractApprovalLink> ContractApprovalLinks => Set<ContractApprovalLink>();
     public DbSet<ContractActionLink> ContractActionLinks => Set<ContractActionLink>();
     public DbSet<ContractDocumentTemplate> ContractDocumentTemplates => Set<ContractDocumentTemplate>();
     public DbSet<ContractDocumentTemplateVersion> ContractDocumentTemplateVersions => Set<ContractDocumentTemplateVersion>();
     public DbSet<ContractDocumentTemplateField> ContractDocumentTemplateFields => Set<ContractDocumentTemplateField>();
+    public DbSet<DocumentFolder> DocumentFolders => Set<DocumentFolder>();
+    public DbSet<Document> Documents => Set<Document>();
+    public DbSet<DocumentVersion> DocumentVersions => Set<DocumentVersion>();
+    public DbSet<DocumentTag> DocumentTags => Set<DocumentTag>();
+    public DbSet<DocumentSystemTag> DocumentSystemTags => Set<DocumentSystemTag>();
+    public DbSet<DocumentSystemCategory> DocumentSystemCategories => Set<DocumentSystemCategory>();
+    public DbSet<DocumentActivity> DocumentActivities => Set<DocumentActivity>();
+    public DbSet<DocumentPermissionConfig> DocumentPermissionConfigs => Set<DocumentPermissionConfig>();
+    public DbSet<DocumentPermissionEntry> DocumentPermissionEntries => Set<DocumentPermissionEntry>();
+    public DbSet<DocumentShareLink> DocumentShareLinks => Set<DocumentShareLink>();
+    public DbSet<DocumentVersionText> DocumentVersionTexts => Set<DocumentVersionText>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -75,7 +91,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         builder.Entity<UserPosition>(entity =>
         {
             entity.Property(x => x.Name).HasMaxLength(150).IsRequired();
-            entity.HasIndex(x => x.Name).IsUnique();
+            entity.Property(x => x.IsDeleted).HasDefaultValue(false);
+            entity.HasIndex(x => x.Name).IsUnique().HasFilter("[IsDeleted] = 0");
             entity.HasIndex(x => new { x.IsActive, x.SortOrder });
         });
 
@@ -261,6 +278,55 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasIndex(x => x.GroupId);
         });
 
+        builder.Entity<FormFieldGroupTemplate>(entity =>
+        {
+            entity.Property(x => x.Name).HasMaxLength(200).IsRequired();
+            entity.Property(x => x.Description).HasMaxLength(1000);
+            entity.Property(x => x.FieldsJson).HasColumnType("nvarchar(max)");
+            entity.Property(x => x.IsDeleted).HasDefaultValue(false);
+            entity.HasIndex(x => x.Name);
+            entity.HasIndex(x => x.UpdatedAtUtc);
+        });
+
+        builder.Entity<FormWordTemplate>(entity =>
+        {
+            entity.Property(x => x.Name).HasMaxLength(200).IsRequired();
+            entity.Property(x => x.DocxFileName).HasMaxLength(260);
+            entity.Property(x => x.DocxFilePath).HasMaxLength(500);
+            entity.Property(x => x.DetectedPlaceholdersJson).HasColumnType("nvarchar(max)");
+            entity.Property(x => x.FieldMappingsJson).HasColumnType("nvarchar(max)");
+            entity.Property(x => x.SignaturePlaceholderKey).HasMaxLength(120);
+            entity.Property(x => x.SignatureImagePath).HasMaxLength(500);
+            entity.Property(x => x.StampPlaceholderKey).HasMaxLength(120);
+            entity.Property(x => x.StampImagePath).HasMaxLength(500);
+            entity.Property(x => x.IsDeleted).HasDefaultValue(false);
+            entity.HasIndex(x => x.FormId).IsUnique().HasFilter("[IsDeleted] = 0");
+            entity.HasOne(x => x.Form).WithMany().HasForeignKey(x => x.FormId).OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<FormSubmissionWordDocument>(entity =>
+        {
+            entity.Property(x => x.FileName).HasMaxLength(260).IsRequired();
+            entity.Property(x => x.FilePath).HasMaxLength(500).IsRequired();
+            entity.HasIndex(x => x.SubmissionId);
+            entity.HasIndex(x => new { x.SubmissionId, x.TemplateId });
+            entity.HasOne(x => x.Submission).WithMany().HasForeignKey(x => x.SubmissionId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(x => x.Template).WithMany().HasForeignKey(x => x.TemplateId).OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<FormWordBatchExportJob>(entity =>
+        {
+            entity.Property(x => x.SubmissionIdsJson).HasColumnType("nvarchar(max)");
+            entity.Property(x => x.ImageOverridesJson).HasColumnType("nvarchar(max)");
+            entity.Property(x => x.ZipFilePath).HasMaxLength(500);
+            entity.Property(x => x.ZipFileName).HasMaxLength(260);
+            entity.Property(x => x.ErrorMessage).HasMaxLength(2000);
+            entity.Property(x => x.HangfireJobId).HasMaxLength(64);
+            entity.HasIndex(x => x.Status);
+            entity.HasIndex(x => x.CreatedByUserId);
+            entity.HasIndex(x => x.CreatedAtUtc);
+        });
+
         builder.Entity<Form>(entity =>
         {
             entity.Property(x => x.Title).HasMaxLength(200).IsRequired();
@@ -304,6 +370,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.RowColCount).HasDefaultValue(1);
             entity.Property(x => x.ConditionsJson).HasMaxLength(10000);
             entity.Property(x => x.UploadMaxSizeMb);
+            entity.Property(x => x.DefaultValue).HasMaxLength(2000);
             entity.HasOne(x => x.Form)
                 .WithMany(x => x.Fields)
                 .HasForeignKey(x => x.FormId)
@@ -460,7 +527,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         {
             entity.Property(x => x.Name).HasMaxLength(200).IsRequired();
             entity.Property(x => x.Description).HasMaxLength(1000);
-            entity.HasIndex(x => x.Name).IsUnique();
+            entity.Property(x => x.IsDeleted).HasDefaultValue(false);
+            entity.HasIndex(x => x.Name).IsUnique().HasFilter("[IsDeleted] = 0");
             entity.HasIndex(x => new { x.IsActive, x.CreatedAtUtc });
             // NO ACTION: جلوگیری از multiple cascade paths در SQL Server (Template→Versions=CASCADE)
             entity.HasOne(x => x.ActiveVersion)
@@ -475,6 +543,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.FileName).HasMaxLength(260).IsRequired();
             entity.Property(x => x.DetectedPlaceholdersJson).HasColumnType("nvarchar(max)");
             entity.Property(x => x.ChangeNote).HasMaxLength(500);
+            entity.Property(x => x.IsDeleted).HasDefaultValue(false);
             entity.HasOne(x => x.Template)
                 .WithMany(t => t.Versions)
                 .HasForeignKey(x => x.TemplateId)
@@ -521,7 +590,11 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.PostApprovalJson).HasColumnType("nvarchar(max)");
             entity.Property(x => x.TemplateFieldValuesJson).HasMaxLength(20000);
             entity.Property(x => x.Status).HasConversion<int>();
-            entity.HasIndex(x => x.CreatedByUserId);
+            entity.Property(x => x.IndexStatus).HasConversion<int>();
+            entity.HasOne(x => x.TextIndex)
+                .WithOne(x => x.Contract)
+                .HasForeignKey<ContractTextIndex>(x => x.ContractId)
+                .OnDelete(DeleteBehavior.Cascade);
             entity.HasIndex(x => x.WorkflowTemplateId);
             entity.HasIndex(x => x.ContractDocumentTemplateId);
             entity.HasOne(x => x.ContractDocumentTemplate)
@@ -547,6 +620,150 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasIndex(x => new { x.Status, x.IsArchived })
                 .HasFilter("[Status] = 3 AND [IsArchived] = 0 AND [PostApprovalJson] IS NOT NULL");
             entity.HasIndex(x => new { x.CreatedByUserId, x.Status });
+        });
+
+        builder.Entity<ContractTextIndex>(entity =>
+        {
+            entity.HasKey(x => x.ContractId);
+            entity.Property(x => x.ExtractedText).HasColumnType("nvarchar(max)");
+            entity.Property(x => x.NormalizedText).HasColumnType("nvarchar(max)");
+            entity.Property(x => x.LastError).HasMaxLength(2000);
+            entity.Property(x => x.ExtractorVersion).HasMaxLength(20).IsRequired();
+            entity.HasIndex(x => x.ExtractedAt);
+        });
+
+        builder.Entity<DocumentFolder>(entity =>
+        {
+            entity.Property(x => x.Name).HasMaxLength(200).IsRequired();
+            entity.HasOne(x => x.Parent)
+                .WithMany()
+                .HasForeignKey(x => x.ParentId)
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasIndex(x => new { x.ParentId, x.Name, x.IsDeleted })
+                .IsUnique()
+                .HasFilter("[IsDeleted] = 0");
+            entity.HasIndex(x => new { x.ParentId, x.CreatedAtUtc });
+            entity.HasQueryFilter(x => !x.IsDeleted);
+        });
+
+        builder.Entity<Document>(entity =>
+        {
+            entity.Property(x => x.Title).HasMaxLength(300).IsRequired();
+            entity.Property(x => x.Category).HasMaxLength(120).IsRequired();
+            entity.Property(x => x.ReferenceNumber).HasMaxLength(80);
+            entity.Property(x => x.ManualReferenceNumber).HasMaxLength(80);
+            entity.Property(x => x.Description).HasMaxLength(2000);
+            entity.Property(x => x.AccessLevel).HasConversion<int>();
+            entity.HasOne(x => x.Folder)
+                .WithMany()
+                .HasForeignKey(x => x.FolderId)
+                .OnDelete(DeleteBehavior.Restrict);
+            entity.HasIndex(x => new { x.FolderId, x.IsDeleted, x.UpdatedAtUtc });
+            entity.HasIndex(x => new { x.OwnerUserId, x.UpdatedAtUtc });
+            entity.HasIndex(x => new { x.Category, x.AccessLevel, x.UpdatedAtUtc });
+            entity.HasQueryFilter(x => !x.IsDeleted);
+        });
+
+        builder.Entity<DocumentSystemTag>(entity =>
+        {
+            entity.Property(x => x.Name).HasMaxLength(80).IsRequired();
+            entity.HasIndex(x => x.Name).IsUnique().HasFilter("[IsActive] = 1");
+            entity.HasIndex(x => new { x.IsActive, x.CreatedAtUtc });
+        });
+
+        builder.Entity<DocumentSystemCategory>(entity =>
+        {
+            entity.Property(x => x.Name).HasMaxLength(80).IsRequired();
+            entity.HasIndex(x => x.Name).IsUnique().HasFilter("[IsActive] = 1");
+            entity.HasIndex(x => new { x.IsActive, x.CreatedAtUtc });
+        });
+
+        builder.Entity<DocumentVersion>(entity =>
+        {
+            entity.Property(x => x.OriginalFileName).HasMaxLength(260).IsRequired();
+            entity.Property(x => x.StoredPath).HasMaxLength(500).IsRequired();
+            entity.Property(x => x.Extension).HasMaxLength(16).IsRequired();
+            entity.Property(x => x.ContentHashSha256).HasMaxLength(64);
+            entity.Property(x => x.ChangeLog).HasMaxLength(500);
+            entity.HasOne(x => x.Document)
+                .WithMany(x => x.Versions)
+                .HasForeignKey(x => x.DocumentId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(x => new { x.DocumentId, x.VersionNumber }).IsUnique();
+            entity.HasIndex(x => new { x.DocumentId, x.UploadedAtUtc });
+        });
+
+        builder.Entity<DocumentVersionText>(entity =>
+        {
+            entity.HasKey(x => x.DocumentVersionId);
+            entity.Property(x => x.ExtractedText).HasColumnType("nvarchar(max)");
+            entity.Property(x => x.NormalizedText).HasColumnType("nvarchar(max)");
+            entity.Property(x => x.ProcessingStatus).HasConversion<int>();
+            entity.Property(x => x.ErrorMessage).HasMaxLength(2000);
+            entity.HasOne(x => x.Version)
+                .WithOne(x => x.TextIndex)
+                .HasForeignKey<DocumentVersionText>(x => x.DocumentVersionId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(x => x.DocumentId);
+            entity.HasIndex(x => new { x.ProcessingStatus, x.UpdatedAtUtc });
+        });
+
+        builder.Entity<DocumentTag>(entity =>
+        {
+            entity.HasKey(x => new { x.DocumentId, x.Tag });
+            entity.Property(x => x.Tag).HasMaxLength(80).IsRequired();
+            entity.HasOne(x => x.Document)
+                .WithMany(x => x.Tags)
+                .HasForeignKey(x => x.DocumentId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(x => x.Tag);
+        });
+
+        builder.Entity<DocumentActivity>(entity =>
+        {
+            entity.Property(x => x.EventType).HasMaxLength(40).IsRequired();
+            entity.Property(x => x.Message).HasMaxLength(1000).IsRequired();
+            entity.Property(x => x.IpAddress).HasMaxLength(45);
+            entity.Property(x => x.UserAgent).HasMaxLength(500);
+            entity.Property(x => x.Reason).HasMaxLength(500);
+            entity.Property(x => x.OldValuesJson).HasColumnType("nvarchar(max)");
+            entity.Property(x => x.NewValuesJson).HasColumnType("nvarchar(max)");
+            entity.HasOne(x => x.Document)
+                .WithMany()
+                .HasForeignKey(x => x.DocumentId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(x => new { x.DocumentId, x.CreatedAtUtc });
+            entity.HasIndex(x => new { x.EventType, x.CreatedAtUtc });
+            entity.HasIndex(x => new { x.ActorUserId, x.CreatedAtUtc });
+        });
+
+        builder.Entity<DocumentPermissionConfig>(entity =>
+        {
+            entity.HasKey(x => new { x.ResourceType, x.ResourceId });
+            entity.Property(x => x.ResourceType).HasConversion<int>();
+            entity.HasIndex(x => new { x.ResourceType, x.ResourceId }).IsUnique();
+            entity.HasIndex(x => x.UpdatedAtUtc);
+        });
+
+        builder.Entity<DocumentPermissionEntry>(entity =>
+        {
+            entity.Property(x => x.ResourceType).HasConversion<int>();
+            entity.Property(x => x.SubjectType).HasConversion<int>();
+            entity.Property(x => x.Level).HasConversion<int>();
+            entity.HasIndex(x => new { x.ResourceType, x.ResourceId, x.SubjectType, x.SubjectId })
+                .IsUnique();
+            entity.HasIndex(x => new { x.ResourceType, x.ResourceId, x.Level });
+            entity.HasIndex(x => new { x.SubjectType, x.SubjectId });
+        });
+
+        builder.Entity<DocumentShareLink>(entity =>
+        {
+            entity.Property(x => x.ResourceType).HasConversion<int>();
+            entity.Property(x => x.Scope).HasConversion<int>();
+            entity.Property(x => x.Token).HasMaxLength(64).IsRequired();
+            entity.Property(x => x.SpecificSubjectIdsJson).HasColumnType("nvarchar(max)");
+            entity.HasIndex(x => x.Token).IsUnique();
+            entity.HasIndex(x => new { x.ResourceType, x.ResourceId, x.IsRevoked, x.CreatedAtUtc });
         });
 
         // ── Static seed data (captured in migrations via HasData) ────────────────

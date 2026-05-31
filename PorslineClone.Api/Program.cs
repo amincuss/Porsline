@@ -1,5 +1,7 @@
 using System.Text;
 using System.Text.Json.Serialization;
+using Hangfire;
+using Hangfire.Dashboard;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
@@ -11,8 +13,10 @@ using PorslineClone.Infrastructure;
 using PorslineClone.Infrastructure.Auth;
 using PorslineClone.Infrastructure.Persistence;
 using PorslineClone.Infrastructure.Services;
+using PorslineClone.Api.HangfireJobs;
 using PorslineClone.Api.Middleware;
 using PorslineClone.Api.RuleEngine;
+using PorslineClone.Application.Abstractions;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -60,6 +64,15 @@ builder.Services.AddSwaggerGen(options =>
 });
 builder.Services.AddInfrastructure(builder.Configuration);
 builder.Services.AddScoped<IRuleEvaluationService, RuleEvaluationService>();
+
+builder.Services.AddHangfire(config => config
+    .SetDataCompatibilityLevel(Hangfire.CompatibilityLevel.Version_180)
+    .UseSimpleAssemblyNameTypeSerializer()
+    .UseRecommendedSerializerSettings()
+    .UseSqlServerStorage(builder.Configuration.GetConnectionString("DefaultConnection")));
+builder.Services.AddHangfireServer();
+builder.Services.AddScoped<IContractIndexEnqueue, HangfireContractIndexEnqueue>();
+builder.Services.AddScoped<IFormWordBatchExportEnqueue, HangfireFormWordBatchExportEnqueue>();
 
 var jwt = builder.Configuration.GetSection(JwtOptions.SectionName).Get<JwtOptions>() ?? new JwtOptions();
 var key = Encoding.UTF8.GetBytes(jwt.Key);
@@ -176,10 +189,12 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("contracts.settings.update", p => p.RequireClaim("permission", "contracts.settings.update"));
     options.AddPolicy("contracts.settings.delete", p => p.RequireClaim("permission", "contracts.settings.delete"));
     options.AddPolicy("forms.rules.delete", p => p.RequireClaim("permission", "forms.rules.delete"));
-    options.AddPolicy("settings.delete", p => p.RequireClaim("permission", "settings.delete"));
+    options.AddPolicy("settings.delete", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "settings.delete") || ctx.User.HasClaim("permission", "settings.crud")));
     options.AddPolicy("messages.read", p => p.RequireClaim("permission", "messages.read"));
     options.AddPolicy("messages.read.all", p => p.RequireClaim("permission", "messages.read.all"));
     options.AddPolicy("messages.send", p => p.RequireClaim("permission", "messages.send"));
+    options.AddPolicy("messages.delete", p => p.RequireClaim("permission", "messages.delete"));
 });
 
 var app = builder.Build();
@@ -211,6 +226,7 @@ var profileImagesRoot = Path.Combine(app.Environment.ContentRootPath, "ProfileIm
 Directory.CreateDirectory(profileImagesRoot);
 var formUploadRoot = Path.Combine(app.Environment.ContentRootPath, "Formupload");
 Directory.CreateDirectory(formUploadRoot);
+Directory.CreateDirectory(Path.Combine(app.Environment.ContentRootPath, "Documents"));
 app.UseStaticFiles(new StaticFileOptions
 {
     FileProvider = new PhysicalFileProvider(profileImagesRoot),
@@ -226,6 +242,10 @@ app.UseStaticFiles(new StaticFileOptions
 
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseHangfireDashboard("/hangfire", new DashboardOptions
+{
+    Authorization = [new HangfireAdminAuthorizationFilter()],
+});
 app.MapControllers();
 
 var dbStartup = app.Configuration.GetSection(PorslineClone.Infrastructure.Options.DatabaseStartupOptions.SectionName)
@@ -319,3 +339,9 @@ app.UseStaticFiles(new StaticFileOptions
 });
 
 app.Run();
+
+sealed class HangfireAdminAuthorizationFilter : IDashboardAuthorizationFilter
+{
+    public bool Authorize(DashboardContext context) =>
+        context.GetHttpContext().User.IsInRole("Admin");
+}

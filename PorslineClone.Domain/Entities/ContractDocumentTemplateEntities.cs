@@ -24,6 +24,8 @@ public class ContractDocumentTemplate
     public string Name { get; set; } = "";
     public string? Description { get; set; }
     public bool IsActive { get; set; } = true;
+    public bool IsDeleted { get; set; }
+    public DateTime? DeletedAtUtc { get; set; }
     public Guid? ActiveVersionId { get; set; }
     public ContractDocumentTemplateVersion? ActiveVersion { get; set; }
     public Guid? CreatedByUserId { get; set; }
@@ -47,6 +49,8 @@ public class ContractDocumentTemplateVersion
     public string? ChangeNote { get; set; }
     public Guid CreatedByUserId { get; set; }
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+    public bool IsDeleted { get; set; }
+    public DateTime? DeletedAtUtc { get; set; }
     public ICollection<ContractDocumentTemplateField> Fields { get; set; } = [];
 }
 

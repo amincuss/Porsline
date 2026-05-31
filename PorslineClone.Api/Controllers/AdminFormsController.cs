@@ -17,7 +17,14 @@ namespace PorslineClone.Api.Controllers;
 [ApiController]
 [Route("api/admin/forms")]
 [Authorize]
-public class AdminFormsController(AppDbContext db, IRuleEvaluationService ruleEvaluationService, IWebHostEnvironment env, ISmsSender smsSender, IInboxMessageService inbox, IFrontendUrlResolver frontendUrls) : ControllerBase
+public class AdminFormsController(
+    AppDbContext db,
+    IRuleEvaluationService ruleEvaluationService,
+    IWebHostEnvironment env,
+    ISmsSender smsSender,
+    IInboxMessageService inbox,
+    IFrontendUrlResolver frontendUrls,
+    FormDispatchSubmissionNotifier formDispatchNotifier) : ControllerBase
 {
     private string? CurrentUserId => User.FindFirstValue(ClaimTypes.NameIdentifier);
 
@@ -152,6 +159,8 @@ public class AdminFormsController(AppDbContext db, IRuleEvaluationService ruleEv
                     ? JsonSerializer.Deserialize<List<RuleDefinition>>(f.ConditionsJson)
                     : null,
                 f.UploadMaxSizeMb,
+                f.DefaultValue,
+                f.IsReadOnly,
                 f.RowId,
                 f.ColIndex,
                 f.RowColCount
@@ -241,6 +250,8 @@ public class AdminFormsController(AppDbContext db, IRuleEvaluationService ruleEv
                 ColIndex = f.ColIndex,
                 RowColCount = f.RowColCount is 1 or 2 or 3 ? f.RowColCount : 1,
                 UploadMaxSizeMb = f.UploadMaxSizeMb is > 0 and <= 100 ? f.UploadMaxSizeMb : null,
+                DefaultValue = string.IsNullOrWhiteSpace(f.DefaultValue) ? null : f.DefaultValue.Trim(),
+                IsReadOnly = f.IsReadOnly,
             });
         }
 
@@ -549,9 +560,12 @@ public class AdminFormsController(AppDbContext db, IRuleEvaluationService ruleEv
         )).ToList();
 
         var submission = FormSubmissionFactory.Create(form, fieldValues, req.SubmitterName, req.SubmitterEmail, null, null);
+        submission.TrackingCode = await FormTrackingCodeGenerator.GenerateUniqueAsync(db, ct);
         db.FormSubmissions.Add(submission);
 
         await db.SaveChangesAsync(ct);
+
+        await formDispatchNotifier.NotifyRegistrantTrackingCodeAsync(submission, form, null, null, ct);
 
         if (submission.Status == FormSubmissionStatus.InProgress
             && submission.WorkflowStartedAtUtc is not null)
@@ -570,6 +584,7 @@ public class AdminFormsController(AppDbContext db, IRuleEvaluationService ruleEv
                 : "فرم ثبت شد",
             needsWorkflowStart = needsStart,
             workflowName = submission.WorkflowName,
+            trackingCode = submission.TrackingCode,
         });
     }
 
@@ -618,6 +633,8 @@ public class SaveFieldPayload
     public int ColIndex { get; set; }
     public int RowColCount { get; set; } = 1;
     public int? UploadMaxSizeMb { get; set; }
+    public string? DefaultValue { get; set; }
+    public bool IsReadOnly { get; set; }
 }
 
 public class SaveConditionPayload

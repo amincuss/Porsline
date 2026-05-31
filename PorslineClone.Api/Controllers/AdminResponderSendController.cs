@@ -135,6 +135,27 @@ public class AdminResponderSendController(
         }
     }
 
+    [HttpPost("bulk")]
+    [Authorize(Policy = "responders.send")]
+    public async Task<IActionResult> SendBulk([FromBody] BulkSendFormDispatchRequest req, CancellationToken ct)
+    {
+        try
+        {
+            return await SendBulkCoreAsync(req, ct);
+        }
+        catch (DbUpdateException ex) when (IsNationalCodeDuplicate(ex))
+        {
+            return BadRequest(new { message = "برخی کدهای ملی تکراری هستند" });
+        }
+        catch (DbUpdateException ex) when (IsSchemaMismatch(ex))
+        {
+            return StatusCode(500, new
+            {
+                message = "ساختار دیتابیس با نسخهٔ API هم‌خوان نیست. API را ری‌استارت کنید تا SchemaPatch اعمال شود.",
+            });
+        }
+    }
+
     private static bool IsSchemaMismatch(DbUpdateException ex)
     {
         var text = ex.InnerException?.Message ?? ex.Message;
@@ -208,34 +229,146 @@ public class AdminResponderSendController(
 
         if (responders.Count == 0) return BadRequest(new { message = "هیچ پاسخگویی برای ارسال یافت نشد" });
 
-        var skipWorkflow = req.SkipWorkflow;
-        FormWorkflowTemplate? workflowTemplate = null;
-        if (!skipWorkflow)
+        var workflowResult = await ResolveWorkflowTemplateAsync(req.SkipWorkflow, req.WorkflowTemplateId, ct);
+        if (workflowResult.Error is not null) return workflowResult.Error;
+
+        try
         {
-            if (req.WorkflowTemplateId == Guid.Empty)
-                return BadRequest(new { message = "گردش تأیید را انتخاب کنید یا گزینه «بدون گردش» را فعال کنید" });
-            workflowTemplate = await db.FormWorkflowTemplates
-                .FirstOrDefaultAsync(x => x.Id == req.WorkflowTemplateId && x.IsActive, ct);
-            if (workflowTemplate is null)
-                return BadRequest(new { message = "گردش انتخاب‌شده یافت نشد یا غیرفعال است" });
+            var dispatch = await DispatchFormToRespondersAsync(form, responders, workflowResult.Template, ct);
+            return Ok(new { message = "ارسال انجام شد", sent = dispatch.Sent, failed = dispatch.Failed, total = responders.Count });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
+
+    private async Task<IActionResult> SendBulkCoreAsync(BulkSendFormDispatchRequest req, CancellationToken ct)
+    {
+        if (req.FormId == Guid.Empty) return BadRequest(new { message = "فرم نامعتبر است" });
+        if (req.Rows is null or { Count: 0 }) return BadRequest(new { message = "ردیفی برای ارسال وجود ندارد" });
+        if (req.Rows.Count > 500) return BadRequest(new { message = "حداکثر ۵۰۰ ردیف در هر بار ارسال مجاز است" });
+
+        var form = await db.Forms
+            .ApplyVisibleForms(db, User)
+            .FirstOrDefaultAsync(x => x.Id == req.FormId && !x.IsDeleted, ct);
+        if (form is null) return NotFound(new { message = "فرم یافت نشد" });
+        if (!form.IsActive) return BadRequest(new { message = "این فرم غیرفعال است و قابل ارسال برای پاسخگو نیست" });
+        if (form.ExpiresAtUtc.HasValue && form.ExpiresAtUtc.Value < DateTime.UtcNow)
+            return BadRequest(new { message = "اعتبار این فرم به پایان رسیده و قابل ارسال نیست" });
+
+        var workflowResult = await ResolveWorkflowTemplateAsync(req.SkipWorkflow, req.WorkflowTemplateId, ct);
+        if (workflowResult.Error is not null) return workflowResult.Error;
+
+        var responders = new List<(Guid Id, string FullName, string MobileNumber)>();
+        var invalidCount = 0;
+        var skippedCount = 0;
+
+        foreach (var row in req.Rows)
+        {
+            var firstName = (row.FirstName ?? "").Trim();
+            var lastName = (row.LastName ?? "").Trim();
+            var fullName = string.IsNullOrWhiteSpace(row.FullName)
+                ? $"{firstName} {lastName}".Trim()
+                : row.FullName.Trim();
+            var nationalCode = (row.NationalCode ?? "").Trim();
+            var mobile = (row.MobileNumber ?? "").Trim();
+            var gender = ResponderHonorific.ParseGender(row.Gender);
+
+            if (string.IsNullOrWhiteSpace(firstName) && string.IsNullOrWhiteSpace(lastName) && fullName.Length < 2)
+            {
+                skippedCount++;
+                continue;
+            }
+
+            if (!ResponderLookupHelper.IsValidNationalCode(nationalCode)
+                || fullName.Length < 2
+                || !ResponderLookupHelper.IsValidMobile(mobile)
+                || gender is null)
+            {
+                invalidCount++;
+                continue;
+            }
+
+            try
+            {
+                var responder = await ResponderLookupHelper.FindOrCreateForDispatchAsync(
+                    db,
+                    nationalCode,
+                    fullName,
+                    mobile,
+                    gender,
+                    CurrentUserGuid,
+                    ct);
+                responders.Add((responder.Id, responder.FullName, responder.MobileNumber));
+            }
+            catch (InvalidOperationException)
+            {
+                invalidCount++;
+            }
         }
 
+        if (responders.Count == 0)
+            return BadRequest(new { message = "هیچ ردیف معتبری برای ارسال یافت نشد", invalidCount, skippedCount });
+
+        try
+        {
+            var dispatch = await DispatchFormToRespondersAsync(form, responders, workflowResult.Template, ct);
+            return Ok(new
+            {
+                message = "ارسال گروهی از اکسل انجام شد",
+                sent = dispatch.Sent,
+                failed = dispatch.Failed,
+                total = responders.Count,
+                invalidCount,
+                skippedCount,
+                processedRows = req.Rows.Count,
+            });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
+
+    private async Task<(FormWorkflowTemplate? Template, IActionResult? Error)> ResolveWorkflowTemplateAsync(
+        bool skipWorkflow,
+        Guid workflowTemplateId,
+        CancellationToken ct)
+    {
+        if (skipWorkflow) return (null, null);
+        if (workflowTemplateId == Guid.Empty)
+            return (null, BadRequest(new { message = "گردش تأیید را انتخاب کنید یا گزینه «بدون گردش» را فعال کنید" }));
+        var workflowTemplate = await db.FormWorkflowTemplates
+            .FirstOrDefaultAsync(x => x.Id == workflowTemplateId && x.IsActive, ct);
+        if (workflowTemplate is null)
+            return (null, BadRequest(new { message = "گردش انتخاب‌شده یافت نشد یا غیرفعال است" }));
+        return (workflowTemplate, null);
+    }
+
+    private async Task<(int Sent, int Failed)> DispatchFormToRespondersAsync(
+        Form form,
+        IReadOnlyList<(Guid Id, string FullName, string MobileNumber)> responders,
+        FormWorkflowTemplate? workflowTemplate,
+        CancellationToken ct)
+    {
         var baseUrl = await frontendUrls.ResolvePublicBaseUrlAsync(ct);
         if (string.IsNullOrWhiteSpace(baseUrl))
-            return BadRequest(new { message = "آدرس پایهٔ عمومی در تنظیمات سایت یا appsettings (Frontend:BaseUrl) تعریف نشده است" });
+            throw new InvalidOperationException("آدرس پایهٔ عمومی در تنظیمات سایت تعریف نشده است");
+
         var sent = 0;
         var failed = 0;
+        var security = await db.SecuritySettings.AsNoTracking().FirstOrDefaultAsync(ct);
+        var defaultExpiry = SecuritySettingsHelper.LinkExpiresAtUtc(security ?? new SecuritySettings());
+        var linkExpiry = form.ExpiresAtUtc.HasValue && form.ExpiresAtUtc.Value < defaultExpiry
+            ? form.ExpiresAtUtc.Value
+            : defaultExpiry;
 
         foreach (var r in responders)
         {
             if (string.IsNullOrWhiteSpace(r.MobileNumber)) { failed++; continue; }
             var code = await GenerateUniqueCodeAsync(ct);
-            var security = await db.SecuritySettings.AsNoTracking().FirstOrDefaultAsync(ct);
-            var defaultExpiry = SecuritySettingsHelper.LinkExpiresAtUtc(security ?? new Domain.Entities.SecuritySettings());
-            var linkExpiry = form.ExpiresAtUtc.HasValue && form.ExpiresAtUtc.Value < defaultExpiry
-                ? form.ExpiresAtUtc.Value
-                : defaultExpiry;
-            db.FormDispatchLinks.Add(new Domain.Entities.FormDispatchLink
+            db.FormDispatchLinks.Add(new FormDispatchLink
             {
                 Id = Guid.NewGuid(),
                 FormId = form.Id,
@@ -254,8 +387,7 @@ public class AdminResponderSendController(
         }
 
         await db.SaveChangesAsync(ct);
-
-        return Ok(new { message = "ارسال انجام شد", sent, failed, total = responders.Count });
+        return (sent, failed);
     }
 
     private async Task<string> GenerateUniqueCodeAsync(CancellationToken ct)
@@ -295,5 +427,24 @@ public class FormDispatchActivationRequest
     public Guid GroupId { get; set; }
     public Guid ResponderId { get; set; }
     public bool IsActive { get; set; } = true;
+}
+
+public class BulkSendFormDispatchRequest
+{
+    public Guid FormId { get; set; }
+    public bool SkipWorkflow { get; set; }
+    public Guid WorkflowTemplateId { get; set; }
+    public List<BulkSendFormRow> Rows { get; set; } = [];
+}
+
+public class BulkSendFormRow
+{
+    public int RowNumber { get; set; }
+    public string? FirstName { get; set; }
+    public string? LastName { get; set; }
+    public string? FullName { get; set; }
+    public string? NationalCode { get; set; }
+    public string? MobileNumber { get; set; }
+    public string? Gender { get; set; }
 }
 

@@ -13,6 +13,7 @@ using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
 using PorslineClone.Infrastructure.Services;
 using PorslineClone.Infrastructure.Services.ContractTemplates;
+using PorslineClone.Infrastructure.Services.Contracts;
 
 namespace PorslineClone.Api.Controllers;
 
@@ -26,7 +27,9 @@ public class AdminContractsController(
     ContractFileStorageService contractFiles,
     ContractWorkflowProcessor workflowProcessor,
     ContractDocumentTemplateService documentTemplates,
-    IDocxToPdfConverter pdfConverter) : ControllerBase
+    IDocxToPdfConverter pdfConverter,
+    IContractIndexEnqueue contractIndexer,
+    IContractContentSearchService contractSearch) : ControllerBase
 {
     private static readonly HashSet<string> AllowedExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -719,6 +722,7 @@ public class AdminContractsController(
                         documentTemplateVersionIdParsed,
                         fieldValues,
                         allocatedContractNumber,
+                        allowInactiveOrDeleted: false,
                         ct);
                 try
                 {
@@ -849,6 +853,7 @@ public class AdminContractsController(
             StepsJson = steps.Count > 0 ? JsonSerializer.Serialize(steps) : null
         };
 
+        ContractTextIndexHelper.EnsurePendingIndex(db, contract);
         db.Contracts.Add(contract);
         db.ContractVersions.Add(new ContractVersion
         {
@@ -877,10 +882,13 @@ public class AdminContractsController(
             });
         }
 
-        return Ok(new
+        contractIndexer.EnqueueExtractAndIndex(contract.Id);
+
+        return Accepted(new
         {
             id = contract.Id,
             contractNumber = contract.ContractNumber,
+            indexStatus = contract.IndexStatus.ToString(),
             createdByUserId = contract.CreatedByUserId,
             createdByName = contract.CreatedByName,
             workflowName = contract.WorkflowName,
@@ -892,6 +900,52 @@ public class AdminContractsController(
                 : $"قرارداد با شماره سند {contract.ContractNumber} توسط {contract.CreatedByName} ثبت شد"
         });
     }
+
+    [HttpGet("search")]
+    [Authorize(Policy = "contracts.read")]
+    public async Task<IActionResult> Search(
+        [FromQuery] string q,
+        [FromQuery] int skip = 0,
+        [FromQuery] int take = 20,
+        [FromQuery] DateTime? from = null,
+        [FromQuery] DateTime? to = null,
+        [FromQuery] ContractStatus? status = null,
+        CancellationToken ct = default)
+    {
+        if (!TryGetCurrentUserId(out var userId))
+            return Unauthorized();
+
+        IReadOnlyCollection<Guid>? allowedIds = null;
+        if (!CanReadAllContracts)
+        {
+            allowedIds = await ScopeVisibleContracts(db.Contracts.AsNoTracking(), userId)
+                .Select(x => x.Id)
+                .ToListAsync(ct);
+        }
+
+        ContractStatusDto? statusFilter = status.HasValue ? MapContractStatusDto(status.Value) : null;
+        var (total, items) = await contractSearch.SearchAsync(
+            q,
+            skip,
+            take,
+            allowedIds,
+            from,
+            to,
+            statusFilter,
+            ct);
+
+        return Ok(new { total, items });
+    }
+
+    private static ContractStatusDto MapContractStatusDto(ContractStatus status) => status switch
+    {
+        ContractStatus.InProgress => ContractStatusDto.InProgress,
+        ContractStatus.Approved => ContractStatusDto.Approved,
+        ContractStatus.Rejected => ContractStatusDto.Rejected,
+        ContractStatus.Suspended => ContractStatusDto.Suspended,
+        ContractStatus.Incomplete => ContractStatusDto.Incomplete,
+        _ => ContractStatusDto.Pending,
+    };
 
     [HttpPost("{id:guid}/assign-workflow")]
     [Authorize(Policy = "contracts.update")]
@@ -1090,7 +1144,9 @@ public class AdminContractsController(
             CreatedAtUtc = DateTime.UtcNow,
             ChangeNote = string.IsNullOrWhiteSpace(changeNote) ? null : changeNote.Trim()
         });
+        ContractTextIndexHelper.EnsurePendingIndex(db, contract);
         await db.SaveChangesAsync(ct);
+        contractIndexer.EnqueueExtractAndIndex(contract.Id);
 
         return Ok(new
         {
@@ -1210,7 +1266,9 @@ public class AdminContractsController(
             ChangeNote = "نسخه اصلاح‌شده",
             IsAmendedVersion = true
         });
+        ContractTextIndexHelper.EnsurePendingIndex(db, contract);
         await db.SaveChangesAsync(ct);
+        contractIndexer.EnqueueExtractAndIndex(contract.Id);
 
         var result = await workflowProcessor.RegisterAmendedVersionAsync(id, userId, nextVersion, ct);
         if (!result.Success)
@@ -1264,6 +1322,7 @@ public class AdminContractsController(
                 contract.ContractDocumentTemplateVersionId,
                 fieldValues,
                 contract.ContractNumber,
+                allowInactiveOrDeleted: true,
                 ct);
             try
             {

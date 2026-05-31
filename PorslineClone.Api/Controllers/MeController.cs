@@ -236,6 +236,7 @@ public class MyAccountController(
     }
 
     [HttpDelete("messages/{messageId:guid}")]
+    [Authorize(Policy = "messages.delete")]
     public async Task<IActionResult> DeleteMessage(Guid messageId, CancellationToken cancellationToken)
     {
         if (!TryGetUserId(out var id)) return Unauthorized();

@@ -78,7 +78,7 @@ public class AdminUsersController(
         Guid? positionId = null;
         if (dto.UserPositionId is Guid pid && pid != Guid.Empty)
         {
-            if (!await db.UserPositions.AnyAsync(x => x.Id == pid && x.IsActive, cancellationToken))
+            if (!await db.UserPositions.AnyAsync(x => x.Id == pid && !x.IsDeleted && x.IsActive, cancellationToken))
                 return BadRequest(new { message = "سمت انتخاب‌شده معتبر نیست" });
             positionId = pid;
         }
@@ -168,7 +168,7 @@ public class AdminUsersController(
             return BadRequest(new { message = "یک یا چند گروه انتخاب‌شده معتبر نیستند" });
 
         var positionsByName = await db.UserPositions
-            .Where(x => x.IsActive)
+            .Where(x => !x.IsDeleted && x.IsActive)
             .ToDictionaryAsync(x => x.Name.Trim(), x => x.Id, StringComparer.OrdinalIgnoreCase, cancellationToken);
 
         var invalidRows = new List<object>();
@@ -690,7 +690,7 @@ public class AdminUsersController(
 
         if (dto.UserPositionId is Guid pid && pid != Guid.Empty)
         {
-            if (!await db.UserPositions.AnyAsync(x => x.Id == pid && x.IsActive))
+            if (!await db.UserPositions.AnyAsync(x => x.Id == pid && !x.IsDeleted && x.IsActive))
                 return BadRequest(new { message = "سمت انتخاب‌شده معتبر نیست" });
             user.UserPositionId = pid;
         }

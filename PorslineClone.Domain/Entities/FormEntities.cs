@@ -21,7 +21,9 @@ public enum FieldType
     /// <summary>فایل راهنما (توسط سازنده فرم) — فقط مشاهده برای پاسخگو</summary>
     Guide = 17,
     /// <summary>عکس پرسنلی — حداکثر یکی در فرم؛ در نسخه اداری گوشه بالا راست</summary>
-    PersonalPhoto = 18
+    PersonalPhoto = 18,
+    /// <summary>مقدار ثابت — فقط طراحی؛ کلید placeholder و مقدار برای Word</summary>
+    FixedConstant = 19
 }
 
 public class Form
@@ -64,6 +66,10 @@ public class FormField
     public int RowColCount { get; set; } = 1;
     public string? ConditionsJson { get; set; }
     public int? UploadMaxSizeMb { get; set; }
+    /// <summary>مقدار پیش‌فرض نمایش‌داده‌شده هنگام پر کردن فرم</summary>
+    public string? DefaultValue { get; set; }
+    /// <summary>فیلد با مقدار پیش‌فرض قابل ویرایش توسط پاسخ‌دهنده نیست</summary>
+    public bool IsReadOnly { get; set; }
 }
 
 /// <summary>قالب گردش تأیید فرم (با نام یکتا)</summary>

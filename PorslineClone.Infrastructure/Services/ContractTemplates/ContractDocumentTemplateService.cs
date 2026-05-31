@@ -17,9 +17,12 @@ public class ContractDocumentTemplateService(
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
+    private static IQueryable<ContractDocumentTemplate> LiveTemplates(IQueryable<ContractDocumentTemplate> q) =>
+        q.Where(x => !x.IsDeleted);
+
     public async Task<IReadOnlyList<ContractDocumentTemplateListItemDto>> ListAsync(CancellationToken ct)
     {
-        var items = await db.ContractDocumentTemplates
+        var items = await LiveTemplates(db.ContractDocumentTemplates)
             .AsNoTracking()
             .OrderByDescending(x => x.UpdatedAtUtc ?? x.CreatedAtUtc)
             .Select(x => new
@@ -51,7 +54,7 @@ public class ContractDocumentTemplateService(
 
     public async Task<IReadOnlyList<ContractDocumentTemplateActiveOptionDto>> ListActiveForContractCreateAsync(CancellationToken ct)
     {
-        var templates = await db.ContractDocumentTemplates
+        var templates = await LiveTemplates(db.ContractDocumentTemplates)
             .AsNoTracking()
             .Where(x => x.IsActive)
             .Include(x => x.Versions.OrderByDescending(v => v.VersionNumber))
@@ -60,11 +63,11 @@ public class ContractDocumentTemplateService(
             .ToListAsync(ct);
 
         return templates
-            .Where(t => t.Versions.Count > 0)
+            .Where(t => t.Versions.Any(v => !v.IsDeleted))
             .Select(t => new ContractDocumentTemplateActiveOptionDto(
                 t.Id,
                 t.Name,
-                t.Versions.Select(v => new ContractDocumentTemplateVersionPickDto(
+                t.Versions.Where(v => !v.IsDeleted).Select(v => new ContractDocumentTemplateVersionPickDto(
                     v.Id,
                     v.VersionNumber,
                     v.FileName,
@@ -75,7 +78,7 @@ public class ContractDocumentTemplateService(
 
     public async Task<ContractDocumentTemplateDetailDto?> GetAsync(Guid id, CancellationToken ct)
     {
-        var t = await db.ContractDocumentTemplates
+        var t = await LiveTemplates(db.ContractDocumentTemplates)
             .AsNoTracking()
             .Include(x => x.Versions.OrderByDescending(v => v.VersionNumber))
                 .ThenInclude(v => v.Fields.OrderBy(f => f.SortOrder))
@@ -107,7 +110,7 @@ public class ContractDocumentTemplateService(
             activeVersion?.VersionNumber,
             placeholders,
             activeFields,
-            t.Versions.Select(v => MapVersionDto(v, t.ActiveVersionId)).ToList());
+            t.Versions.Where(v => !v.IsDeleted).Select(v => MapVersionDto(v, t.ActiveVersionId)).ToList());
     }
 
     public async Task<ContractDocumentTemplateDetailDto> CreateAsync(
@@ -119,8 +122,21 @@ public class ContractDocumentTemplateService(
         if (string.IsNullOrWhiteSpace(name))
             throw new InvalidOperationException("نام قالب الزامی است");
 
-        if (await db.ContractDocumentTemplates.AnyAsync(x => x.Name == name, ct))
+        if (await LiveTemplates(db.ContractDocumentTemplates).AnyAsync(x => x.Name == name, ct))
             throw new InvalidOperationException("قالبی با این نام وجود دارد");
+
+        var trashed = await db.ContractDocumentTemplates
+            .FirstOrDefaultAsync(x => x.Name == name && x.IsDeleted, ct);
+        if (trashed is not null)
+        {
+            trashed.IsDeleted = false;
+            trashed.DeletedAtUtc = null;
+            trashed.IsActive = req.IsActive ?? true;
+            trashed.Description = string.IsNullOrWhiteSpace(req.Description) ? null : req.Description.Trim();
+            trashed.UpdatedAtUtc = DateTime.UtcNow;
+            await db.SaveChangesAsync(ct);
+            return (await GetAsync(trashed.Id, ct))!;
+        }
 
         var entity = new ContractDocumentTemplate
         {
@@ -128,6 +144,7 @@ public class ContractDocumentTemplateService(
             Name = name,
             Description = string.IsNullOrWhiteSpace(req.Description) ? null : req.Description.Trim(),
             IsActive = req.IsActive ?? true,
+            IsDeleted = false,
             CreatedByUserId = userId,
             CreatedAtUtc = DateTime.UtcNow
         };
@@ -141,7 +158,7 @@ public class ContractDocumentTemplateService(
         UpsertContractTemplateRequest req,
         CancellationToken ct)
     {
-        var entity = await db.ContractDocumentTemplates.FirstOrDefaultAsync(x => x.Id == id, ct);
+        var entity = await LiveTemplates(db.ContractDocumentTemplates).FirstOrDefaultAsync(x => x.Id == id, ct);
         if (entity is null)
             return null;
 
@@ -149,7 +166,7 @@ public class ContractDocumentTemplateService(
         if (string.IsNullOrWhiteSpace(name))
             throw new InvalidOperationException("نام قالب الزامی است");
 
-        if (await db.ContractDocumentTemplates.AnyAsync(x => x.Name == name && x.Id != id, ct))
+        if (await LiveTemplates(db.ContractDocumentTemplates).AnyAsync(x => x.Name == name && x.Id != id, ct))
             throw new InvalidOperationException("قالبی با این نام وجود دارد");
 
         entity.Name = name;
@@ -168,7 +185,7 @@ public class ContractDocumentTemplateService(
         Guid userId,
         CancellationToken ct)
     {
-        var template = await db.ContractDocumentTemplates
+        var template = await LiveTemplates(db.ContractDocumentTemplates)
             .Include(x => x.Versions)
             .FirstOrDefaultAsync(x => x.Id == templateId, ct);
         if (template is null)
@@ -205,12 +222,12 @@ public class ContractDocumentTemplateService(
 
     public async Task<ContractDocumentTemplateDetailDto?> PublishVersionAsync(Guid templateId, Guid versionId, CancellationToken ct)
     {
-        var template = await db.ContractDocumentTemplates.FirstOrDefaultAsync(x => x.Id == templateId, ct);
+        var template = await LiveTemplates(db.ContractDocumentTemplates).FirstOrDefaultAsync(x => x.Id == templateId, ct);
         if (template is null)
             return null;
 
         var version = await db.ContractDocumentTemplateVersions
-            .FirstOrDefaultAsync(x => x.Id == versionId && x.TemplateId == templateId, ct);
+            .FirstOrDefaultAsync(x => x.Id == versionId && x.TemplateId == templateId && !x.IsDeleted, ct);
         if (version is null)
             throw new InvalidOperationException("نسخه یافت نشد");
 
@@ -225,7 +242,7 @@ public class ContractDocumentTemplateService(
         SaveContractTemplateFieldsRequest req,
         CancellationToken ct)
     {
-        var template = await db.ContractDocumentTemplates
+        var template = await LiveTemplates(db.ContractDocumentTemplates)
             .AsNoTracking()
             .FirstOrDefaultAsync(x => x.Id == templateId, ct);
         if (template is null)
@@ -244,7 +261,7 @@ public class ContractDocumentTemplateService(
     {
         var version = await db.ContractDocumentTemplateVersions
             .Include(v => v.Fields)
-            .FirstOrDefaultAsync(x => x.Id == versionId && x.TemplateId == templateId, ct);
+            .FirstOrDefaultAsync(x => x.Id == versionId && x.TemplateId == templateId && !x.IsDeleted, ct);
         if (version is null)
             return null;
 
@@ -279,7 +296,7 @@ public class ContractDocumentTemplateService(
             });
         }
 
-        var template = await db.ContractDocumentTemplates.FirstAsync(x => x.Id == templateId, ct);
+        var template = await LiveTemplates(db.ContractDocumentTemplates).FirstAsync(x => x.Id == templateId, ct);
         template.UpdatedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         return await GetAsync(templateId, ct);
@@ -318,14 +335,23 @@ public class ContractDocumentTemplateService(
         Guid? versionId,
         IReadOnlyDictionary<string, string> fieldValues,
         string? contractNumber = null,
+        bool allowInactiveOrDeleted = false,
         CancellationToken ct = default)
     {
         var template = await db.ContractDocumentTemplates
             .AsNoTracking()
             .Include(x => x.ActiveVersion)
             .Include(x => x.Versions)
-            .FirstOrDefaultAsync(x => x.Id == templateId && x.IsActive, ct)
-            ?? throw new InvalidOperationException("قالب فعال یافت نشد");
+            .FirstOrDefaultAsync(x => x.Id == templateId, ct)
+            ?? throw new InvalidOperationException("قالب یافت نشد");
+
+        if (!allowInactiveOrDeleted)
+        {
+            if (template.IsDeleted)
+                throw new InvalidOperationException("قالب انتخاب‌شده حذف شده است");
+            if (!template.IsActive)
+                throw new InvalidOperationException("قالب انتخاب‌شده غیرفعال است");
+        }
 
         ContractDocumentTemplateVersion? version;
         if (versionId is { } vid && vid != Guid.Empty)
@@ -355,7 +381,7 @@ public class ContractDocumentTemplateService(
 
     private async Task<(string fullPath, string fileName)> ResolveActiveDocxAsync(Guid templateId, CancellationToken ct)
     {
-        var template = await db.ContractDocumentTemplates
+        var template = await LiveTemplates(db.ContractDocumentTemplates)
             .AsNoTracking()
             .Include(x => x.ActiveVersion)
             .FirstOrDefaultAsync(x => x.Id == templateId, ct)
@@ -559,7 +585,7 @@ public class ContractDocumentTemplateService(
             throw new InvalidOperationException("فایل Word ذخیره‌شده نامعتبر است. دوباره از فایل اصلی Word آپلود کنید.");
         }
         version.DetectedPlaceholdersJson = JsonSerializer.Serialize(placeholders, JsonOpts);
-        var template = await db.ContractDocumentTemplates.FirstAsync(x => x.Id == templateId, ct);
+        var template = await LiveTemplates(db.ContractDocumentTemplates).FirstAsync(x => x.Id == templateId, ct);
         template.UpdatedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         await SyncFieldsFromPlaceholdersAsync(templateId, versionId, placeholders, removeMissing: true, ct);
@@ -590,7 +616,7 @@ public class ContractDocumentTemplateService(
 
         var placeholders = generator.ScanPlaceholders(fullPath);
         version.DetectedPlaceholdersJson = JsonSerializer.Serialize(placeholders, JsonOpts);
-        version.Template = await db.ContractDocumentTemplates.FirstAsync(x => x.Id == templateId, ct);
+        version.Template = await LiveTemplates(db.ContractDocumentTemplates).FirstAsync(x => x.Id == templateId, ct);
         version.Template.UpdatedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         await SyncFieldsFromPlaceholdersAsync(templateId, versionId, placeholders, removeMissing: true, ct);
@@ -684,7 +710,7 @@ public class ContractDocumentTemplateService(
         var fullPath = templateFiles.ResolveFullPath(version.FilePath);
         var placeholders = generator.ScanPlaceholders(fullPath);
         version.DetectedPlaceholdersJson = JsonSerializer.Serialize(placeholders, JsonOpts);
-        var template = await db.ContractDocumentTemplates.FirstAsync(x => x.Id == templateId, ct);
+        var template = await LiveTemplates(db.ContractDocumentTemplates).FirstAsync(x => x.Id == templateId, ct);
         template.UpdatedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         await SyncFieldsFromPlaceholdersAsync(templateId, versionId, placeholders, removeMissing: true, ct);
@@ -692,69 +718,52 @@ public class ContractDocumentTemplateService(
 
     public bool IsPdfConversionAvailable => pdfConverter.IsAvailable;
 
-    public async Task<bool> DeleteVersionAsync(Guid templateId, Guid versionId, CancellationToken ct)
+    public async Task<(bool Deleted, int LinkedContractCount)> DeleteVersionAsync(Guid templateId, Guid versionId, CancellationToken ct)
     {
-        var template = await db.ContractDocumentTemplates
+        var template = await LiveTemplates(db.ContractDocumentTemplates)
             .Include(t => t.Versions)
             .FirstOrDefaultAsync(x => x.Id == templateId, ct);
         if (template is null)
-            return false;
+            return (false, 0);
 
-        var version = template.Versions.FirstOrDefault(v => v.Id == versionId);
+        var version = template.Versions.FirstOrDefault(v => v.Id == versionId && !v.IsDeleted);
         if (version is null)
-            return false;
+            return (false, 0);
 
-        var usedByContracts = await db.Contracts
-            .AnyAsync(c => c.ContractDocumentTemplateVersionId == versionId, ct);
-        if (usedByContracts)
-            throw new InvalidOperationException("این نسخه در قراردادهای صادرشده استفاده شده و قابل حذف نیست.");
+        var linkedCount = await db.Contracts.CountAsync(c => c.ContractDocumentTemplateVersionId == versionId, ct);
 
         if (template.ActiveVersionId == versionId)
         {
             var replacement = template.Versions
-                .Where(v => v.Id != versionId)
+                .Where(v => v.Id != versionId && !v.IsDeleted)
                 .OrderByDescending(v => v.VersionNumber)
                 .FirstOrDefault();
             template.ActiveVersionId = replacement?.Id;
             template.ActiveVersion = replacement;
-            template.UpdatedAtUtc = DateTime.UtcNow;
-            // شکستن FK دایره‌ای ActiveVersionId ↔ TemplateId قبل از حذف نسخه
-            await db.SaveChangesAsync(ct);
         }
 
-        TryDeleteFile(templateFiles.ResolveFullPath(version.FilePath));
-        db.ContractDocumentTemplateVersions.Remove(version);
+        version.IsDeleted = true;
+        version.DeletedAtUtc = DateTime.UtcNow;
         template.UpdatedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
-        return true;
+        return (true, linkedCount);
     }
 
-    public async Task<bool> DeleteTemplateAsync(Guid id, CancellationToken ct)
+    public async Task<(bool Deleted, int LinkedContractCount)> DeleteTemplateAsync(Guid id, CancellationToken ct)
     {
-        var template = await db.ContractDocumentTemplates
-            .Include(t => t.Versions)
+        var template = await LiveTemplates(db.ContractDocumentTemplates)
             .FirstOrDefaultAsync(x => x.Id == id, ct);
         if (template is null)
-            return false;
+            return (false, 0);
 
-        var usedCount = await db.Contracts.CountAsync(c => c.ContractDocumentTemplateId == id, ct);
-        if (usedCount > 0)
-            throw new InvalidOperationException(
-                $"این قالب در {usedCount} قرارداد استفاده شده و قابل حذف نیست.");
+        var linkedCount = await db.Contracts.CountAsync(c => c.ContractDocumentTemplateId == id, ct);
 
-        foreach (var v in template.Versions)
-            TryDeleteFile(templateFiles.ResolveFullPath(v.FilePath));
-
-        // شکستن وابستگی دایره‌ای Template.ActiveVersionId ↔ Version.TemplateId
-        template.ActiveVersionId = null;
-        template.ActiveVersion = null;
+        template.IsDeleted = true;
+        template.IsActive = false;
+        template.DeletedAtUtc = DateTime.UtcNow;
         template.UpdatedAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
-
-        db.ContractDocumentTemplates.Remove(template);
-        await db.SaveChangesAsync(ct);
-        templateFiles.TryDeleteTemplateStorage(id);
-        return true;
+        return (true, linkedCount);
     }
 
     private static void TryDeleteFile(string path)

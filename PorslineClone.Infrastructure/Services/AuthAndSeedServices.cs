@@ -333,7 +333,7 @@ public static class DbSeeder
             "users.access.read","users.access.update",
             "settings.read","settings.update","settings.delete",
             "roles.read","roles.update",
-            "menus.view","profile.update","messages.read","messages.read.all","messages.send",
+            "menus.view","profile.update","messages.read","messages.read.all","messages.send","messages.delete",
             "forms.read","forms.read.all","forms.add","forms.update","forms.delete",
             "forms.rules.read","forms.rules.update","forms.rules.delete",
             "forms.access.read","forms.access.read.all","forms.access.update",
@@ -449,6 +449,8 @@ public static class DbSeeder
         var extraMenus = new[]
         {
             new MenuItem { Key = "forms.list", Title = "لیست فرم‌ها", Icon = "LayoutTemplate", IconColor = "#10B981", Route = "/admin/forms", Order = 1, ParentId = formsMenu.Id },
+            new MenuItem { Key = "forms.field-builder", Title = "فیلد ساز", Icon = "Layers", IconColor = "#059669", Route = "/admin/forms/field-builder", Order = 9, ParentId = formsMenu.Id },
+            new MenuItem { Key = "forms.template-convert", Title = "تبدیل قالب", Icon = "FileText", IconColor = "#7C3AED", Route = "/admin/forms/template-convert", Order = 10, ParentId = formsMenu.Id },
             new MenuItem { Key = "forms.rules", Title = "شرط فرم", Icon = "GitBranch", IconColor = "#2563EB", Route = "/admin/forms/rules", Order = 2, ParentId = formsMenu.Id },
             new MenuItem { Key = "forms.access", Title = "ارجاع فرم", Icon = "FileText", IconColor = "#0EA5E9", Route = "/admin/forms/access", Order = 3, ParentId = formsMenu.Id },
             new MenuItem { Key = "forms.workflows.list", Title = "گردش‌های ذخیره‌شده", Icon = "GitBranch", IconColor = "#7C3AED", Route = "/admin/forms/workflows/list", Order = 4, ParentId = formsMenu.Id },
@@ -473,7 +475,7 @@ public static class DbSeeder
             var existing = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == rm.Key, cancellationToken);
             if (existing is null)
                 db.MenuItems.Add(new MenuItem { Id = Guid.NewGuid(), Key = rm.Key, Title = rm.Title, Icon = rm.Icon, IconColor = rm.IconColor, Route = rm.Route, Order = rm.Order, ParentId = rm.ParentId });
-            else if (rm.Key is "forms.workflows" or "forms.workflows.list" or "forms.workflow-runs" or "forms.archive"
+            else if (rm.Key is "forms.field-builder" or "forms.template-convert" or "forms.workflows" or "forms.workflows.list" or "forms.workflow-runs" or "forms.archive"
                 or "settings.users" or "settings.responders")
             {
                 existing.Title = rm.Title;
@@ -579,7 +581,7 @@ public static class DbSeeder
         var menus = await db.MenuItems.ToDictionaryAsync(x => x.Key, x => x.Id, cancellationToken);
 
         var adminPerms = permissionNames;
-        var expertPerms = new[] { "menus.view", "profile.update", "messages.read", "forms.read", "forms.add", "forms.update", "workflow-runs.read", "workflow-runs.update", "actions.read", "actions.update", "responders.send", "contracts.read", "contracts.add", "contracts.update" };
+        var expertPerms = new[] { "menus.view", "profile.update", "messages.read", "messages.delete", "forms.read", "forms.add", "forms.update", "workflow-runs.read", "workflow-runs.update", "actions.read", "actions.update", "responders.send", "contracts.read", "contracts.add", "contracts.update" };
         foreach (var p in adminPerms)
             if (perms.TryGetValue(p, out var pid) && !await db.RolePermissions.AnyAsync(x => x.RoleId == admin.Id && x.PermissionId == pid, cancellationToken))
                 db.RolePermissions.Add(new RolePermission { RoleId = admin.Id, PermissionId = pid });
@@ -587,7 +589,7 @@ public static class DbSeeder
             if (perms.TryGetValue(p, out var pid) && !await db.RolePermissions.AnyAsync(x => x.RoleId == expert.Id && x.PermissionId == pid, cancellationToken))
                 db.RolePermissions.Add(new RolePermission { RoleId = expert.Id, PermissionId = pid });
 
-        var adminMenuKeys = new[] { "dashboard", "forms", "forms.list", "forms.rules", "forms.access", "forms.workflows.list", "forms.workflows", "forms.workflow-runs", "forms.archive", "contracts", "contracts.list", "contracts.create", "contracts.workflows.list", "contracts.workflows", "contracts.templates", "contracts.settings", "contracts.archive", "actions.list", "users", "users.list", "users.create", "users.groups", "responders", "responders.list", "responders.create", "responders.groups", "responders.send", "responders.userforms", "settings", "settings.site", "settings.sms", "settings.security", "settings.access", "settings.responders", "settings.users", "profile", "messages" };
+        var adminMenuKeys = new[] { "dashboard", "forms", "forms.list", "forms.field-builder", "forms.template-convert", "forms.rules", "forms.access", "forms.workflows.list", "forms.workflows", "forms.workflow-runs", "forms.archive", "contracts", "contracts.list", "contracts.create", "contracts.workflows.list", "contracts.workflows", "contracts.templates", "contracts.settings", "contracts.archive", "actions.list", "users", "users.list", "users.create", "users.groups", "responders", "responders.list", "responders.create", "responders.groups", "responders.send", "responders.userforms", "settings", "settings.site", "settings.sms", "settings.security", "settings.access", "settings.responders", "settings.users", "profile", "messages" };
         var expertMenuKeys = new[] { "dashboard", "forms", "forms.list", "forms.rules", "forms.workflows.list", "forms.workflows", "forms.workflow-runs", "contracts", "contracts.list", "contracts.create", "actions.list", "users", "users.list", "responders", "responders.list", "responders.send", "responders.userforms", "profile", "messages" };
         foreach (var k in adminMenuKeys)
             if (menus.TryGetValue(k, out var mid) && !await db.RoleMenus.AnyAsync(x => x.RoleId == admin.Id && x.MenuId == mid, cancellationToken))
@@ -601,6 +603,8 @@ public static class DbSeeder
         await SyncWorkflowRunsMenusForRolesWithPermissionAsync(db, cancellationToken);
         await SyncFormsArchiveMenusForRolesWithPermissionAsync(db, cancellationToken);
         await SyncContractsArchiveMenusForRolesWithPermissionAsync(db, cancellationToken);
+
+        await Seeds.EmployerConfirmationFieldGroupSeed.EnsureAsync(db, cancellationToken);
 
         await db.SaveChangesAsync(cancellationToken);
     }

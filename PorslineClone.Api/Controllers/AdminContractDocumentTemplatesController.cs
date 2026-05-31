@@ -51,15 +51,14 @@ public class AdminContractDocumentTemplatesController(ContractDocumentTemplateSe
     [Authorize(Policy = "contracts.settings.delete")]
     public async Task<IActionResult> DeleteTemplate(Guid id, CancellationToken ct)
     {
-        try
-        {
-            var deleted = await templates.DeleteTemplateAsync(id, ct);
-            return deleted ? NoContent() : NotFound();
-        }
-        catch (InvalidOperationException ex)
-        {
-            return BadRequest(new { message = ex.Message });
-        }
+        var (deleted, linkedCount) = await templates.DeleteTemplateAsync(id, ct);
+        if (!deleted)
+            return NotFound();
+
+        var message = linkedCount > 0
+            ? $"قالب به‌صورت حذف نرم حذف شد. در {linkedCount} قرارداد همچنان قابل استفاده است؛ در لیست قالب‌ها نمایش داده نمی‌شود."
+            : "قالب به‌صورت حذف نرم حذف شد.";
+        return Ok(new { message, linkedContractCount = linkedCount });
     }
 
     [HttpDelete("{id:guid}/versions/{versionId:guid}")]
@@ -68,8 +67,13 @@ public class AdminContractDocumentTemplatesController(ContractDocumentTemplateSe
     {
         try
         {
-            var deleted = await templates.DeleteVersionAsync(id, versionId, ct);
-            return deleted ? Ok(await templates.GetAsync(id, ct)) : NotFound();
+            var (deleted, linkedCount) = await templates.DeleteVersionAsync(id, versionId, ct);
+            if (!deleted) return NotFound();
+            var detail = await templates.GetAsync(id, ct);
+            var message = linkedCount > 0
+                ? $"نسخه به‌صورت حذف نرم حذف شد. در {linkedCount} قرارداد همچنان قابل استفاده است."
+                : "نسخه به‌صورت حذف نرم حذف شد.";
+            return Ok(new { detail, message, linkedContractCount = linkedCount });
         }
         catch (InvalidOperationException ex)
         {

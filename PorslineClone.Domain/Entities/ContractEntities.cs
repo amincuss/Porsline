@@ -12,6 +12,29 @@ public enum ContractStatus
     Incomplete = 6
 }
 
+/// <summary>وضعیت ایندکس متن قرارداد برای جستجو</summary>
+public enum ContractIndexStatus
+{
+    Pending = 0,
+    Processing = 1,
+    Indexed = 2,
+    Failed = 3,
+    NeedsOcr = 4,
+}
+
+/// <summary>متن استخراج‌شده قرارداد برای جستجوی Full-Text</summary>
+public class ContractTextIndex
+{
+    public Guid ContractId { get; set; }
+    public Contract Contract { get; set; } = null!;
+    public string? ExtractedText { get; set; }
+    public string? NormalizedText { get; set; }
+    public DateTime? ExtractedAt { get; set; }
+    public string? LastError { get; set; }
+    public string ExtractorVersion { get; set; } = "1";
+    public int ContractVersionNumber { get; set; }
+}
+
 /// <summary>قالب گردش تأیید قرارداد (با نام یکتا)</summary>
 public class ContractWorkflowTemplate
 {
@@ -124,6 +147,8 @@ public class Contract
     /// <summary>نام کاربر ایجادکننده قرارداد (ذخیره در زمان ثبت)</summary>
     public string CreatedByName { get; set; } = "";
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+    public ContractIndexStatus IndexStatus { get; set; } = ContractIndexStatus.Pending;
+    public ContractTextIndex? TextIndex { get; set; }
     public ICollection<ContractVersion> Versions { get; set; } = [];
     public int CurrentStepOrder { get; set; } = 1;
     public ContractStatus Status { get; set; } = ContractStatus.Pending;

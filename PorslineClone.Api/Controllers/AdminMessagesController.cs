@@ -317,7 +317,7 @@ public class AdminMessagesController(AppDbContext db, IWebHostEnvironment env) :
     }
 
     [HttpDelete("{messageId:guid}")]
-    [Authorize(Policy = "messages.read")]
+    [Authorize(Policy = "messages.delete")]
     public async Task<IActionResult> Delete(Guid messageId, CancellationToken ct)
     {
         if (!TryGetUserId(out var userId)) return Unauthorized();

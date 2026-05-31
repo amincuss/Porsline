@@ -233,11 +233,22 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
             return BadRequest(new { message = ex.Message });
         }
 
+        var groupIds = (dto.GroupIds ?? [])
+            .Where(x => x != Guid.Empty)
+            .Distinct()
+            .ToList();
+        if (groupIds.Count == 0)
+            return BadRequest(new { message = "انتخاب حداقل یک گروه الزامی است" });
+
         var gender = ResponderHonorific.ParseGender(dto.Gender);
-        if (dto.Gender is { Length: > 0 } gRaw && gender is null)
+        if (dto.Gender is { Length: > 0 } && gender is null)
             return BadRequest(new { message = "جنسیت معتبر نیست (آقای یا خانم)" });
         if (gender is null)
             return BadRequest(new { message = "جنسیت (آقای/خانم) الزامی است" });
+
+        var validGroups = await db.ResponderGroups.Where(x => groupIds.Contains(x.Id)).Select(x => x.Id).ToListAsync(ct);
+        if (validGroups.Count == 0)
+            return BadRequest(new { message = "گروه انتخاب‌شده معتبر نیست" });
 
         var entity = new Responder
         {
@@ -249,16 +260,8 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
             CreatedByUserId = CurrentUserGuid,
             CreatedAtUtc = DateTime.UtcNow
         };
-        var groupIds = (dto.GroupIds ?? [])
-            .Where(x => x != Guid.Empty)
-            .Distinct()
-            .ToList();
-        if (groupIds.Count > 0)
-        {
-            var validGroups = await db.ResponderGroups.Where(x => groupIds.Contains(x.Id)).Select(x => x.Id).ToListAsync(ct);
-            foreach (var gid in validGroups)
-                entity.GroupMembers.Add(new ResponderGroupMember { ResponderId = entity.Id, GroupId = gid });
-        }
+        foreach (var gid in validGroups)
+            entity.GroupMembers.Add(new ResponderGroupMember { ResponderId = entity.Id, GroupId = gid });
         db.Responders.Add(entity);
         await db.SaveChangesAsync(ct);
         return Ok(new { message = "پاسخگو با موفقیت ثبت شد" });
@@ -341,63 +344,125 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
     [Authorize(Policy = "responders.add")]
     public async Task<IActionResult> Import([FromBody] ImportRespondersDto dto, CancellationToken ct)
     {
+        var groupIds = (dto.GroupIds ?? [])
+            .Where(x => x != Guid.Empty)
+            .Distinct()
+            .ToList();
+        if (groupIds.Count == 0)
+            return BadRequest(new { message = "انتخاب حداقل یک گروه الزامی است" });
+
+        var validGroups = await db.ResponderGroups.Where(x => groupIds.Contains(x.Id)).Select(x => x.Id).ToListAsync(ct);
+        if (validGroups.Count == 0)
+            return BadRequest(new { message = "گروه انتخاب‌شده معتبر نیست" });
+
         var invalidRows = new List<object>();
-        var valid = new List<(string Name, string Mobile, int Row)>();
+        var valid = new List<(string Name, string Mobile, string NationalCode, UserGender? Gender, int Row)>();
 
         foreach (var r in dto.Rows)
         {
             var name = (r.FullName ?? "").Trim();
             var mobile = (r.MobileNumber ?? "").Trim();
+            var nationalCode = (r.NationalCode ?? "").Trim();
             if (name.Length < 2 || !ResponderLookupHelper.IsValidMobile(mobile))
             {
-                invalidRows.Add(new { r.RowNumber, r.FullName, r.MobileNumber, reason = "نام یا موبایل نامعتبر" });
+                invalidRows.Add(new { r.RowNumber, reason = "نام یا موبایل نامعتبر" });
                 continue;
             }
-            valid.Add((name, mobile, r.RowNumber));
+            if (!ResponderLookupHelper.IsValidNationalCode(nationalCode))
+            {
+                invalidRows.Add(new { r.RowNumber, reason = "کد ملی نامعتبر" });
+                continue;
+            }
+
+            UserGender? gender = null;
+            if (r.Gender is { Length: > 0 } gRaw)
+            {
+                gender = ResponderHonorific.ParseGender(gRaw);
+                if (gender is null)
+                {
+                    invalidRows.Add(new { r.RowNumber, reason = "جنسیت نامعتبر" });
+                    continue;
+                }
+            }
+
+            valid.Add((
+                name,
+                mobile,
+                ResponderLookupHelper.NormalizeNationalCode(nationalCode),
+                gender,
+                r.RowNumber));
         }
 
-        var duplicateInFile = valid
-            .GroupBy(x => x.Mobile)
+        var duplicateNationalInFile = valid
+            .GroupBy(x => x.NationalCode)
             .Where(g => g.Count() > 1)
-            .SelectMany(g => g.Select(x => new { x.Row, x.Name, Mobile = x.Mobile, reason = "موبایل تکراری در فایل" }))
+            .SelectMany(g => g.Select(x => new { x.Row, reason = "کد ملی تکراری در فایل" }))
             .ToList();
-        if (duplicateInFile.Count > 0)
-            invalidRows.AddRange(duplicateInFile);
+        if (duplicateNationalInFile.Count > 0)
+            invalidRows.AddRange(duplicateNationalInFile);
 
         var uniqueValid = valid
-            .GroupBy(x => x.Mobile)
+            .GroupBy(x => x.NationalCode)
             .Where(g => g.Count() == 1)
             .Select(g => g.First())
             .ToList();
-
-        var mobiles = uniqueValid.Select(x => x.Mobile).ToList();
-        var existing = await db.Responders.Where(x => mobiles.Contains(x.MobileNumber)).ToListAsync(ct);
-        var existingMap = existing.ToDictionary(x => x.MobileNumber, x => x);
 
         var inserted = 0;
         var updated = 0;
         foreach (var v in uniqueValid)
         {
-            if (existingMap.TryGetValue(v.Mobile, out var ex))
+            var existing = await ActiveOnly(db.Responders)
+                .Include(x => x.GroupMembers)
+                .FirstOrDefaultAsync(x => x.NationalCode == v.NationalCode, ct)
+                ?? await ActiveOnly(db.Responders)
+                    .Include(x => x.GroupMembers)
+                    .FirstOrDefaultAsync(x => x.MobileNumber == v.Mobile, ct);
+
+            if (existing is not null)
             {
-                ex.FullName = v.Name;
-                if (ex.IsDeleted)
+                existing.FullName = v.Name;
+                existing.MobileNumber = v.Mobile;
+                existing.NationalCode = v.NationalCode;
+                if (v.Gender is not null)
+                    existing.Gender = v.Gender;
+                if (existing.IsDeleted)
                 {
-                    ex.IsDeleted = false;
-                    ex.DeletedAtUtc = null;
+                    existing.IsDeleted = false;
+                    existing.DeletedAtUtc = null;
+                }
+                foreach (var gid in validGroups)
+                {
+                    if (existing.GroupMembers.All(m => m.GroupId != gid))
+                        existing.GroupMembers.Add(new ResponderGroupMember { ResponderId = existing.Id, GroupId = gid });
                 }
                 updated++;
             }
             else
             {
-                db.Responders.Add(new Responder
+                try
+                {
+                    await ResponderLookupHelper.EnsureNationalCodeUniqueAsync(db, null, v.NationalCode, ct);
+                    await ResponderLookupHelper.EnsureMobileUniqueAsync(db, null, v.Mobile, ct);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    invalidRows.Add(new { v.Row, reason = ex.Message });
+                    continue;
+                }
+
+                var entity = new Responder
                 {
                     Id = Guid.NewGuid(),
                     FullName = v.Name,
                     MobileNumber = v.Mobile,
+                    NationalCode = v.NationalCode,
+                    Gender = v.Gender,
                     CreatedByUserId = CurrentUserGuid,
                     CreatedAtUtc = DateTime.UtcNow
-                });
+                };
+                foreach (var gid in validGroups)
+                    entity.GroupMembers.Add(new ResponderGroupMember { ResponderId = entity.Id, GroupId = gid });
+                db.Responders.Add(entity);
                 inserted++;
             }
         }
@@ -419,5 +484,5 @@ public record ResponderGroupOptionDto(Guid Id, string Name);
 public record ResponderItemDto(Guid Id, string FullName, string MobileNumber, string NationalCode, UserGender? Gender, DateTime CreatedAtUtc, List<ResponderGroupOptionDto> Groups);
 public record CreateResponderDto(string FullName, string MobileNumber, string NationalCode, string Gender, List<Guid>? GroupIds = null);
 public record UpdateResponderDto(string FullName, string MobileNumber, string NationalCode, string? Gender = null, List<Guid>? GroupIds = null);
-public record ImportRespondersDto(List<ImportResponderRowDto> Rows);
-public record ImportResponderRowDto(int RowNumber, string? FullName, string? MobileNumber);
+public record ImportRespondersDto(List<ImportResponderRowDto> Rows, List<Guid>? GroupIds = null);
+public record ImportResponderRowDto(int RowNumber, string? FullName, string? MobileNumber, string? NationalCode = null, string? Gender = null);

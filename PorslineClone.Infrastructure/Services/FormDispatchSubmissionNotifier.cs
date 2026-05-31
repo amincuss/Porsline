@@ -33,10 +33,17 @@ public class FormDispatchSubmissionNotifier(
         var lines = new List<string>
         {
             $"پاسخگو {honorificName} فرم «{form.Title}» را تکمیل و ثبت کرد.",
-            "",
-            "مشاهده پاسخ (لینک سریع):",
-            viewUrl,
         };
+
+        if (!string.IsNullOrWhiteSpace(submission.TrackingCode))
+        {
+            lines.Add("");
+            lines.Add($"کد پیگیری ثبت‌شده: {SmsDateTimeFormatter.ToPersianDigits(submission.TrackingCode)}");
+        }
+
+        lines.Add("");
+        lines.Add("مشاهده پاسخ (لینک سریع):");
+        lines.Add(viewUrl);
 
         switch (submission.Status)
         {
@@ -111,11 +118,11 @@ public class FormDispatchSubmissionNotifier(
         await smsSender.SendSmsAsync(new SmsRequest(mobile, body), ct);
     }
 
-    /// <summary>پس از ثبت فرم در وب — پیامک کد پیگیری به پاسخگو.</summary>
-    public async Task NotifyResponderTrackingCodeAsync(
+    /// <summary>پس از ثبت فرم در وب — همان کد پیگیری صفحه موفقیت به موبایل ثبت‌نام‌کننده (پاسخگو).</summary>
+    public async Task NotifyRegistrantTrackingCodeAsync(
         FormSubmission submission,
         Form form,
-        FormDispatchLink link,
+        FormDispatchLink? link,
         Responder? responder,
         CancellationToken ct = default)
     {
@@ -126,22 +133,36 @@ public class FormDispatchSubmissionNotifier(
         if (!smsSettings.FormSubmissionTrackingSmsEnabled)
             return;
 
-        var mobile = (responder?.MobileNumber ?? link.ResponderMobileNumber ?? submission.SubmitterEmail ?? "").Trim();
+        var mobile = FormSubmissionMobileHelper.ResolveRegistrantMobile(
+            link?.ResponderMobileNumber,
+            responder?.MobileNumber,
+            submission.SubmitterEmail);
         if (string.IsNullOrWhiteSpace(mobile))
             return;
 
         var honorificName = ResponderHonorific.FormatFullName(
-            link.ResponderFullName ?? submission.SubmitterName,
+            link?.ResponderFullName ?? submission.SubmitterName,
             responder?.Gender);
+
+        var trackingDisplay = SmsDateTimeFormatter.ToPersianDigits(submission.TrackingCode.Trim());
 
         var body =
             $"{honorificName} محترم،\n\n" +
             $"فرم «{form.Title}» با موفقیت ثبت شد.\n" +
-            $"کد پیگیری شما: {submission.TrackingCode}\n\n" +
+            $"کد پیگیری شما: {trackingDisplay}\n\n" +
             "لطفاً این کد را نگه دارید.";
 
         await smsSender.SendSmsAsync(new SmsRequest(mobile, body), ct);
     }
+
+    /// <summary>سازگاری با نام قبلی.</summary>
+    public Task NotifyResponderTrackingCodeAsync(
+        FormSubmission submission,
+        Form form,
+        FormDispatchLink link,
+        Responder? responder,
+        CancellationToken ct = default)
+        => NotifyRegistrantTrackingCodeAsync(submission, form, link, responder, ct);
 
     public async Task NotifySenderAfterFullApprovalAsync(
         FormSubmission submission,
