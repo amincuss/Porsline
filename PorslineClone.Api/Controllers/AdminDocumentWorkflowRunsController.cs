@@ -184,7 +184,12 @@ public class AdminDocumentWorkflowRunsController(
         if (document is null) return NotFound(new { message = "گردش سند یافت نشد" });
 
         var steps = DeserializeSteps(document.StepsJson);
-        await EnrichStepsAsync(document.Id, steps, ct);
+        var avatarPaths = await DocumentWorkflowStepEnricher.EnrichAsync(
+            db,
+            document.Id,
+            steps,
+            "/api/admin/document-workflow-runs/{0}/signature?stepOrder={1}",
+            ct);
 
         var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
         Guid.TryParse(currentUserId, out var currentUserGuid);
@@ -207,6 +212,35 @@ public class AdminDocumentWorkflowRunsController(
             if (string.IsNullOrWhiteSpace(ownerName)) ownerName = "—";
         }
 
+        var documentMeta = await db.Documents.AsNoTracking()
+            .Where(d => d.Id == document.Id)
+            .Select(d => new
+            {
+                d.Category,
+                d.Description,
+                d.DocumentDateUtc,
+                d.ManualReferenceNumber,
+                organizationalUnitName = d.OrganizationalUnit != null ? d.OrganizationalUnit.Name : null,
+                projectName = d.Project != null ? d.Project.Name : null,
+                tags = d.Tags.OrderBy(t => t.Tag).Select(t => t.Tag).ToList(),
+            })
+            .FirstOrDefaultAsync(ct);
+
+        var latestVersion = await db.DocumentVersions.AsNoTracking()
+            .Where(v => v.DocumentId == document.Id)
+            .OrderByDescending(v => v.VersionNumber)
+            .Select(v => new
+            {
+                v.Id,
+                v.VersionNumber,
+                v.OriginalFileName,
+                v.Extension,
+                v.SizeBytes,
+                v.UploadedAtUtc,
+                v.ChangeLog,
+            })
+            .FirstOrDefaultAsync(ct);
+
         return Ok(new
         {
             document.Id,
@@ -214,6 +248,27 @@ public class AdminDocumentWorkflowRunsController(
             DocumentTitle = document.Title,
             document.ReferenceNumber,
             OwnerName = ownerName,
+            Category = documentMeta?.Category,
+            Description = documentMeta?.Description,
+            DocumentDateUtc = documentMeta?.DocumentDateUtc,
+            ManualReferenceNumber = documentMeta?.ManualReferenceNumber,
+            OrganizationalUnitName = documentMeta?.organizationalUnitName,
+            ProjectName = documentMeta?.projectName,
+            Tags = documentMeta?.tags ?? [],
+            File = latestVersion is null
+                ? null
+                : new
+                {
+                    VersionId = latestVersion.Id,
+                    latestVersion.VersionNumber,
+                    latestVersion.OriginalFileName,
+                    Extension = latestVersion.Extension,
+                    latestVersion.SizeBytes,
+                    latestVersion.UploadedAtUtc,
+                    latestVersion.ChangeLog,
+                    DownloadUrl = $"/api/admin/documents/{document.Id}/download?versionId={latestVersion.Id}",
+                    PreviewUrl = $"/api/admin/documents/{document.Id}/preview?versionId={latestVersion.Id}",
+                },
             ApprovalStatus = ToClientStatus(document.WorkflowStatus),
             document.WorkflowName,
             document.WorkflowStartedAtUtc,
@@ -252,6 +307,7 @@ public class AdminDocumentWorkflowRunsController(
                 s.ReviewCycle,
                 SignatureUrl = s.SignatureUrl,
                 SignatureWidthPx = SignatureWidthPx(s.SignatureDisplayDegree),
+                AvatarUrl = DocumentWorkflowStepEnricher.BuildAvatarUrl(env.ContentRootPath, s.UserId, avatarPaths),
             }),
         });
     }
@@ -347,42 +403,6 @@ public class AdminDocumentWorkflowRunsController(
             contentType = "image/png";
 
         return PhysicalFile(fullPath, contentType, enableRangeProcessing: true);
-    }
-
-    private async Task EnrichStepsAsync(Guid documentId, List<ApprovalStepDto> steps, CancellationToken ct)
-    {
-        var approverIds = steps.Select(s => s.UserId).Where(id => id != Guid.Empty).Distinct().ToList();
-        if (approverIds.Count > 0)
-        {
-            var approvers = await db.Users.AsNoTracking()
-                .Where(u => approverIds.Contains(u.Id))
-                .Select(u => new
-                {
-                    u.Id,
-                    u.FirstName,
-                    u.LastName,
-                    u.Gender,
-                    u.SignatureImagePath,
-                    u.SignatureDisplayDegree,
-                    PositionTitle = u.UserPosition != null ? u.UserPosition.Name : null,
-                })
-                .ToListAsync(ct);
-            var userSigs = approvers.ToDictionary(
-                u => u.Id,
-                u => (u.SignatureImagePath, u.SignatureDisplayDegree));
-            foreach (var step in steps)
-            {
-                var profile = approvers.FirstOrDefault(u => u.Id == step.UserId);
-                if (profile is null) continue;
-                FormApprovalSignatureHelper.EnrichApproverIdentityFromProfile(
-                    step, profile.FirstName, profile.LastName, profile.PositionTitle, profile.Gender);
-            }
-            FormApprovalSignatureHelper.BackfillApprovedStepSignatures(steps, userSigs);
-        }
-
-        FormApprovalSignatureHelper.EnrichSignatureUrls(
-            steps,
-            s => $"/api/admin/document-workflow-runs/{documentId}/signature?stepOrder={s.Order}");
     }
 
     private static List<ApprovalStepDto> DeserializeSteps(string? json) =>

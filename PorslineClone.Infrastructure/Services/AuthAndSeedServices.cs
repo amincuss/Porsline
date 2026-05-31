@@ -568,11 +568,14 @@ public static class DbSeeder
         var documentChildMenus = new[]
         {
             new MenuItem { Key = "documents.explorer", Title = "مدیریت اسناد", Icon = "FolderOpen", IconColor = "#0891B2", Route = "/admin/documents", Order = 1, ParentId = documentsMenu.Id },
-            new MenuItem { Key = "documents.settings", Title = "تنظیمات اسناد", Icon = "Settings2", IconColor = "#6366F1", Route = "/admin/documents/settings", Order = 2, ParentId = documentsMenu.Id },
-            new MenuItem { Key = "documents.workflows.list", Title = "گردش‌های ذخیره‌شده", Icon = "GitBranch", IconColor = "#7C3AED", Route = "/admin/documents/workflows/list", Order = 3, ParentId = documentsMenu.Id },
-            new MenuItem { Key = "documents.workflows", Title = "ایجاد گردش", Icon = "GitBranch", IconColor = "#8B5CF6", Route = "/admin/documents/workflows", Order = 4, ParentId = documentsMenu.Id },
-            new MenuItem { Key = "documents.workflow-runs", Title = "گردش اسناد", Icon = "GitBranch", IconColor = "#0D9488", Route = "/admin/documents/workflow-runs", Order = 5, ParentId = documentsMenu.Id },
-            new MenuItem { Key = "documents.archive", Title = "بایگانی اسناد", Icon = "Archive", IconColor = "#64748B", Route = "/admin/documents/archive", Order = 6, ParentId = documentsMenu.Id },
+            new MenuItem { Key = "documents.upload", Title = "ایجاد سند", Icon = "FileUp", IconColor = "#4F46E5", Route = "/admin/documents/upload", Order = 2, ParentId = documentsMenu.Id },
+            new MenuItem { Key = "documents.settings", Title = "تنظیمات اسناد", Icon = "Settings2", IconColor = "#6366F1", Route = "/admin/documents/settings", Order = 3, ParentId = documentsMenu.Id },
+            new MenuItem { Key = "documents.sms-settings", Title = "تنظیمات پیامک اسناد", Icon = "MessageSquare", IconColor = "#059669", Route = "/admin/documents/settings/sms", Order = 4, ParentId = documentsMenu.Id },
+            new MenuItem { Key = "documents.workflows.list", Title = "گردش‌های ذخیره‌شده", Icon = "GitBranch", IconColor = "#7C3AED", Route = "/admin/documents/workflows/list", Order = 5, ParentId = documentsMenu.Id },
+            new MenuItem { Key = "documents.workflows", Title = "ایجاد گردش", Icon = "GitBranch", IconColor = "#8B5CF6", Route = "/admin/documents/workflows", Order = 6, ParentId = documentsMenu.Id },
+            new MenuItem { Key = "documents.workflow-runs", Title = "گردش اسناد", Icon = "GitBranch", IconColor = "#0D9488", Route = "/admin/documents/workflow-runs", Order = 7, ParentId = documentsMenu.Id },
+            new MenuItem { Key = "documents.archive", Title = "بایگانی اسناد", Icon = "Archive", IconColor = "#64748B", Route = "/admin/documents/archive", Order = 8, ParentId = documentsMenu.Id },
+            new MenuItem { Key = "documents.lifecycle", Title = "چرخه عمر و هشدارها", Icon = "Clock", IconColor = "#D97706", Route = "/admin/documents/lifecycle", Order = 9, ParentId = documentsMenu.Id },
         };
         foreach (var dm in documentChildMenus)
         {
@@ -636,7 +639,7 @@ public static class DbSeeder
             if (perms.TryGetValue(p, out var pid) && !await db.RolePermissions.AnyAsync(x => x.RoleId == expert.Id && x.PermissionId == pid, cancellationToken))
                 db.RolePermissions.Add(new RolePermission { RoleId = expert.Id, PermissionId = pid });
 
-        var adminMenuKeys = new[] { "dashboard", "forms", "forms.list", "forms.field-builder", "forms.template-convert", "forms.rules", "forms.access", "forms.workflows.list", "forms.workflows", "forms.workflow-runs", "forms.archive", "contracts", "contracts.list", "contracts.create", "contracts.workflows.list", "contracts.workflows", "contracts.templates", "contracts.settings", "contracts.archive", "actions.list", "documents", "documents.explorer", "documents.settings", "documents.workflows.list", "documents.workflows", "documents.workflow-runs", "documents.archive", "users", "users.list", "users.create", "users.groups", "responders", "responders.list", "responders.create", "responders.groups", "responders.send", "responders.userforms", "responders.workflows.list", "responders.workflows", "responders.workflow-runs", "settings", "settings.site", "settings.sms", "settings.security", "settings.access", "settings.responders", "settings.users", "profile", "messages" };
+        var adminMenuKeys = new[] { "dashboard", "forms", "forms.list", "forms.field-builder", "forms.template-convert", "forms.rules", "forms.access", "forms.workflows.list", "forms.workflows", "forms.workflow-runs", "forms.archive", "contracts", "contracts.list", "contracts.create", "contracts.workflows.list", "contracts.workflows", "contracts.templates", "contracts.settings", "contracts.archive", "actions.list", "documents", "documents.explorer", "documents.settings", "documents.sms-settings", "documents.workflows.list", "documents.workflows", "documents.workflow-runs", "documents.archive", "users", "users.list", "users.create", "users.groups", "responders", "responders.list", "responders.create", "responders.groups", "responders.send", "responders.userforms", "responders.workflows.list", "responders.workflows", "responders.workflow-runs", "settings", "settings.site", "settings.sms", "settings.security", "settings.access", "settings.responders", "settings.users", "profile", "messages" };
         var expertMenuKeys = new[] { "dashboard", "forms", "forms.list", "forms.rules", "forms.workflows.list", "forms.workflows", "forms.workflow-runs", "contracts", "contracts.list", "contracts.create", "actions.list", "documents", "documents.explorer", "documents.workflows.list", "documents.workflows", "documents.workflow-runs", "documents.archive", "users", "users.list", "responders", "responders.list", "responders.send", "responders.userforms", "responders.workflows.list", "responders.workflows", "responders.workflow-runs", "profile", "messages" };
         foreach (var k in adminMenuKeys)
             if (menus.TryGetValue(k, out var mid) && !await db.RoleMenus.AnyAsync(x => x.RoleId == admin.Id && x.MenuId == mid, cancellationToken))
@@ -980,6 +983,16 @@ public static class DbSeeder
                     linked.Add((roleId, settingsMenuId));
                 }
             }
+
+            if (roleIdsWithSettings.Contains(roleId) && menus.ContainsKey("documents.sms-settings"))
+            {
+                var smsMenuId = menus["documents.sms-settings"];
+                if (!linked.Contains((roleId, smsMenuId)))
+                {
+                    db.RoleMenus.Add(new RoleMenu { RoleId = roleId, MenuId = smsMenuId });
+                    linked.Add((roleId, smsMenuId));
+                }
+            }
         }
     }
 
@@ -1004,7 +1017,7 @@ public static class DbSeeder
         if (targetRoleIds.Count == 0) return;
 
         var linked = await LoadRoleMenuLinkSetAsync(db, targetRoleIds, cancellationToken);
-        var menuKeys = new[] { "documents", "documents.explorer", "documents.archive" };
+        var menuKeys = new[] { "documents", "documents.explorer", "documents.upload", "documents.archive", "documents.lifecycle" };
 
         foreach (var roleId in targetRoleIds)
         {

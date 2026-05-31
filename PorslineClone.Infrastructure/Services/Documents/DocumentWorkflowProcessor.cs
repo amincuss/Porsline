@@ -80,6 +80,7 @@ public class DocumentWorkflowProcessor(
                 document.CurrentStepOrder = next.Order;
                 document.WorkflowStatus = DocumentWorkflowStatus.InProgress;
                 await SendAssigneeSmsAsync(document, next.UserId, approverName, current.UserName, ct);
+                await NotifyOwnerAboutStepApprovalAsync(document, currentUser, next, ct);
             }
         }
         else
@@ -130,7 +131,14 @@ public class DocumentWorkflowProcessor(
         await db.SaveChangesAsync(ct);
 
         if (becameFullyApproved)
+        {
+            await NotifyOwnerFullyApprovedAsync(document, ct);
             await postApproval.TryStartPostApprovalAsync(document, ct);
+        }
+        else if (terminalReject)
+        {
+            await NotifyOwnerRejectedAsync(document, approverName, comment, ct);
+        }
 
         return WorkflowActionResult.Ok(approve ? "تأیید شد" : "رد شد");
     }
@@ -150,8 +158,8 @@ public class DocumentWorkflowProcessor(
             return WorkflowActionResult.Fail("در حال حاضر مرحله‌ای برای تأیید فعال نیست");
 
         var smsSettings = await db.SmsSettings.FirstOrDefaultAsync(ct) ?? new SmsSettings();
-        if (!smsSettings.ApprovalReferralSmsEnabled)
-            return WorkflowActionResult.Fail("پیامک ارجاع تأیید در تنظیمات سیستم غیرفعال است");
+        if (!smsSettings.DocumentApprovalReferralSmsEnabled)
+            return WorkflowActionResult.Fail("پیامک ارجاع تأیید سند در تنظیمات غیرفعال است");
 
         var user = await userManager.FindByIdAsync(current.UserId.ToString());
         if (user is null || string.IsNullOrWhiteSpace(user.PhoneNumber))
@@ -221,16 +229,16 @@ public class DocumentWorkflowProcessor(
         var docTitle = document.Title;
         var msg = isReminder
             ? $"یادآوری: سند «{docTitle}» همچنان منتظر تأیید شماست.\n" +
-              $"لینک تأیید: {linkPath}\n" +
+              $"لینک تأیید (بدون نیاز به ورود):\n{linkPath}\n" +
               $"یا پنل: {adminWorkflowRuns}"
             : $"سند «{docTitle}» برای تأیید شما ارسال شد.\n" +
               $"ارجاع‌دهنده: {sender}\n" +
-              $"لینک تأیید: {linkPath}\n" +
+              $"لینک تأیید (بدون نیاز به ورود):\n{linkPath}\n" +
               $"یا پنل: {adminWorkflowRuns}";
 
         var inboxTitle = isReminder ? "یادآوری تأیید سند" : "سند برای تأیید";
         await inbox.SendToUserAsync(userId, inboxTitle, msg, ct);
-        if (!smsSettings.ApprovalReferralSmsEnabled || string.IsNullOrWhiteSpace(user.PhoneNumber)) return false;
+        if (!smsSettings.DocumentApprovalReferralSmsEnabled || string.IsNullOrWhiteSpace(user.PhoneNumber)) return false;
         var sent = await smsSender.SendSmsAsync(new SmsRequest(user.PhoneNumber, msg), ct);
         if (sent && isReminder)
             await MarkReminderSentForDocumentAsync(document.Id, userId, ct);
@@ -246,6 +254,96 @@ public class DocumentWorkflowProcessor(
         if (link is null) return;
         link.ReminderSmsSentAtUtc = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
+    }
+
+    private async Task NotifyOwnerAboutStepApprovalAsync(
+        Document document,
+        AppUser? approver,
+        ApprovalStepDto nextStep,
+        CancellationToken ct)
+    {
+        if (document.OwnerUserId == Guid.Empty) return;
+
+        var smsSettings = await db.SmsSettings.FirstOrDefaultAsync(ct) ?? new SmsSettings();
+        var owner = await userManager.FindByIdAsync(document.OwnerUserId.ToString());
+        if (owner is null) return;
+
+        var approverLabel = FormatPersonLabel(approver, null);
+        var nextUser = await db.Users.AsNoTracking()
+            .Include(u => u.UserPosition)
+            .FirstOrDefaultAsync(u => u.Id == nextStep.UserId, ct);
+        var nextLabel = FormatPersonLabel(nextUser, nextStep.UserName);
+        var position = nextUser?.UserPosition?.Name?.Trim();
+        var (dateStr, timeStr) = SmsDateTimeFormatter.FormatUtcNowTehran();
+        var statusTail = string.IsNullOrWhiteSpace(position)
+            ? $"سیستم منتظر تأیید {nextLabel} است."
+            : $"سیستم منتظر تأیید {nextLabel} با سمت «{position}» است.";
+
+        var refPart = string.IsNullOrWhiteSpace(document.ReferenceNumber)
+            ? ""
+            : $" (شماره ارجاع: {document.ReferenceNumber})";
+        var msg =
+            $"سند «{document.Title}»{refPart}:\n" +
+            $"{approverLabel} در تاریخ {dateStr} ساعت {timeStr} تأیید کرد.\n" +
+            statusTail;
+
+        await inbox.SendToUserAsync(document.OwnerUserId, "به‌روزرسانی گردش سند", msg, ct);
+        if (!smsSettings.DocumentOwnerStepApprovalNotifySmsEnabled || string.IsNullOrWhiteSpace(owner.PhoneNumber))
+            return;
+        await smsSender.SendSmsAsync(new SmsRequest(owner.PhoneNumber, msg), ct);
+    }
+
+    private async Task NotifyOwnerFullyApprovedAsync(Document document, CancellationToken ct)
+    {
+        if (document.OwnerUserId == Guid.Empty) return;
+
+        var smsSettings = await db.SmsSettings.FirstOrDefaultAsync(ct) ?? new SmsSettings();
+        var owner = await userManager.FindByIdAsync(document.OwnerUserId.ToString());
+        if (owner is null) return;
+
+        var refPart = string.IsNullOrWhiteSpace(document.ReferenceNumber)
+            ? ""
+            : $" (شماره ارجاع: {document.ReferenceNumber})";
+        var msg = $"سند «{document.Title}»{refPart} در تمام مراحل تأیید شد و گردش به پایان رسید.";
+
+        await inbox.SendToUserAsync(document.OwnerUserId, "تأیید نهایی سند", msg, ct);
+        if (!smsSettings.DocumentWorkflowCompletedOwnerSmsEnabled || string.IsNullOrWhiteSpace(owner.PhoneNumber))
+            return;
+        await smsSender.SendSmsAsync(new SmsRequest(owner.PhoneNumber, msg), ct);
+    }
+
+    private async Task NotifyOwnerRejectedAsync(
+        Document document,
+        string approverName,
+        string? comment,
+        CancellationToken ct)
+    {
+        if (document.OwnerUserId == Guid.Empty) return;
+
+        var smsSettings = await db.SmsSettings.FirstOrDefaultAsync(ct) ?? new SmsSettings();
+        var owner = await userManager.FindByIdAsync(document.OwnerUserId.ToString());
+        if (owner is null) return;
+
+        var refPart = string.IsNullOrWhiteSpace(document.ReferenceNumber)
+            ? ""
+            : $" (شماره ارجاع: {document.ReferenceNumber})";
+        var note = string.IsNullOrWhiteSpace(comment) ? "" : $"\nتوضیح: {comment.Trim()}";
+        var msg =
+            $"سند «{document.Title}»{refPart} در گردش تأیید رد شد.\n" +
+            $"ردکننده: {approverName}{note}";
+
+        await inbox.SendToUserAsync(document.OwnerUserId, "رد گردش سند", msg, ct);
+        if (!smsSettings.DocumentWorkflowRejectedOwnerSmsEnabled || string.IsNullOrWhiteSpace(owner.PhoneNumber))
+            return;
+        await smsSender.SendSmsAsync(new SmsRequest(owner.PhoneNumber, msg), ct);
+    }
+
+    private static string FormatPersonLabel(AppUser? user, string? fallbackName)
+    {
+        var full = user is null ? (fallbackName ?? "").Trim() : $"{user.FirstName} {user.LastName}".Trim();
+        if (string.IsNullOrWhiteSpace(full)) full = (fallbackName ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(full)) return "تأییدکننده";
+        return full;
     }
 
     public static List<ApprovalStepDto> DeserializeSteps(string? json) =>

@@ -240,6 +240,107 @@ public class AdminDocumentLifecycleController(
         });
     }
 
+    [HttpGet("alerts")]
+    public async Task<IActionResult> LifecycleAlerts([FromQuery] int days = 30, [FromQuery] int archiveDays = 7, CancellationToken ct = default)
+    {
+        if (!CanReadLifecycle) return Forbid();
+        days = Math.Clamp(days, 1, 365);
+        archiveDays = Math.Clamp(archiveDays, 1, 90);
+        var now = DateTime.UtcNow;
+        var expiryThreshold = now.AddDays(days);
+        var archiveThreshold = now.AddDays(archiveDays);
+
+        var visible = db.Documents.AsNoTracking().Where(x => !x.IsDeleted);
+
+        static object MapAlertRow(Guid id, string title, string category, DateTime? dueAt, string alertType, string? extra = null) =>
+            new { id, title, category, dueAtUtc = dueAt, alertType, detail = extra };
+
+        var expiringSoon = await visible
+            .Where(x => !x.IsArchived && !x.LongTermRetention)
+            .Where(x =>
+                (x.ExpiresAtUtc != null && x.ExpiresAtUtc > now && x.ExpiresAtUtc <= expiryThreshold)
+                || (x.ScheduledDeleteAtUtc != null && x.ScheduledDeleteAtUtc > now && x.ScheduledDeleteAtUtc <= expiryThreshold))
+            .OrderBy(x => x.ExpiresAtUtc ?? x.ScheduledDeleteAtUtc)
+            .Take(50)
+            .Select(x => new { x.Id, x.Title, x.Category, x.ExpiresAtUtc, x.ScheduledDeleteAtUtc })
+            .ToListAsync(ct);
+
+        var expired = await visible
+            .Where(x => !x.LongTermRetention)
+            .Where(x =>
+                (x.ExpiresAtUtc != null && x.ExpiresAtUtc <= now)
+                || (x.ScheduledDeleteAtUtc != null && x.ScheduledDeleteAtUtc <= now))
+            .OrderByDescending(x => x.ExpiresAtUtc ?? x.ScheduledDeleteAtUtc)
+            .Take(50)
+            .Select(x => new { x.Id, x.Title, x.Category, x.ExpiresAtUtc, x.ScheduledDeleteAtUtc, x.IsArchived })
+            .ToListAsync(ct);
+
+        var needsWorkflowReview = await visible
+            .Where(x => !x.IsArchived && !x.IsObsolete)
+            .Where(x =>
+                x.WorkflowStatus == DocumentWorkflowStatus.Pending
+                || x.WorkflowStatus == DocumentWorkflowStatus.InProgress
+                || x.WorkflowStatus == DocumentWorkflowStatus.Rejected)
+            .OrderByDescending(x => x.UpdatedAtUtc)
+            .Take(50)
+            .Select(x => new { x.Id, x.Title, x.Category, workflowStatus = x.WorkflowStatus.ToString(), x.WorkflowName })
+            .ToListAsync(ct);
+
+        var scheduledArchiveSoon = await visible
+            .Where(x => !x.IsArchived && !x.LegalHold && !x.IsObsolete)
+            .Where(x => x.ScheduledArchiveAtUtc != null && x.ScheduledArchiveAtUtc > now && x.ScheduledArchiveAtUtc <= archiveThreshold)
+            .OrderBy(x => x.ScheduledArchiveAtUtc)
+            .Take(50)
+            .Select(x => new { x.Id, x.Title, x.Category, x.ScheduledArchiveAtUtc })
+            .ToListAsync(ct);
+
+        var obsoleteMarked = await visible
+            .Where(x => x.IsObsolete)
+            .OrderByDescending(x => x.ObsoleteAtUtc ?? x.UpdatedAtUtc)
+            .Take(30)
+            .Select(x => new { x.Id, x.Title, x.Category, x.ObsoleteReason, x.ObsoleteAtUtc })
+            .ToListAsync(ct);
+
+        return Ok(new
+        {
+            warningDays = days,
+            archiveWarningDays = archiveDays,
+            summary = new
+            {
+                expiringSoon = expiringSoon.Count,
+                expired = expired.Count,
+                needsWorkflowReview = needsWorkflowReview.Count,
+                scheduledArchiveSoon = scheduledArchiveSoon.Count,
+                obsolete = obsoleteMarked.Count,
+            },
+            expiringSoon = expiringSoon.Select(x => MapAlertRow(
+                x.Id, x.Title, x.Category, x.ExpiresAtUtc ?? x.ScheduledDeleteAtUtc, "expiring_soon")),
+            expired = expired.Select(x => MapAlertRow(
+                x.Id, x.Title, x.Category, x.ExpiresAtUtc ?? x.ScheduledDeleteAtUtc, "expired",
+                x.IsArchived ? "archived" : null)),
+            needsWorkflowReview = needsWorkflowReview.Select(x => new
+            {
+                x.Id,
+                x.Title,
+                x.Category,
+                x.workflowStatus,
+                workflowName = x.WorkflowName,
+                alertType = "workflow_review",
+            }),
+            scheduledArchiveSoon = scheduledArchiveSoon.Select(x => MapAlertRow(
+                x.Id, x.Title, x.Category, x.ScheduledArchiveAtUtc, "archive_soon")),
+            obsolete = obsoleteMarked.Select(x => new
+            {
+                x.Id,
+                x.Title,
+                x.Category,
+                x.ObsoleteReason,
+                obsoleteAtUtc = x.ObsoleteAtUtc,
+                alertType = "obsolete",
+            }),
+        });
+    }
+
     [HttpGet("expiring-soon")]
     public async Task<IActionResult> ExpiringSoon([FromQuery] int days = 30, CancellationToken ct = default)
     {

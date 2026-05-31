@@ -141,6 +141,20 @@ public class SmsSettings
     /// <summary>مهلت پس از یادآوری اعتبار گردش تا تعلیق خودکار (روز)</summary>
     public int WorkflowValiditySuspensionDelayDays { get; set; } = 0;
     public int WorkflowValiditySuspensionDelayHours { get; set; } = 24;
+    /// <summary>پیامک ارجاع تأیید به تأییدکننده سند</summary>
+    public bool DocumentApprovalReferralSmsEnabled { get; set; } = true;
+    /// <summary>پس از هر تأیید مرحله، پیامک به مالک/ایجادکننده سند</summary>
+    public bool DocumentOwnerStepApprovalNotifySmsEnabled { get; set; } = true;
+    /// <summary>پس از تأیید نهایی گردش سند به مالک</summary>
+    public bool DocumentWorkflowCompletedOwnerSmsEnabled { get; set; } = true;
+    /// <summary>پس از رد قطعی گردش سند به مالک</summary>
+    public bool DocumentWorkflowRejectedOwnerSmsEnabled { get; set; } = true;
+    /// <summary>پیامک فاز اقدام پس از تأیید به مسئول اقدام</summary>
+    public bool DocumentPostApprovalAssigneeSmsEnabled { get; set; } = true;
+    /// <summary>یادآوری خودکار تأخیر تأیید برای اسناد</summary>
+    public bool DocumentApprovalReminderSmsEnabled { get; set; } = false;
+    public int DocumentApprovalReminderDelayDays { get; set; } = 0;
+    public int DocumentApprovalReminderDelayHours { get; set; } = 24;
     public bool PublicFormRequireOtp { get; set; } = false;
 }
 

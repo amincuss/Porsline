@@ -1164,6 +1164,30 @@ public static class DatabaseSchemaPatcher
             IF COL_LENGTH('dbo.SmsSettings', 'WorkflowValiditySuspensionDelayHours') IS NULL
                 ALTER TABLE [dbo].[SmsSettings] ADD [WorkflowValiditySuspensionDelayHours] int NOT NULL
                     CONSTRAINT [DF_SmsSettings_WorkflowValiditySuspensionDelayHours] DEFAULT (24);
+            IF COL_LENGTH('dbo.SmsSettings', 'DocumentApprovalReferralSmsEnabled') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [DocumentApprovalReferralSmsEnabled] bit NOT NULL
+                    CONSTRAINT [DF_SmsSettings_DocumentApprovalReferralSmsEnabled] DEFAULT (1);
+            IF COL_LENGTH('dbo.SmsSettings', 'DocumentOwnerStepApprovalNotifySmsEnabled') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [DocumentOwnerStepApprovalNotifySmsEnabled] bit NOT NULL
+                    CONSTRAINT [DF_SmsSettings_DocumentOwnerStepApprovalNotifySmsEnabled] DEFAULT (1);
+            IF COL_LENGTH('dbo.SmsSettings', 'DocumentWorkflowCompletedOwnerSmsEnabled') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [DocumentWorkflowCompletedOwnerSmsEnabled] bit NOT NULL
+                    CONSTRAINT [DF_SmsSettings_DocumentWorkflowCompletedOwnerSmsEnabled] DEFAULT (1);
+            IF COL_LENGTH('dbo.SmsSettings', 'DocumentWorkflowRejectedOwnerSmsEnabled') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [DocumentWorkflowRejectedOwnerSmsEnabled] bit NOT NULL
+                    CONSTRAINT [DF_SmsSettings_DocumentWorkflowRejectedOwnerSmsEnabled] DEFAULT (1);
+            IF COL_LENGTH('dbo.SmsSettings', 'DocumentPostApprovalAssigneeSmsEnabled') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [DocumentPostApprovalAssigneeSmsEnabled] bit NOT NULL
+                    CONSTRAINT [DF_SmsSettings_DocumentPostApprovalAssigneeSmsEnabled] DEFAULT (1);
+            IF COL_LENGTH('dbo.SmsSettings', 'DocumentApprovalReminderSmsEnabled') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [DocumentApprovalReminderSmsEnabled] bit NOT NULL
+                    CONSTRAINT [DF_SmsSettings_DocumentApprovalReminderSmsEnabled] DEFAULT (0);
+            IF COL_LENGTH('dbo.SmsSettings', 'DocumentApprovalReminderDelayDays') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [DocumentApprovalReminderDelayDays] int NOT NULL
+                    CONSTRAINT [DF_SmsSettings_DocumentApprovalReminderDelayDays] DEFAULT (0);
+            IF COL_LENGTH('dbo.SmsSettings', 'DocumentApprovalReminderDelayHours') IS NULL
+                ALTER TABLE [dbo].[SmsSettings] ADD [DocumentApprovalReminderDelayHours] int NOT NULL
+                    CONSTRAINT [DF_SmsSettings_DocumentApprovalReminderDelayHours] DEFAULT (24);
 
             IF COL_LENGTH('dbo.Contracts', 'PostApprovalJson') IS NULL
                 ALTER TABLE [dbo].[Contracts] ADD [PostApprovalJson] nvarchar(max) NULL;

@@ -40,11 +40,15 @@ public class AdminUsersController(
     {
         var firstName = dto.FirstName.Trim();
         var lastName = dto.LastName.Trim();
-        var mobileNumber = dto.MobileNumber.Trim();
-        var nationalCode = dto.NationalCode.Trim();
+        var mobileNumber = UserFieldNormalizer.NormalizeMobile(dto.MobileNumber);
+        var nationalCode = UserFieldNormalizer.NormalizeNationalCode(dto.NationalCode);
 
         if (firstName.Length < 2 || lastName.Length < 2)
             return BadRequest(new { message = "نام و نام خانوادگی باید حداقل 2 کاراکتر باشند" });
+        if (!UserFieldNormalizer.IsValidMobile(mobileNumber))
+            return BadRequest(new { message = "شماره موبایل معتبر نیست (۰۹ و ۹ رقم)" });
+        if (!UserFieldNormalizer.IsValidNationalCode(nationalCode))
+            return BadRequest(new { message = "کد ملی باید ۱۰ رقم باشد" });
 
         if (await userManager.Users.AnyAsync(x => x.PhoneNumber == mobileNumber, cancellationToken))
             return BadRequest(new { message = "این شماره موبایل قبلا ثبت شده است" });
@@ -178,8 +182,8 @@ public class AdminUsersController(
         {
             var firstName = (r.FirstName ?? "").Trim();
             var lastName = (r.LastName ?? "").Trim();
-            var mobile = NormalizeMobile(r.MobileNumber);
-            var nationalCode = NormalizeNationalCode(r.NationalCode);
+            var mobile = UserFieldNormalizer.NormalizeMobile(r.MobileNumber);
+            var nationalCode = UserFieldNormalizer.NormalizeNationalCode(r.NationalCode);
             var personnelCode = (r.PersonnelCode ?? "").Trim();
             if (string.IsNullOrWhiteSpace(personnelCode)) personnelCode = null;
 
@@ -200,14 +204,14 @@ public class AdminUsersController(
                 invalidRows.Add(new { r.RowNumber, reason = "نام یا نام خانوادگی نامعتبر" });
                 continue;
             }
-            if (!IsValidMobile(mobile))
+            if (!UserFieldNormalizer.IsValidMobile(mobile))
             {
                 invalidRows.Add(new { r.RowNumber, reason = "شماره موبایل نامعتبر" });
                 continue;
             }
-            if (!IsValidNationalCode(nationalCode))
+            if (!UserFieldNormalizer.IsValidNationalCode(nationalCode))
             {
-                invalidRows.Add(new { r.RowNumber, reason = "کد ملی خالی است" });
+                invalidRows.Add(new { r.RowNumber, reason = "کد ملی نامعتبر است (۱۰ رقم)" });
                 continue;
             }
 
@@ -668,11 +672,28 @@ public class AdminUsersController(
         var user = await userManager.FindByIdAsync(id.ToString());
         if (user is null) return NotFound();
 
-        user.FirstName = dto.FirstName.Trim();
-        user.LastName = dto.LastName.Trim();
-        user.PhoneNumber = dto.MobileNumber.Trim();
-        user.UserName = dto.MobileNumber.Trim();
-        user.NationalCode = dto.NationalCode.Trim();
+        var firstName = dto.FirstName.Trim();
+        var lastName = dto.LastName.Trim();
+        var mobileNumber = UserFieldNormalizer.NormalizeMobile(dto.MobileNumber);
+        var nationalCode = UserFieldNormalizer.NormalizeNationalCode(dto.NationalCode);
+
+        if (firstName.Length < 2 || lastName.Length < 2)
+            return BadRequest(new { message = "نام و نام خانوادگی باید حداقل 2 کاراکتر باشند" });
+        if (!UserFieldNormalizer.IsValidMobile(mobileNumber))
+            return BadRequest(new { message = "شماره موبایل معتبر نیست (۰۹ و ۹ رقم)" });
+        if (!UserFieldNormalizer.IsValidNationalCode(nationalCode))
+            return BadRequest(new { message = "کد ملی باید ۱۰ رقم باشد" });
+
+        if (await userManager.Users.AnyAsync(x => x.PhoneNumber == mobileNumber && x.Id != id))
+            return BadRequest(new { message = "این شماره موبایل قبلا ثبت شده است" });
+        if (await userManager.Users.AnyAsync(x => x.NationalCode == nationalCode && x.Id != id))
+            return BadRequest(new { message = "این کد ملی قبلا ثبت شده است" });
+
+        user.FirstName = firstName;
+        user.LastName = lastName;
+        user.PhoneNumber = mobileNumber;
+        user.UserName = mobileNumber;
+        user.NationalCode = nationalCode;
 
         var personnelCode = dto.PersonnelCode?.Trim();
         if (!string.IsNullOrWhiteSpace(personnelCode)
@@ -701,7 +722,14 @@ public class AdminUsersController(
             user.SignatureDisplayDegree = UserSignatureDisplaySize.NormalizeDegree(dto.SignatureDisplayDegree);
 
         var result = await userManager.UpdateAsync(user);
-        if (!result.Succeeded) return BadRequest(result.Errors);
+        if (!result.Succeeded)
+        {
+            return BadRequest(new
+            {
+                message = "بروزرسانی کاربر ناموفق بود",
+                errors = result.Errors.Select(x => x.Description).ToList(),
+            });
+        }
 
         var groupIds = (dto.GroupIds ?? [])
             .Where(x => x != Guid.Empty)
@@ -937,23 +965,6 @@ public class AdminUsersController(
             _ => null,
         };
     }
-
-    private static bool IsValidMobile(string mobile) =>
-        System.Text.RegularExpressions.Regex.IsMatch(mobile, "^09\\d{9}$");
-
-    private static bool IsValidNationalCode(string nationalCode) =>
-        !string.IsNullOrWhiteSpace(nationalCode);
-
-    private static string NormalizeMobile(string? raw)
-    {
-        if (string.IsNullOrWhiteSpace(raw)) return "";
-        var digits = new string(raw.Where(char.IsDigit).ToArray());
-        if (digits.Length == 10 && digits.StartsWith('9')) return "0" + digits;
-        return digits.Length > 11 ? digits[^11..] : digits;
-    }
-
-    private static string NormalizeNationalCode(string? raw) =>
-        string.IsNullOrWhiteSpace(raw) ? "" : raw.Trim();
 
     private sealed record ImportUserCandidate(
         int RowNumber,

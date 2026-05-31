@@ -4,15 +4,15 @@ using Microsoft.EntityFrameworkCore.Migrations;
 
 namespace PorslineClone.Infrastructure.Migrations;
 
-/// <inheritdoc />
+    /// <inheritdoc />
 /// <summary>
 /// Idempotent migration split into separate SQL batches (SQL Server compiles the whole batch before running).
 /// </summary>
-public partial class vasssjjنککسس : Migration
-{
-    /// <inheritdoc />
-    protected override void Up(MigrationBuilder migrationBuilder)
+    public partial class vasssjjنککسس : Migration
     {
+        /// <inheritdoc />
+        protected override void Up(MigrationBuilder migrationBuilder)
+        {
         migrationBuilder.Sql("""
             IF OBJECT_ID(N'[dbo].[Documents]', N'U') IS NULL RETURN;
             IF COL_LENGTH('dbo.Documents', 'WorkflowStatus') IS NULL
@@ -206,10 +206,10 @@ public partial class vasssjjنککسس : Migration
             IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_DocumentLifecycleSettings_DefaultRetentionPolicyId' AND object_id = OBJECT_ID(N'[dbo].[DocumentLifecycleSettings]'))
                 CREATE INDEX [IX_DocumentLifecycleSettings_DefaultRetentionPolicyId] ON [dbo].[DocumentLifecycleSettings]([DefaultRetentionPolicyId]);
             """);
-    }
+        }
 
-    /// <inheritdoc />
-    protected override void Down(MigrationBuilder migrationBuilder)
-    {
+        /// <inheritdoc />
+        protected override void Down(MigrationBuilder migrationBuilder)
+        {
     }
 }

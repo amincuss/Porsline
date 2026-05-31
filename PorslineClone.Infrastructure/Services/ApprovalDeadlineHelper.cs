@@ -24,6 +24,25 @@ public static class ApprovalDeadlineHelper
         return TimeSpan.FromDays(days) + TimeSpan.FromHours(hours);
     }
 
+    public static TimeSpan ResolveDocumentDeadline(ApprovalStepDto step, SmsSettings settings)
+    {
+        var stepDays = Math.Max(0, step.ApprovalDeadlineDays);
+        var stepHours = Math.Max(0, step.ApprovalDeadlineHours);
+        if (stepDays > 0 || stepHours > 0)
+            return TimeSpan.FromDays(stepDays) + TimeSpan.FromHours(stepHours);
+
+        return ResolveDocumentDefaultDelay(settings);
+    }
+
+    public static TimeSpan ResolveDocumentDefaultDelay(SmsSettings settings)
+    {
+        var days = Math.Max(0, settings.DocumentApprovalReminderDelayDays);
+        var hours = Math.Max(0, settings.DocumentApprovalReminderDelayHours);
+        if (days == 0 && hours == 0)
+            hours = 24;
+        return TimeSpan.FromDays(days) + TimeSpan.FromHours(hours);
+    }
+
     public static bool IsDue(DateTime referralSentAtUtc, TimeSpan deadline, DateTime nowUtc)
         => referralSentAtUtc + deadline <= nowUtc;
 

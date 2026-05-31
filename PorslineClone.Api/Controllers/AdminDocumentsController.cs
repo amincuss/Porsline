@@ -23,6 +23,7 @@ namespace PorslineClone.Api.Controllers;
 [Authorize(Policy = "forms.read")]
 public class AdminDocumentsController(
     AppDbContext db,
+    IWebHostEnvironment env,
     IDocumentVersionFileAccess files,
     ILibreOfficeDocumentService libreOffice,
     IDocumentTextExtractionQueue textExtractionQueue,
@@ -998,6 +999,12 @@ public class AdminDocumentsController(
         }
 
         var steps = DocumentWorkflowProcessor.DeserializeSteps(doc.StepsJson);
+        var avatarPaths = await DocumentWorkflowStepEnricher.EnrichAsync(
+            db,
+            doc.Id,
+            steps,
+            "/api/admin/document-workflow-runs/{0}/signature?stepOrder={1}",
+            ct);
         Guid.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var currentUserGuid);
         var isOwner = doc.OwnerUserId == currentUserGuid;
         var workflowDocument = new Document
@@ -1076,10 +1083,14 @@ public class AdminDocumentsController(
                 s.Order,
                 s.UserId,
                 s.UserName,
+                UserFirstName = s.UserFirstName,
+                UserLastName = s.UserLastName,
+                UserPositionTitle = s.UserPositionTitle,
                 s.Status,
                 s.ActionAt,
                 s.Note,
                 s.Comment,
+                AvatarUrl = DocumentWorkflowStepEnricher.BuildAvatarUrl(env.ContentRootPath, s.UserId, avatarPaths),
             }),
         });
     }

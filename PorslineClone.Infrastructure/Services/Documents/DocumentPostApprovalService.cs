@@ -11,6 +11,7 @@ namespace PorslineClone.Infrastructure.Services.Documents;
 public class DocumentPostApprovalService(
     AppDbContext db,
     UserManager<AppUser> userManager,
+    ISmsSender smsSender,
     IInboxMessageService inbox,
     IFrontendUrlResolver frontendUrls)
 {
@@ -78,6 +79,10 @@ public class DocumentPostApprovalService(
                 $"از پنل:\n{adminPath}";
 
             await inbox.SendToUserAsync(userId, "اقدام پس از تأیید سند", msg, ct);
+
+            var smsSettings = await db.SmsSettings.AsNoTracking().FirstOrDefaultAsync(ct) ?? new SmsSettings();
+            if (smsSettings.DocumentPostApprovalAssigneeSmsEnabled && !string.IsNullOrWhiteSpace(user?.PhoneNumber))
+                await smsSender.SendSmsAsync(new SmsRequest(user.PhoneNumber, msg), ct);
         }
     }
 

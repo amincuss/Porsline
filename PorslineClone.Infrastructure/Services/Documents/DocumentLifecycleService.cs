@@ -202,15 +202,23 @@ public sealed class DocumentLifecycleService(
         if (!settings.AutoProcessEnabled) return 0;
 
         var now = DateTime.UtcNow;
-        var warningThreshold = now.AddDays(Math.Max(1, settings.DefaultExpirationWarningDays));
         var actions = 0;
 
         var expiring = await db.Documents
+            .Include(d => d.RetentionPolicy)
             .Where(d => !d.LegalHold && d.LifecycleWarningSentAtUtc == null)
             .Where(d =>
-                (d.ExpiresAtUtc != null && d.ExpiresAtUtc <= warningThreshold)
-                || (d.ScheduledDeleteAtUtc != null && d.ScheduledDeleteAtUtc <= warningThreshold))
+                (d.ExpiresAtUtc != null)
+                || (d.ScheduledDeleteAtUtc != null))
             .ToListAsync(ct);
+
+        expiring = expiring.Where(d =>
+        {
+            var warnDays = Math.Max(1, d.RetentionPolicy?.ExpirationWarningDays ?? settings.DefaultExpirationWarningDays);
+            var threshold = now.AddDays(warnDays);
+            return (d.ExpiresAtUtc != null && d.ExpiresAtUtc <= threshold)
+                || (d.ScheduledDeleteAtUtc != null && d.ScheduledDeleteAtUtc <= threshold);
+        }).ToList();
 
         foreach (var doc in expiring)
         {

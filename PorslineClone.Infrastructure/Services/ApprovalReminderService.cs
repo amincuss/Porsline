@@ -4,6 +4,7 @@ using PorslineClone.Application.Abstractions;
 using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
+using PorslineClone.Infrastructure.Services.Documents;
 
 namespace PorslineClone.Infrastructure.Services;
 
@@ -27,6 +28,7 @@ public class ApprovalReminderService(
         sent += await ProcessContractRemindersAsync(settings, now, ct);
         sent += await ProcessContractWorkflowValidityAsync(settings, now, ct);
         sent += await ProcessFormRemindersAsync(settings, now, ct);
+        sent += await ProcessDocumentRemindersAsync(settings, now, ct);
 
         if (sent > 0)
             await db.SaveChangesAsync(ct);
@@ -264,6 +266,76 @@ public class ApprovalReminderService(
         if (link is null) return;
         link.ReminderSmsSentAtUtc = DateTime.UtcNow;
         await dbContext.SaveChangesAsync(ct);
+    }
+
+    private async Task<int> ProcessDocumentRemindersAsync(SmsSettings settings, DateTime now, CancellationToken ct)
+    {
+        if (!settings.DocumentApprovalReminderSmsEnabled || !settings.DocumentApprovalReferralSmsEnabled)
+            return 0;
+
+        var links = await db.DocumentApprovalLinks
+            .Include(x => x.Document)
+            .Where(x => x.IsActive
+                        && x.ReminderSmsSentAtUtc == null
+                        && x.ExpiresAtUtc > now)
+            .ToListAsync(ct);
+
+        var sent = 0;
+        foreach (var link in links)
+        {
+            var document = link.Document;
+            if (document.WorkflowStatus != DocumentWorkflowStatus.InProgress)
+                continue;
+
+            var steps = DocumentWorkflowProcessor.DeserializeSteps(document.StepsJson);
+            var current = WorkflowStepJsonHelper.FindCurrentPending(steps, document.CurrentStepOrder);
+            if (current is null || current.UserId != link.AssigneeUserId)
+                continue;
+
+            var deadline = ApprovalDeadlineHelper.ResolveDocumentDeadline(current, settings);
+            if (!ApprovalDeadlineHelper.IsDue(link.CreatedAtUtc, deadline, now))
+                continue;
+
+            if (await SendDocumentReminderAsync(document, link, deadline, ct))
+            {
+                link.ReminderSmsSentAtUtc = now;
+                sent++;
+            }
+        }
+
+        return sent;
+    }
+
+    private async Task<bool> SendDocumentReminderAsync(
+        Document document,
+        DocumentApprovalLink link,
+        TimeSpan deadline,
+        CancellationToken ct)
+    {
+        var user = await userManager.FindByIdAsync(link.AssigneeUserId.ToString());
+        if (user is null || string.IsNullOrWhiteSpace(user.PhoneNumber))
+            return false;
+
+        var publicBase = await frontendUrls.ResolvePublicBaseUrlAsync(ct);
+        var adminBase = await frontendUrls.ResolveAdminBaseUrlAsync(ct);
+        var linkPath = string.IsNullOrWhiteSpace(publicBase)
+            ? $"/approve/document?c={link.Code}"
+            : $"{publicBase.TrimEnd('/')}/approve/document?c={link.Code}";
+        var adminWorkflowRuns = string.IsNullOrWhiteSpace(adminBase)
+            ? "/admin/documents/workflow-runs"
+            : $"{adminBase.TrimEnd('/')}/admin/documents/workflow-runs";
+
+        var deadlineLabel = ApprovalDeadlineHelper.FormatDeadlineFa(deadline);
+        var refPart = string.IsNullOrWhiteSpace(document.ReferenceNumber)
+            ? ""
+            : $" ({document.ReferenceNumber})";
+        var msg =
+            $"تأخیر در تأیید: مهلت ({deadlineLabel}) برای سند «{document.Title}»{refPart} به پایان رسیده و هنوز تأیید شما ثبت نشده است.\n" +
+            $"لینک تأیید (بدون نیاز به ورود):\n{linkPath}\n" +
+            $"یا پنل: {adminWorkflowRuns}";
+
+        await inbox.SendToUserAsync(link.AssigneeUserId, "یادآوری تأخیر تأیید سند", msg, ct);
+        return await smsSender.SendSmsAsync(new SmsRequest(user.PhoneNumber, msg), ct);
     }
 
     public static async Task MarkReminderSentForFormAsync(

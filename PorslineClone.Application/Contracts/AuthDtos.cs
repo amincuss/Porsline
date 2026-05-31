@@ -52,6 +52,15 @@ public record SmsSettingsDto(
     bool WorkflowValidityReminderSmsEnabled,
     int WorkflowValiditySuspensionDelayDays,
     int WorkflowValiditySuspensionDelayHours);
+public record DocumentSmsSettingsDto(
+    bool DocumentApprovalReferralSmsEnabled,
+    bool DocumentOwnerStepApprovalNotifySmsEnabled,
+    bool DocumentWorkflowCompletedOwnerSmsEnabled,
+    bool DocumentWorkflowRejectedOwnerSmsEnabled,
+    bool DocumentPostApprovalAssigneeSmsEnabled,
+    bool DocumentApprovalReminderSmsEnabled,
+    int DocumentApprovalReminderDelayDays,
+    int DocumentApprovalReminderDelayHours);
 public record SiteSettingsDto(string? PublicBaseUrl, string? AdminPanelBaseUrl);
 public record ProfileDto(string FirstName, string LastName, string MobileNumber, string NationalCode, string? AboutMe, string? AvatarUrl);
 public record UpdateProfileDto([MaxLength(1000)] string? AboutMe);
@@ -105,8 +114,8 @@ public record SmsRequest(string MobileNumber, string Message);
 public record CreateUserDto(
     [Required, MinLength(2), MaxLength(100)] string FirstName,
     [Required, MinLength(2), MaxLength(100)] string LastName,
-    [Required, RegularExpression(@"^09\d{9}$")] string MobileNumber,
-    [Required, RegularExpression(@"^\d{10}$")] string NationalCode,
+    [Required, MaxLength(20)] string MobileNumber,
+    [Required, MaxLength(50)] string NationalCode,
     List<Guid>? GroupIds = null,
     Guid? UserPositionId = null,
     string? PersonnelCode = null,
@@ -147,8 +156,8 @@ public record UpdateUserRoleDto([Required, MinLength(2), MaxLength(50)] string R
 public record UpdateUserDto(
     [Required, MinLength(2), MaxLength(100)] string FirstName,
     [Required, MinLength(2), MaxLength(100)] string LastName,
-    [Required, RegularExpression(@"^09\d{9}$")] string MobileNumber,
-    [Required, RegularExpression(@"^\d{10}$")] string NationalCode,
+    [Required, MaxLength(20)] string MobileNumber,
+    [Required, MaxLength(50)] string NationalCode,
     List<Guid>? GroupIds = null,
     Guid? UserPositionId = null,
     string? PersonnelCode = null,
