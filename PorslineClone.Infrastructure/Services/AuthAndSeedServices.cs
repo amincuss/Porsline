@@ -5,54 +5,64 @@ using System.Security.Claims;
 using System.Text;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using PorslineClone.Application.Auth;
 using PorslineClone.Application.Abstractions;
 using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Auth;
 using PorslineClone.Infrastructure.Persistence;
+using PorslineClone.Infrastructure.Services.SmsPatterns;
 
 namespace PorslineClone.Infrastructure.Services;
 
-public class AuthService(UserManager<AppUser> userManager, RoleManager<AppRole> roleManager, AppDbContext db, ISmsSender smsSender, IOptions<JwtOptions> jwtOptions) : IAuthService
+public class AuthService(UserManager<AppUser> userManager, RoleManager<AppRole> roleManager, AppDbContext db, ISmsSender smsSender, ISmsPatternService smsPatterns, IOptions<JwtOptions> jwtOptions, IHostEnvironment hostEnvironment) : IAuthService
 {
     public async Task<OtpSendResultDto> SendOtpAsync(string mobileNumber, string ipAddress, CancellationToken cancellationToken = default)
     {
+        mobileNumber = Application.Users.UserFieldNormalizer.NormalizeMobile(mobileNumber);
+        if (string.IsNullOrEmpty(mobileNumber))
+        {
+            await AddLoginAttemptAsync(mobileNumber, ipAddress, "otp_send", false, cancellationToken);
+            return new OtpSendResultDto(false, null, null);
+        }
+
         var settings = await GetSecuritySettingsAsync(cancellationToken);
         if (await IsRateLimitedAsync(ipAddress, "otp_send", settings, cancellationToken))
         {
             await AddLoginAttemptAsync(mobileNumber, ipAddress, "otp_send", false, cancellationToken);
-            return new OtpSendResultDto(false, null);
+            return new OtpSendResultDto(false, null, null);
         }
 
         var user = await userManager.Users.FirstOrDefaultAsync(x => x.PhoneNumber == mobileNumber && !x.IsSoftDeleted && x.IsActive, cancellationToken);
         if (user is null)
         {
             await AddLoginAttemptAsync(mobileNumber, ipAddress, "otp_send", false, cancellationToken);
-            return new OtpSendResultDto(false, null);
+            return new OtpSendResultDto(false, null, null);
         }
 
         var code = Random.Shared.Next(100000, 999999).ToString();
-        db.OtpCodes.Add(new OtpCode { Id = Guid.NewGuid(), MobileNumber = mobileNumber, Code = code, ExpiresAtUtc = DateTime.UtcNow.AddMinutes(2) });
+        var expiresAtUtc = DateTime.UtcNow.AddSeconds(AuthOtpDefaults.LifetimeSeconds);
+        db.OtpCodes.Add(new OtpCode { Id = Guid.NewGuid(), MobileNumber = mobileNumber, Code = code, ExpiresAtUtc = expiresAtUtc });
 
-        bool isDev = string.Equals(
-            Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT"),
-            "Development", StringComparison.OrdinalIgnoreCase);
-
+        var isDev = hostEnvironment.IsDevelopment();
         bool isSent;
+        string? devOtpCode = null;
         if (isDev)
         {
-            // در محیط Development پیامک OTP ارسال نمی‌شود — کد به صفحه confirm برمی‌گردد
             isSent = true;
+            devOtpCode = code;
         }
         else
         {
-            isSent = await smsSender.SendSmsAsync(new SmsRequest(mobileNumber, $"کد ورود شما: {code}"), cancellationToken);
+            var smsBody = await smsPatterns.RenderAsync("auth.otp.login", SmsPatternVars.Dict(("code", code)), cancellationToken);
+            isSent = await smsSender.SendSmsAsync(new SmsRequest(mobileNumber, smsBody, "auth.otp.login"), cancellationToken);
         }
 
         await AddLoginAttemptAsync(mobileNumber, ipAddress, "otp_send", isSent, cancellationToken);
-        return new OtpSendResultDto(isSent, isDev ? code : null);
+        return new OtpSendResultDto(isSent, devOtpCode, isSent ? expiresAtUtc : null);
     }
 
     public async Task<AuthResponseDto?> VerifyOtpAsync(string mobileNumber, string code, string ipAddress, CancellationToken cancellationToken = default)
@@ -298,6 +308,125 @@ public class AuthService(UserManager<AppUser> userManager, RoleManager<AppRole> 
 
 public static class DbSeeder
 {
+    public static async Task EnsureSmsPatternsMenuAsync(AppDbContext db, CancellationToken cancellationToken = default)
+    {
+        var settingsMenu = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "settings", cancellationToken);
+        if (settingsMenu is null) return;
+
+        if (!await db.MenuItems.AnyAsync(x => x.Key == "settings.sms-patterns", cancellationToken))
+        {
+            db.MenuItems.Add(new MenuItem
+            {
+                Id = Guid.NewGuid(),
+                Key = "settings.sms-patterns",
+                Title = "پترن پیامک",
+                Icon = "MessagesSquare",
+                IconColor = "#14B8A6",
+                Route = "/admin/settings/sms-patterns",
+                Order = 3,
+                ParentId = settingsMenu.Id,
+            });
+            await db.SaveChangesAsync(cancellationToken);
+        }
+
+        var menu = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "settings.sms-patterns", cancellationToken);
+        if (menu is null) return;
+
+        var adminRole = await db.Roles.FirstOrDefaultAsync(r => r.Name == "Admin", cancellationToken);
+        if (adminRole is null) return;
+
+        if (!await db.RoleMenus.AnyAsync(rm => rm.RoleId == adminRole.Id && rm.MenuId == menu.Id, cancellationToken))
+        {
+            db.RoleMenus.Add(new RoleMenu { RoleId = adminRole.Id, MenuId = menu.Id });
+            await db.SaveChangesAsync(cancellationToken);
+        }
+    }
+
+    public static async Task EnsureSmsLogsMenuAsync(AppDbContext db, CancellationToken cancellationToken = default)
+    {
+        var settingsMenu = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "settings", cancellationToken);
+        if (settingsMenu is null) return;
+
+        if (!await db.MenuItems.AnyAsync(x => x.Key == "settings.sms-logs", cancellationToken))
+        {
+            db.MenuItems.Add(new MenuItem
+            {
+                Id = Guid.NewGuid(),
+                Key = "settings.sms-logs",
+                Title = "لاگ پیامک",
+                Icon = "ScrollText",
+                IconColor = "#6366F1",
+                Route = "/admin/settings/sms-logs",
+                Order = 4,
+                ParentId = settingsMenu.Id,
+            });
+            await db.SaveChangesAsync(cancellationToken);
+        }
+
+        var menu = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "settings.sms-logs", cancellationToken);
+        if (menu is null) return;
+
+        if (!await db.Permissions.AnyAsync(x => x.Name == "settings.sms.logs.read", cancellationToken))
+            db.Permissions.Add(new Permission { Id = Guid.NewGuid(), Name = "settings.sms.logs.read" });
+
+        var adminRole = await db.Roles.FirstOrDefaultAsync(r => r.Name == "Admin", cancellationToken);
+        if (adminRole is null) return;
+
+        var perm = await db.Permissions.FirstOrDefaultAsync(x => x.Name == "settings.sms.logs.read", cancellationToken);
+        if (perm is not null
+            && !await db.RolePermissions.AnyAsync(x => x.RoleId == adminRole.Id && x.PermissionId == perm.Id, cancellationToken))
+            db.RolePermissions.Add(new RolePermission { RoleId = adminRole.Id, PermissionId = perm.Id });
+
+        if (!await db.RoleMenus.AnyAsync(rm => rm.RoleId == adminRole.Id && rm.MenuId == menu.Id, cancellationToken))
+            db.RoleMenus.Add(new RoleMenu { RoleId = adminRole.Id, MenuId = menu.Id });
+
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    public static async Task EnsureSmsTestMenuAsync(AppDbContext db, CancellationToken cancellationToken = default)
+    {
+        const string menuKey = "settings.sms.test";
+        const string permName = "settings.sms.test";
+
+        var settingsMenu = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "settings", cancellationToken);
+        if (settingsMenu is null) return;
+
+        if (!await db.MenuItems.AnyAsync(x => x.Key == menuKey, cancellationToken))
+        {
+            db.MenuItems.Add(new MenuItem
+            {
+                Id = Guid.NewGuid(),
+                Key = menuKey,
+                Title = "تست پیامک",
+                Icon = "Send",
+                IconColor = "#F59E0B",
+                Route = "/admin/settings/sms-test",
+                Order = 5,
+                ParentId = settingsMenu.Id,
+            });
+            await db.SaveChangesAsync(cancellationToken);
+        }
+
+        var menu = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == menuKey, cancellationToken);
+        if (menu is null) return;
+
+        if (!await db.Permissions.AnyAsync(x => x.Name == permName, cancellationToken))
+            db.Permissions.Add(new Permission { Id = Guid.NewGuid(), Name = permName });
+
+        var adminRole = await db.Roles.FirstOrDefaultAsync(r => r.Name == "Admin", cancellationToken);
+        if (adminRole is null) return;
+
+        var perm = await db.Permissions.FirstOrDefaultAsync(x => x.Name == permName, cancellationToken);
+        if (perm is not null
+            && !await db.RolePermissions.AnyAsync(x => x.RoleId == adminRole.Id && x.PermissionId == perm.Id, cancellationToken))
+            db.RolePermissions.Add(new RolePermission { RoleId = adminRole.Id, PermissionId = perm.Id });
+
+        if (!await db.RoleMenus.AnyAsync(rm => rm.RoleId == adminRole.Id && rm.MenuId == menu.Id, cancellationToken))
+            db.RoleMenus.Add(new RoleMenu { RoleId = adminRole.Id, MenuId = menu.Id });
+
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
     public static async Task EnsureReferenceDataAsync(AppDbContext db, RoleManager<AppRole> roleManager, CancellationToken cancellationToken = default)
     {
         // Roles
@@ -331,10 +460,11 @@ public static class DbSeeder
         {
             "users.read","users.read.all","users.add","users.import","users.update","users.delete",
             "users.access.read","users.access.update",
-            "settings.read","settings.update","settings.delete",
+            "settings.read","settings.update","settings.delete","settings.sms.logs.read","settings.sms.test",
             "roles.read","roles.update",
             "menus.view","profile.update","messages.read","messages.read.all","messages.send","messages.delete",
             "forms.read","forms.read.all","forms.add","forms.update","forms.delete",
+            "exams.read","exams.add","exams.update","exams.delete",
             "forms.rules.read","forms.rules.update","forms.rules.delete",
             "forms.access.read","forms.access.read.all","forms.access.update",
             "approvals.read","approvals.update",
@@ -401,6 +531,29 @@ public static class DbSeeder
             formsMenu.IconColor = "#10B981";
         }
 
+        var examsMenu = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "exams", cancellationToken);
+        if (examsMenu is null)
+        {
+            examsMenu = new MenuItem
+            {
+                Id = Guid.NewGuid(),
+                Key = "exams",
+                Title = "آزمون",
+                Icon = "ClipboardList",
+                IconColor = "#8B5CF6",
+                Route = null,
+                Order = 4,
+            };
+            db.MenuItems.Add(examsMenu);
+        }
+        else
+        {
+            examsMenu.Title = "آزمون";
+            examsMenu.Route = null;
+            examsMenu.Icon = "ClipboardList";
+            examsMenu.IconColor = "#8B5CF6";
+        }
+
         var usersMenu = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "users", cancellationToken);
         if (usersMenu is null)
         {
@@ -427,8 +580,11 @@ public static class DbSeeder
         {
             new MenuItem { Key = "settings.site", Title = "دامنه و لینک پیامک", Icon = "Settings", IconColor = "#059669", Route = "/admin/settings/site", Order = 1, ParentId = settingsMenu.Id },
             new MenuItem { Key = "settings.sms", Title = "تنظیمات پیامک", Icon = "MessageSquare", IconColor = "#8B5CF6", Route = "/admin/settings/sms", Order = 2, ParentId = settingsMenu.Id },
-            new MenuItem { Key = "settings.security", Title = "تنظیمات امنیتی", Icon = "ShieldCheck", IconColor = "#EF4444", Route = "/admin/settings/security", Order = 3, ParentId = settingsMenu.Id },
-            new MenuItem { Key = "settings.access", Title = "سطح دسترسی", Icon = "Shield", IconColor = "#2563EB", Route = "/admin/access-level", Order = 4, ParentId = settingsMenu.Id },
+            new MenuItem { Key = "settings.sms-patterns", Title = "پترن پیامک", Icon = "MessagesSquare", IconColor = "#14B8A6", Route = "/admin/settings/sms-patterns", Order = 3, ParentId = settingsMenu.Id },
+            new MenuItem { Key = "settings.sms-logs", Title = "لاگ پیامک", Icon = "ScrollText", IconColor = "#6366F1", Route = "/admin/settings/sms-logs", Order = 4, ParentId = settingsMenu.Id },
+            new MenuItem { Key = "settings.sms.test", Title = "تست پیامک", Icon = "Send", IconColor = "#F59E0B", Route = "/admin/settings/sms-test", Order = 5, ParentId = settingsMenu.Id },
+            new MenuItem { Key = "settings.security", Title = "تنظیمات امنیتی", Icon = "ShieldCheck", IconColor = "#EF4444", Route = "/admin/settings/security", Order = 5, ParentId = settingsMenu.Id },
+            new MenuItem { Key = "settings.access", Title = "سطح دسترسی", Icon = "Shield", IconColor = "#2563EB", Route = "/admin/access-level", Order = 6, ParentId = settingsMenu.Id },
         };
         foreach (var rm in requiredMenus)
         {
@@ -437,6 +593,7 @@ public static class DbSeeder
         }
         var usersMenuForChild = await db.MenuItems.FirstAsync(x => x.Key == "users", cancellationToken);
         var respondersMenu = await db.MenuItems.FirstOrDefaultAsync(x => x.Key == "responders", cancellationToken);
+        examsMenu = await db.MenuItems.FirstAsync(x => x.Key == "exams", cancellationToken);
         if (respondersMenu is null)
         {
             respondersMenu = new MenuItem { Id = Guid.NewGuid(), Key = "responders", Title = "مدیریت پاسخگو", Icon = "Phone", IconColor = "#0EA5E9", Route = null, Order = 3 };
@@ -474,6 +631,11 @@ public static class DbSeeder
             new MenuItem { Key = "settings.responders", Title = "تنظیمات پاسخگو", Icon = "Settings2", IconColor = "#0EA5E9", Route = "/admin/settings/responders", Order = 9, ParentId = respondersMenu.Id },
             new MenuItem { Key = "profile", Title = "پروفایل", Icon = "User", IconColor = "#0EA5E9", Route = "/admin/profile", Order = 5, ParentId = null },
             new MenuItem { Key = "messages", Title = "صندوق پیام", Icon = "Mail", IconColor = "#A855F7", Route = "/admin/messages", Order = 6, ParentId = null },
+            new MenuItem { Key = "exams.builder", Title = "سازنده فرم آزمون", Icon = "PenLine", IconColor = "#8B5CF6", Route = "/admin/exams/builder/new", Order = 1, ParentId = examsMenu.Id },
+            new MenuItem { Key = "exams.saved", Title = "فرم ذخیره", Icon = "Archive", IconColor = "#6366F1", Route = "/admin/exams/saved", Order = 2, ParentId = examsMenu.Id },
+            new MenuItem { Key = "exams.grouping", Title = "گروه‌بندی آزمون‌دهندگان", Icon = "UsersRound", IconColor = "#7C3AED", Route = "/admin/exams/grouping", Order = 3, ParentId = examsMenu.Id },
+            new MenuItem { Key = "exams.send", Title = "ایجاد آزمون", Icon = "Send", IconColor = "#10B981", Route = "/admin/exams/send", Order = 4, ParentId = examsMenu.Id },
+            new MenuItem { Key = "exams.results", Title = "لیست آزمون", Icon = "ClipboardList", IconColor = "#0EA5E9", Route = "/admin/exams/results", Order = 5, ParentId = examsMenu.Id },
         };
         foreach (var rm in extraMenus)
         {
@@ -482,7 +644,8 @@ public static class DbSeeder
                 db.MenuItems.Add(new MenuItem { Id = Guid.NewGuid(), Key = rm.Key, Title = rm.Title, Icon = rm.Icon, IconColor = rm.IconColor, Route = rm.Route, Order = rm.Order, ParentId = rm.ParentId });
             else if (rm.Key is "forms.field-builder" or "forms.template-convert" or "forms.workflows" or "forms.workflows.list" or "forms.workflow-runs" or "forms.archive"
                 or "settings.users" or "settings.responders"
-                or "responders.workflows" or "responders.workflows.list" or "responders.workflow-runs")
+                or "responders.workflows" or "responders.workflows.list" or "responders.workflow-runs"
+                or "exams.builder" or "exams.saved" or "exams.grouping" or "exams.send" or "exams.results")
             {
                 existing.Title = rm.Title;
                 existing.Route = rm.Route;
@@ -631,7 +794,7 @@ public static class DbSeeder
         var menus = await db.MenuItems.ToDictionaryAsync(x => x.Key, x => x.Id, cancellationToken);
 
         var adminPerms = permissionNames;
-        var expertPerms = new[] { "menus.view", "profile.update", "messages.read", "messages.delete", "forms.read", "forms.add", "forms.update", "workflow-runs.read", "workflow-runs.update", "actions.read", "actions.update", "responders.send", "contracts.read", "contracts.add", "contracts.update", "documents.workflow.read", "documents.workflow.update", "documents.lifecycle.read", "documents.lifecycle.update", "documents.archive.read" };
+        var expertPerms = new[] { "menus.view", "profile.update", "messages.read", "messages.delete", "forms.read", "forms.add", "forms.update", "exams.read", "exams.add", "exams.update", "workflow-runs.read", "workflow-runs.update", "actions.read", "actions.update", "responders.send", "contracts.read", "contracts.add", "contracts.update", "documents.workflow.read", "documents.workflow.update", "documents.lifecycle.read", "documents.lifecycle.update", "documents.archive.read" };
         foreach (var p in adminPerms)
             if (perms.TryGetValue(p, out var pid) && !await db.RolePermissions.AnyAsync(x => x.RoleId == admin.Id && x.PermissionId == pid, cancellationToken))
                 db.RolePermissions.Add(new RolePermission { RoleId = admin.Id, PermissionId = pid });
@@ -639,8 +802,8 @@ public static class DbSeeder
             if (perms.TryGetValue(p, out var pid) && !await db.RolePermissions.AnyAsync(x => x.RoleId == expert.Id && x.PermissionId == pid, cancellationToken))
                 db.RolePermissions.Add(new RolePermission { RoleId = expert.Id, PermissionId = pid });
 
-        var adminMenuKeys = new[] { "dashboard", "forms", "forms.list", "forms.field-builder", "forms.template-convert", "forms.rules", "forms.access", "forms.workflows.list", "forms.workflows", "forms.workflow-runs", "forms.archive", "contracts", "contracts.list", "contracts.create", "contracts.workflows.list", "contracts.workflows", "contracts.templates", "contracts.settings", "contracts.archive", "actions.list", "documents", "documents.explorer", "documents.settings", "documents.sms-settings", "documents.workflows.list", "documents.workflows", "documents.workflow-runs", "documents.archive", "users", "users.list", "users.create", "users.groups", "responders", "responders.list", "responders.create", "responders.groups", "responders.send", "responders.userforms", "responders.workflows.list", "responders.workflows", "responders.workflow-runs", "settings", "settings.site", "settings.sms", "settings.security", "settings.access", "settings.responders", "settings.users", "profile", "messages" };
-        var expertMenuKeys = new[] { "dashboard", "forms", "forms.list", "forms.rules", "forms.workflows.list", "forms.workflows", "forms.workflow-runs", "contracts", "contracts.list", "contracts.create", "actions.list", "documents", "documents.explorer", "documents.workflows.list", "documents.workflows", "documents.workflow-runs", "documents.archive", "users", "users.list", "responders", "responders.list", "responders.send", "responders.userforms", "responders.workflows.list", "responders.workflows", "responders.workflow-runs", "profile", "messages" };
+        var adminMenuKeys = new[] { "dashboard", "forms", "forms.list", "forms.field-builder", "forms.template-convert", "forms.rules", "forms.access", "forms.workflows.list", "forms.workflows", "forms.workflow-runs", "forms.archive", "exams", "exams.builder", "exams.saved", "exams.grouping", "exams.send", "exams.results", "contracts", "contracts.list", "contracts.create", "contracts.workflows.list", "contracts.workflows", "contracts.templates", "contracts.settings", "contracts.archive", "actions.list", "documents", "documents.explorer", "documents.settings", "documents.sms-settings", "documents.workflows.list", "documents.workflows", "documents.workflow-runs", "documents.archive", "users", "users.list", "users.create", "users.groups", "responders", "responders.list", "responders.create", "responders.groups", "responders.send", "responders.userforms", "responders.workflows.list", "responders.workflows", "responders.workflow-runs", "settings", "settings.site", "settings.sms", "settings.sms-patterns", "settings.sms-logs", "settings.security", "settings.access", "settings.responders", "settings.users", "profile", "messages" };
+        var expertMenuKeys = new[] { "dashboard", "forms", "forms.list", "forms.rules", "forms.workflows.list", "forms.workflows", "forms.workflow-runs", "exams", "exams.builder", "exams.saved", "exams.grouping", "exams.send", "exams.results", "contracts", "contracts.list", "contracts.create", "actions.list", "documents", "documents.explorer", "documents.workflows.list", "documents.workflows", "documents.workflow-runs", "documents.archive", "users", "users.list", "responders", "responders.list", "responders.send", "responders.userforms", "responders.workflows.list", "responders.workflows", "responders.workflow-runs", "profile", "messages" };
         foreach (var k in adminMenuKeys)
             if (menus.TryGetValue(k, out var mid) && !await db.RoleMenus.AnyAsync(x => x.RoleId == admin.Id && x.MenuId == mid, cancellationToken))
                 db.RoleMenus.Add(new RoleMenu { RoleId = admin.Id, MenuId = mid });

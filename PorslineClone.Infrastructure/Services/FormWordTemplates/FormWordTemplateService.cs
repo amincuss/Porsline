@@ -9,6 +9,7 @@ using PorslineClone.Application.Contracts;
 using PorslineClone.Application.FormWordTemplates;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
+using PorslineClone.Infrastructure.Services;
 using PorslineClone.Infrastructure.Services.ContractTemplates;
 
 namespace PorslineClone.Infrastructure.Services.FormWordTemplates;
@@ -172,7 +173,12 @@ public class FormWordTemplateService(
         if (formId is { } formFilter && formFilter != Guid.Empty)
             q = q.Where(x => x.FormId == formFilter);
 
-        q = ApplyResponderGroupFilter(db, q, groupId, ungroupedOnly);
+        q = ResponderGroupSubmissionFilter.Apply(
+            db,
+            q,
+            groupId,
+            ungroupedOnly,
+            formId is Guid resolvedForm && resolvedForm != Guid.Empty ? resolvedForm : null);
 
         var submissions = await q
             .Include(x => x.Form)
@@ -557,29 +563,6 @@ public class FormWordTemplateService(
                 || (x.DispatchLinkId != null
                     && db.FormDispatchLinks.Any(l =>
                         l.Id == x.DispatchLinkId && l.SentByUserId == currentUserGuid)));
-        }
-
-        return q;
-    }
-
-    private static IQueryable<FormSubmission> ApplyResponderGroupFilter(
-        AppDbContext db,
-        IQueryable<FormSubmission> q,
-        Guid? groupId,
-        bool ungroupedOnly)
-    {
-        if (ungroupedOnly)
-        {
-            var inAnyGroup = db.ResponderGroupMembers.Select(m => m.ResponderId);
-            return q.Where(x => x.ResponderId == null || !inAnyGroup.Contains(x.ResponderId.Value));
-        }
-
-        if (groupId is { } gid && gid != Guid.Empty)
-        {
-            var memberIds = db.ResponderGroupMembers
-                .Where(m => m.GroupId == gid)
-                .Select(m => m.ResponderId);
-            return q.Where(x => x.ResponderId != null && memberIds.Contains(x.ResponderId.Value));
         }
 
         return q;

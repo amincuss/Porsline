@@ -5,6 +5,7 @@ using PorslineClone.Application.Abstractions;
 using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
+using PorslineClone.Infrastructure.Services.SmsPatterns;
 
 namespace PorslineClone.Infrastructure.Services;
 
@@ -13,6 +14,7 @@ public class ContractPostApprovalService(
     UserManager<AppUser> userManager,
     ContractActionLinkService actionLinks,
     ISmsSender smsSender,
+    ISmsPatternService smsPatterns,
     IInboxMessageService inbox,
     IFrontendUrlResolver frontendUrls)
 {
@@ -68,10 +70,13 @@ public class ContractPostApprovalService(
                 ? "/admin/actions"
                 : $"{adminBase.TrimEnd('/')}/admin/actions";
 
-            var msg =
-                $"قرارداد شماره «{contract.ContractNumber}» با موضوع «{subject}» جهت اقدام ({dirLabel}) برای شما ارسال شد.\n" +
-                $"مشاهده گردش تأیید و ثبت وضعیت:\n{actionPath}\n" +
-                $"یا از پنل: {adminPath}";
+            var msg = await smsPatterns.RenderAsync("contract.postapproval.assignee", SmsPatternVars.Dict(
+                ("contractNumber", contract.ContractNumber),
+                ("subject", subject),
+                ("directionLabel", dirLabel),
+                ("actionPath", actionPath),
+                ("adminPath", adminPath)
+            ), ct);
 
             await inbox.SendToUserAsync(userId, "اقدام قرارداد", msg, ct);
 
@@ -193,17 +198,17 @@ public class ContractPostApprovalService(
             ? ""
             : $"\nتوضیحات اقدام:\n{state.Note.Trim()}";
 
-        var body =
-            "اتمام کار فاز اقدام قرارداد\n" +
-            $"شماره قرارداد: {contract.ContractNumber}\n" +
-            $"نوع قرارداد: {typeName}\n" +
-            $"موضوع: {subject}\n" +
-            $"جهت اقدام: {state.ActionDirectionLabel}\n" +
-            $"اقدام‌کننده: {actorLabel}\n" +
-            $"زمان ثبت: {dateStr} ساعت {timeStr}" +
-            noteBlock +
-            $"\n\nمشاهده پرونده:\n{viewPath}\n" +
-            "پرونده به بایگانی منتقل شد.";
+        var body = await smsPatterns.RenderAsync("contract.action.completed.creator", SmsPatternVars.Dict(
+            ("contractNumber", contract.ContractNumber),
+            ("contractTypeName", typeName),
+            ("subject", subject),
+            ("directionLabel", state.ActionDirectionLabel),
+            ("actorLabel", actorLabel),
+            ("dateStr", dateStr),
+            ("timeStr", timeStr),
+            ("noteBlock", noteBlock),
+            ("viewPath", viewPath)
+        ), ct);
 
         await inbox.SendToUserAsync(contract.CreatedByUserId, "اتمام اقدام قرارداد", body, ct);
 

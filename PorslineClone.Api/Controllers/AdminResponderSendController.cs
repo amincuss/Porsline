@@ -8,6 +8,9 @@ using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
 using PorslineClone.Infrastructure.Services;
+using PorslineClone.Api.HangfireJobs;
+using PorslineClone.Infrastructure.Services.FormDispatch;
+using PorslineClone.Infrastructure.Services.SmsPatterns;
 
 namespace PorslineClone.Api.Controllers;
 
@@ -16,8 +19,9 @@ namespace PorslineClone.Api.Controllers;
 [Authorize]
 public class AdminResponderSendController(
     AppDbContext db,
-    ISmsSender smsSender,
-    IFrontendUrlResolver frontendUrls) : ControllerBase
+    FormDispatchGroupSendService dispatchService,
+    IFormDispatchGroupSendEnqueue dispatchEnqueue,
+    ISmsPatternService smsPatterns) : ControllerBase
 {
     private Guid? CurrentUserGuid
     {
@@ -63,6 +67,32 @@ public class AdminResponderSendController(
             .ToListAsync(ct);
 
         return Ok(new { items, total, page, pageSize, totalPages = (int)Math.Ceiling((double)total / pageSize) });
+    }
+
+    [HttpGet("sms-patterns")]
+    [Authorize(Policy = "responders.send.access")]
+    public async Task<IActionResult> DispatchSmsPatterns(CancellationToken ct)
+    {
+        await smsPatterns.EnsureSeededAsync(ct);
+        var grouped = await smsPatterns.GetGroupedAsync(ct);
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "form.dispatch.link.default",
+            "form.dispatch.link.manual",
+        };
+        var patterns = grouped
+            .SelectMany(c => c.Patterns)
+            .Where(p => keys.Contains(p.Key))
+            .OrderBy(p => p.SortOrder)
+            .Select(p => new
+            {
+                p.Key,
+                p.Template,
+                p.Placeholders,
+                p.Description,
+            })
+            .ToList();
+        return Ok(new { patterns });
     }
 
     [HttpGet("workflows")]
@@ -187,17 +217,43 @@ public class AdminResponderSendController(
         if (string.Equals(req.Mode, "group", StringComparison.OrdinalIgnoreCase))
         {
             if (req.GroupId == Guid.Empty) return BadRequest(new { message = "گروه انتخاب نشده است" });
-            responders = await db.ResponderGroupMembers
-                .Where(x => x.GroupId == req.GroupId && !x.Responder.IsDeleted)
-                .Select(x => new ValueTuple<Guid, string, string>(x.Responder.Id, x.Responder.FullName, x.Responder.MobileNumber))
-                .Distinct()
-                .ToListAsync(ct);
+
+            var smsValidationGroup = ValidateSmsMessageOptions(req.SmsMessageMode, req.CustomSmsBody);
+            if (smsValidationGroup is not null) return smsValidationGroup;
+
+            var workflowResultGroup = await ResolveWorkflowTemplateAsync(req.SkipWorkflow, req.WorkflowTemplateId, ct);
+            if (workflowResultGroup.Error is not null) return workflowResultGroup.Error;
+
+            try
+            {
+                var job = await dispatchService.CreateGroupJobAsync(
+                    form,
+                    req.GroupId,
+                    workflowResultGroup.Template,
+                    req.SmsMessageMode,
+                    req.CustomSmsBody,
+                    CurrentUserGuid,
+                    ct);
+                var hangfireId = dispatchEnqueue.Enqueue(job.Id);
+                await dispatchService.SetHangfireJobIdAsync(job.Id, hangfireId, ct);
+                return Ok(new
+                {
+                    jobId = job.Id,
+                    total = job.TotalCount,
+                    message = "ارسال گروهی در پس‌زمینه شروع شد",
+                    async = true,
+                });
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new { message = ex.Message });
+            }
         }
         else
         {
             var nationalCode = (req.NationalCode ?? "").Trim();
             var fullName = (req.FullName ?? "").Trim();
-            var mobile = (req.MobileNumber ?? "").Trim();
+            var mobile = FormSubmissionMobileHelper.NormalizeMobile(req.MobileNumber);
             if (!ResponderLookupHelper.IsValidNationalCode(nationalCode))
                 return BadRequest(new { message = "کد ملی الزامی است" });
             if (fullName.Length < 2) return BadRequest(new { message = "نام و نام خانوادگی نامعتبر است" });
@@ -219,7 +275,7 @@ public class AdminResponderSendController(
                     gender,
                     CurrentUserGuid,
                     ct);
-                responders.Add((responder.Id, responder.FullName, responder.MobileNumber));
+                responders.Add((responder.Id, fullName, mobile));
             }
             catch (InvalidOperationException ex)
             {
@@ -229,12 +285,25 @@ public class AdminResponderSendController(
 
         if (responders.Count == 0) return BadRequest(new { message = "هیچ پاسخگویی برای ارسال یافت نشد" });
 
+        var smsValidation = ValidateSmsMessageOptions(req.SmsMessageMode, req.CustomSmsBody);
+        if (smsValidation is not null) return smsValidation;
+
         var workflowResult = await ResolveWorkflowTemplateAsync(req.SkipWorkflow, req.WorkflowTemplateId, ct);
         if (workflowResult.Error is not null) return workflowResult.Error;
 
         try
         {
-            var dispatch = await DispatchFormToRespondersAsync(form, responders, workflowResult.Template, ct);
+            var dispatch = await dispatchService.DispatchToRespondersAsync(
+                form,
+                responders,
+                workflowResult.Template,
+                req.SmsMessageMode,
+                req.CustomSmsBody,
+                CurrentUserGuid,
+                ct,
+                smsSource: "form.dispatch.single");
+            if (dispatch.Sent == 0)
+                return BadRequest(new { message = "ارسال پیامک ناموفق بود؛ لاگ پیامک را بررسی کنید", sent = dispatch.Sent, failed = dispatch.Failed, total = responders.Count });
             return Ok(new { message = "ارسال انجام شد", sent = dispatch.Sent, failed = dispatch.Failed, total = responders.Count });
         }
         catch (InvalidOperationException ex)
@@ -272,7 +341,7 @@ public class AdminResponderSendController(
                 ? $"{firstName} {lastName}".Trim()
                 : row.FullName.Trim();
             var nationalCode = (row.NationalCode ?? "").Trim();
-            var mobile = (row.MobileNumber ?? "").Trim();
+            var mobile = FormSubmissionMobileHelper.NormalizeMobile(row.MobileNumber);
             var gender = ResponderHonorific.ParseGender(row.Gender);
 
             if (string.IsNullOrWhiteSpace(firstName) && string.IsNullOrWhiteSpace(lastName) && fullName.Length < 2)
@@ -300,7 +369,7 @@ public class AdminResponderSendController(
                     gender,
                     CurrentUserGuid,
                     ct);
-                responders.Add((responder.Id, responder.FullName, responder.MobileNumber));
+                responders.Add((responder.Id, fullName, mobile));
             }
             catch (InvalidOperationException)
             {
@@ -311,9 +380,19 @@ public class AdminResponderSendController(
         if (responders.Count == 0)
             return BadRequest(new { message = "هیچ ردیف معتبری برای ارسال یافت نشد", invalidCount, skippedCount });
 
+        var smsValidation = ValidateSmsMessageOptions(req.SmsMessageMode, req.CustomSmsBody);
+        if (smsValidation is not null) return smsValidation;
+
         try
         {
-            var dispatch = await DispatchFormToRespondersAsync(form, responders, workflowResult.Template, ct);
+            var dispatch = await dispatchService.DispatchToRespondersAsync(
+                form,
+                responders,
+                workflowResult.Template,
+                req.SmsMessageMode,
+                req.CustomSmsBody,
+                CurrentUserGuid,
+                ct);
             return Ok(new
             {
                 message = "ارسال گروهی از اکسل انجام شد",
@@ -346,60 +425,42 @@ public class AdminResponderSendController(
         return (workflowTemplate, null);
     }
 
-    private async Task<(int Sent, int Failed)> DispatchFormToRespondersAsync(
-        Form form,
-        IReadOnlyList<(Guid Id, string FullName, string MobileNumber)> responders,
-        FormWorkflowTemplate? workflowTemplate,
-        CancellationToken ct)
+    private static IActionResult? ValidateSmsMessageOptions(string? smsMessageMode, string? customSmsBody)
     {
-        var baseUrl = await frontendUrls.ResolvePublicBaseUrlAsync(ct);
-        if (string.IsNullOrWhiteSpace(baseUrl))
-            throw new InvalidOperationException("آدرس پایهٔ عمومی در تنظیمات سایت تعریف نشده است");
-
-        var sent = 0;
-        var failed = 0;
-        var security = await db.SecuritySettings.AsNoTracking().FirstOrDefaultAsync(ct);
-        var defaultExpiry = SecuritySettingsHelper.LinkExpiresAtUtc(security ?? new SecuritySettings());
-        var linkExpiry = form.ExpiresAtUtc.HasValue && form.ExpiresAtUtc.Value < defaultExpiry
-            ? form.ExpiresAtUtc.Value
-            : defaultExpiry;
-
-        foreach (var r in responders)
-        {
-            if (string.IsNullOrWhiteSpace(r.MobileNumber)) { failed++; continue; }
-            var code = await GenerateUniqueCodeAsync(ct);
-            db.FormDispatchLinks.Add(new FormDispatchLink
-            {
-                Id = Guid.NewGuid(),
-                FormId = form.Id,
-                ResponderId = r.Id,
-                ResponderMobileNumber = r.MobileNumber,
-                ResponderFullName = r.FullName,
-                Code = code,
-                ExpiresAtUtc = linkExpiry,
-                WorkflowTemplateId = workflowTemplate?.Id,
-                SentByUserId = CurrentUserGuid,
-            });
-            var link = $"{baseUrl}/forms/fill?c={code}";
-            var msg = $"سلام {r.FullName}\nفرم «{form.Title}» برای شما ارسال شد.\nلطفا از لینک زیر تکمیل کنید:\n{link}";
-            var ok = await smsSender.SendSmsAsync(new SmsRequest(r.MobileNumber, msg), ct);
-            if (ok) sent++; else failed++;
-        }
-
-        await db.SaveChangesAsync(ct);
-        return (sent, failed);
+        if (!string.Equals(smsMessageMode, "manual", StringComparison.OrdinalIgnoreCase))
+            return null;
+        if (string.IsNullOrWhiteSpace(customSmsBody))
+            return new BadRequestObjectResult(new { message = "متن پیامک دستی را وارد کنید" });
+        return null;
     }
 
-    private async Task<string> GenerateUniqueCodeAsync(CancellationToken ct)
+    [HttpGet("group-jobs/active")]
+    [Authorize(Policy = "responders.send")]
+    public async Task<IActionResult> GetActiveGroupSendJob(CancellationToken ct)
     {
-        const string chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-        for (var i = 0; i < 8; i++)
-        {
-            var code = new string(Enumerable.Range(0, 8).Select(_ => chars[Random.Shared.Next(chars.Length)]).ToArray());
-            var exists = await db.FormDispatchLinks.AnyAsync(x => x.Code == code, ct);
-            if (!exists) return code;
-        }
-        return Guid.NewGuid().ToString("N")[..10].ToUpperInvariant();
+        var status = await dispatchService.GetActiveJobForUserAsync(CurrentUserGuid, ct);
+        return Ok(status);
+    }
+
+    [HttpGet("group-jobs/{jobId:guid}")]
+    [Authorize(Policy = "responders.send")]
+    public async Task<IActionResult> GetGroupSendJobStatus(Guid jobId, CancellationToken ct)
+    {
+        var status = await dispatchService.GetStatusAsync(jobId, ct);
+        if (status is null) return NotFound(new { message = "کار یافت نشد" });
+        return Ok(status);
+    }
+
+    [HttpPost("group-jobs/{jobId:guid}/cancel")]
+    [Authorize(Policy = "responders.send")]
+    public async Task<IActionResult> CancelGroupSendJob(Guid jobId, CancellationToken ct)
+    {
+        var (cancelled, hangfireJobId) = await dispatchService.CancelJobAsync(jobId, ct);
+        if (!cancelled)
+            return BadRequest(new { message = "این کار قابل لغو نیست یا قبلاً تمام شده است" });
+
+        dispatchEnqueue.TryCancel(hangfireJobId);
+        return Ok(new { message = "ارسال لغو شد" });
     }
 }
 
@@ -418,6 +479,10 @@ public class SendFormDispatchRequest
     public Guid WorkflowTemplateId { get; set; }
     /// <summary>ارسال بدون گردش — انتصاب بعداً از «فرم کاربران».</summary>
     public bool SkipWorkflow { get; set; }
+    /// <summary>auto | manual — پیش‌فرض auto</summary>
+    public string? SmsMessageMode { get; set; }
+    /// <summary>متن پیامک دستی؛ لینک فرم در انتها خودکار اضافه می‌شود.</summary>
+    public string? CustomSmsBody { get; set; }
 }
 
 public class FormDispatchActivationRequest
@@ -434,6 +499,8 @@ public class BulkSendFormDispatchRequest
     public Guid FormId { get; set; }
     public bool SkipWorkflow { get; set; }
     public Guid WorkflowTemplateId { get; set; }
+    public string? SmsMessageMode { get; set; }
+    public string? CustomSmsBody { get; set; }
     public List<BulkSendFormRow> Rows { get; set; } = [];
 }
 

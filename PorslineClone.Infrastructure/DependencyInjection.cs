@@ -8,6 +8,7 @@ using PorslineClone.Infrastructure.Auth;
 using PorslineClone.Infrastructure.Options;
 using PorslineClone.Infrastructure.Persistence;
 using PorslineClone.Infrastructure.Services;
+using PorslineClone.Infrastructure.Services.Sms;
 using PorslineClone.Infrastructure.Services.ContractTemplates;
 using PorslineClone.Infrastructure.Services.Contracts;
 using PorslineClone.Infrastructure.Services.Documents;
@@ -31,7 +32,15 @@ public static class DependencyInjection
             .AddEntityFrameworkStores<AppDbContext>()
             .AddDefaultTokenProviders();
 
-        services.AddHttpClient<ISmsSender, SmsSender>();
+        services.AddSingleton<ISmsLogService, SmsLogService>();
+        services.AddHttpClient(EntekhabSmsGatewayClient.HttpClientName, client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(60);
+        });
+        services.AddSingleton<EntekhabSmsGatewayClient>();
+        services.AddSingleton<SmsGatewayDiagnostics>();
+        services.AddScoped<SmsTestService>();
+        services.AddScoped<ISmsSender, SmsSender>();
         services.AddScoped<IInboxMessageService, InboxMessageService>();
         services.AddScoped<IAuthService, AuthService>();
         services.AddScoped<IFrontendUrlResolver, FrontendUrlResolver>();
@@ -67,6 +76,16 @@ public static class DependencyInjection
         services.AddScoped<Services.FormWordTemplates.FormWordTemplateService>();
         services.AddScoped<Services.FormWordTemplates.FormWordBatchExportService>();
         services.AddScoped<IFormWordBatchExportHangfireJob, Services.FormWordTemplates.FormWordBatchExportHangfireJob>();
+        services.AddScoped<Services.SmsPatterns.SmsPatternService>();
+        services.AddScoped<ISmsPatternService>(sp => sp.GetRequiredService<Services.SmsPatterns.SmsPatternService>());
+        services.AddScoped<Services.FormSubmissions.FormSubmissionExcelExportFileStorage>();
+        services.AddScoped<Services.FormSubmissions.FormSubmissionExcelExportService>();
+        services.AddScoped<IFormSubmissionExcelExportHangfireJob, Services.FormSubmissions.FormSubmissionExcelExportHangfireJob>();
+        services.AddScoped<Services.FormDispatch.FormDispatchGroupSendService>();
+        services.AddScoped<Services.ExamDispatch.ExamDispatchGroupSendService>();
+        services.AddScoped<UserFormsGroupSidebarService>();
+        services.AddScoped<ResponderGroupSmsInquiryService>();
+        services.AddScoped<IFormDispatchGroupSendHangfireJob, Services.FormDispatch.FormDispatchGroupSendHangfireJob>();
         services.AddScoped<DocumentFileStorageService>();
         services.AddSingleton<DocumentMasterKeyProvider>();
         services.AddSingleton<DocumentEnvelopeEncryptionService>();

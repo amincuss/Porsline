@@ -47,18 +47,6 @@ public class AdminSiteSettingsController(AppDbContext db) : ControllerBase
         error = null;
         if (string.IsNullOrWhiteSpace(raw))
             return null;
-        var t = raw.Trim();
-        var withScheme = t.Contains("://", StringComparison.Ordinal) ? t : $"https://{t}";
-        if (!Uri.TryCreate(withScheme, UriKind.Absolute, out var u))
-        {
-            error = "آدرس معتبر نیست (مثال: https://example.com)";
-            return null;
-        }
-        if (u.Scheme is not "http" and not "https")
-        {
-            error = "فقط آدرس http یا https مجاز است";
-            return null;
-        }
-        return u.ToString().TrimEnd('/');
+        return raw.Trim().TrimEnd('/');
     }
 }

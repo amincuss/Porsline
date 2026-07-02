@@ -166,6 +166,33 @@ public class AdminUserGroupsController(AppDbContext db) : ControllerBase
         return Ok(new { message = "گروه بروزرسانی شد" });
     }
 
+    [HttpDelete("{groupId:guid}/members/{userId:guid}")]
+    [Authorize(Policy = "users.update")]
+    public async Task<IActionResult> RemoveMember(Guid groupId, Guid userId, CancellationToken ct)
+    {
+        var group = await db.UserGroups.FirstOrDefaultAsync(x => x.Id == groupId && !x.IsDeleted, ct);
+        if (group is null) return NotFound(new { message = "گروه یافت نشد" });
+        var denied = DenyUnlessCanModify(group);
+        if (denied is not null) return denied;
+
+        var userExists = await db.Users.AnyAsync(x => x.Id == userId && !x.IsSoftDeleted, ct);
+        if (!userExists) return NotFound(new { message = "کاربر یافت نشد" });
+
+        var member = await db.UserGroupMembers
+            .FirstOrDefaultAsync(x => x.GroupId == groupId && x.UserId == userId, ct);
+        if (member is null)
+            return NotFound(new { message = "این کاربر عضو این گروه نیست" });
+
+        var otherGroupCount = await db.UserGroupMembers
+            .CountAsync(x => x.UserId == userId && x.GroupId != groupId, ct);
+        if (otherGroupCount == 0)
+            return BadRequest(new { message = "کاربر باید حداقل در یک گروه عضو باشد؛ ابتدا گروه دیگری اختصاص دهید" });
+
+        db.UserGroupMembers.Remove(member);
+        await db.SaveChangesAsync(ct);
+        return Ok(new { message = "کاربر از گروه حذف شد" });
+    }
+
     [HttpDelete("{id:guid}")]
     [Authorize(Policy = "usergroups.delete")]
     public async Task<IActionResult> SoftDelete(Guid id, CancellationToken ct)

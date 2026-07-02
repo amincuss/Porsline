@@ -15,7 +15,8 @@ public static class WorkflowUserSignatureValidator
         if (ids.Count == 0) return null;
 
         var rows = await db.Users.AsNoTracking()
-            .Where(u => ids.Contains(u.Id) && !u.IsSoftDeleted)
+            .SelectableUsers()
+            .Where(u => ids.Contains(u.Id))
             .Select(u => new
             {
                 u.Id,

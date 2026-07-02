@@ -39,6 +39,7 @@ public static class PersianDigitHelper
         if (string.IsNullOrWhiteSpace(value)) return value ?? "";
         if (value.StartsWith("/Formupload/", StringComparison.OrdinalIgnoreCase)) return value;
         if (fieldType == Domain.Entities.FieldType.Email) return value;
+        if (fieldType == Domain.Entities.FieldType.Repeatable) return value;
         return ToPersian(value);
     }
 }

@@ -5,7 +5,7 @@ namespace PorslineClone.Application.Contracts;
 public record OtpRequestDto(
     [Required, RegularExpression(@"^09\d{9}$", ErrorMessage = "شماره موبایل باید با 09 شروع شود و 11 رقم باشد.")]
     string MobileNumber);
-public record OtpSendResultDto(bool IsSent, string? OtpCode);
+public record OtpSendResultDto(bool IsSent, string? OtpCode, DateTime? ExpiresAtUtc);
 public record OtpVerifyDto(
     [Required, RegularExpression(@"^09\d{9}$", ErrorMessage = "شماره موبایل نامعتبر است.")]
     string MobileNumber,
@@ -24,7 +24,7 @@ public record SecuritySettingsDto(
     bool DispatchLinkRequireOtp,
     [Range(5, 1440)] int AccessTokenLifetimeMinutes,
     [Range(1, 90)] int RefreshTokenLifetimeDays);
-public record LoginConfigDto(string LoginMethod);
+public record LoginConfigDto(string LoginMethod, int OtpLifetimeSeconds);
 public record PasswordLoginDto(
     [Required, RegularExpression(@"^09\d{9}$", ErrorMessage = "شماره موبایل نامعتبر است.")] string MobileNumber,
     [Required, MinLength(6)] string Password);
@@ -110,7 +110,12 @@ public record MessageRecipientOptionDto(
     string Name,
     string Email,
     string? AvatarUrl);
-public record SmsRequest(string MobileNumber, string Message);
+public record SmsRequest(
+    string MobileNumber,
+    string Message,
+    string? Source = null,
+    Guid? UpdateExistingLogId = null,
+    bool SkipThrottle = false);
 public record CreateUserDto(
     [Required, MinLength(2), MaxLength(100)] string FirstName,
     [Required, MinLength(2), MaxLength(100)] string LastName,
@@ -132,6 +137,23 @@ public record ImportUserRowDto(
     string? PersonnelCode = null,
     string? Gender = null,
     string? PositionName = null);
+
+public record CreateGroupingUserDto(
+    [Required] Guid GroupId,
+    [Required, MaxLength(20)] string MobileNumber,
+    string? FirstName = null,
+    string? LastName = null,
+    string? NationalCode = null,
+    string? PersonnelCode = null);
+
+public record ImportGroupingUsersDto(Guid GroupId, List<ImportGroupingUserRowDto> Rows);
+public record ImportGroupingUserRowDto(
+    int RowNumber,
+    string? FirstName,
+    string? LastName,
+    string? MobileNumber,
+    string? NationalCode,
+    string? PersonnelCode = null);
 
 public record ContractPartyLookupItemDto(
     string NationalId,

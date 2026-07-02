@@ -8,6 +8,7 @@ using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
 using PorslineClone.Infrastructure.Services;
+using PorslineClone.Infrastructure.Services.SmsPatterns;
 
 namespace PorslineClone.Api.Controllers;
 
@@ -18,27 +19,74 @@ public class PublicFormsController(
     AppDbContext db,
     IWebHostEnvironment env,
     ISmsSender smsSender,
+    ISmsPatternService smsPatterns,
     IInboxMessageService inbox,
     IFrontendUrlResolver frontendUrls,
     FormWorkflowProcessor workflowProcessor,
-    FormDispatchSubmissionNotifier dispatchNotifier) : ControllerBase
+    FormDispatchSubmissionNotifier dispatchNotifier,
+    ILogger<PublicFormsController> logger) : ControllerBase
 {
-    private static string NormalizeMobile(string? input)
+    private static string NormalizeMobile(string? input) => FormSubmissionMobileHelper.NormalizeMobile(input);
+
+    private string ResolveLinkCode(string? boundCode) =>
+        string.IsNullOrWhiteSpace(boundCode) ? Request.Form["code"].ToString().Trim() : boundCode.Trim();
+
+    private async Task<(Responder Responder, IActionResult? Error)> ResolveResponderForSubmitAsync(
+        FormDispatchLink link,
+        CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(input)) return string.Empty;
-        var mapped = input.Trim()
-            .Replace('۰', '0').Replace('۱', '1').Replace('۲', '2').Replace('۳', '3').Replace('۴', '4')
-            .Replace('۵', '5').Replace('۶', '6').Replace('۷', '7').Replace('۸', '8').Replace('۹', '9')
-            .Replace('٠', '0').Replace('١', '1').Replace('٢', '2').Replace('٣', '3').Replace('٤', '4')
-            .Replace('٥', '5').Replace('٦', '6').Replace('٧', '7').Replace('٨', '8').Replace('٩', '9');
-        return new string(mapped.Where(char.IsDigit).ToArray());
+        var responder = await db.Responders.FirstOrDefaultAsync(x => x.Id == link.ResponderId, ct);
+        if (responder is null && link.ResponderId != Guid.Empty)
+            return (null!, BadRequest(new { message = "پاسخگوی این لینک دیگر فعال نیست" }));
+
+        var mobile = NormalizeMobile(link.ResponderMobileNumber);
+        var name = link.ResponderFullName?.Trim() ?? "";
+
+        if (responder is null)
+        {
+            if (!FormSubmissionMobileHelper.IsValidMobile(mobile))
+                return (null!, BadRequest(new { message = "شماره موبایل پاسخگو برای این لینک معتبر نیست" }));
+
+            try
+            {
+                await ResponderLookupHelper.EnsureMobileUniqueAsync(db, null, mobile, ct);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return (null!, BadRequest(new { message = ex.Message }));
+            }
+
+            responder = new Responder
+            {
+                Id = link.ResponderId != Guid.Empty ? link.ResponderId : Guid.NewGuid(),
+                FullName = name,
+                MobileNumber = mobile,
+                CreatedAtUtc = DateTime.UtcNow
+            };
+            db.Responders.Add(responder);
+            return (responder, null);
+        }
+
+        if (name.Length >= 2)
+            responder.FullName = name;
+
+        if (FormSubmissionMobileHelper.IsValidMobile(mobile))
+        {
+            var mobileTaken = await db.Responders.AnyAsync(
+                x => !x.IsDeleted && x.MobileNumber == mobile && x.Id != responder.Id,
+                ct);
+            if (!mobileTaken)
+                responder.MobileNumber = mobile;
+        }
+
+        return (responder, null);
     }
 
     [HttpGet("access")]
     public async Task<IActionResult> Access([FromQuery] string c, CancellationToken ct)
     {
         var link = await db.FormDispatchLinks.FirstOrDefaultAsync(x => x.Code == c, ct);
-        if (link is null || !link.IsActive || link.ExpiresAtUtc < DateTime.UtcNow || link.UsedAtUtc != null)
+        if (link is null || !link.IsActive || link.ExpiresAtUtc < DateTime.UtcNow)
             return BadRequest(new { message = "لینک فرم نامعتبر یا منقضی است" });
 
         var form = await db.Forms
@@ -48,6 +96,14 @@ public class PublicFormsController(
         if (!form.IsActive) return BadRequest(new { message = "این فرم غیرفعال است" });
         if (form.ExpiresAtUtc.HasValue && form.ExpiresAtUtc.Value < DateTime.UtcNow)
             return BadRequest(new { message = "اعتبار این فرم به پایان رسیده است" });
+
+        var existingSubmission = await FormDispatchDuplicateSubmissionChecker.FindExistingAsync(db, link, ct);
+        if (existingSubmission is not null)
+            return Ok(BuildAlreadySubmittedAccessResponse(form, link, existingSubmission));
+
+        if (link.UsedAtUtc != null)
+            return BadRequest(new { message = "لینک فرم نامعتبر یا منقضی است" });
+
         var security = await SecuritySettingsHelper.GetAsync(db, ct);
         var smsSettings = await db.SmsSettings.AsNoTracking().FirstOrDefaultAsync(ct);
         var requireOtp = SecuritySettingsHelper.DispatchLinkRequiresOtp(security, smsSettings);
@@ -88,6 +144,9 @@ public class PublicFormsController(
                 GuideFileName = f.FieldType == FieldType.Guide ? f.HelpText : null,
                 f.DefaultValue,
                 f.IsReadOnly,
+                NestedFields = f.FieldType == FieldType.Repeatable && !string.IsNullOrWhiteSpace(f.NestedFieldsJson)
+                    ? JsonSerializer.Deserialize<List<NestedFormFieldDto>>(f.NestedFieldsJson)
+                    : null,
             })
         });
     }
@@ -121,7 +180,21 @@ public class PublicFormsController(
     public async Task<IActionResult> SendAccessOtp([FromBody] PublicAccessOtpSendRequest req, CancellationToken ct)
     {
         var link = await db.FormDispatchLinks.FirstOrDefaultAsync(x => x.Code == req.Code, ct);
-        if (link is null || !link.IsActive || link.ExpiresAtUtc < DateTime.UtcNow || link.UsedAtUtc != null)
+        if (link is null || !link.IsActive || link.ExpiresAtUtc < DateTime.UtcNow)
+            return BadRequest(new { message = "لینک فرم نامعتبر یا منقضی است" });
+
+        var existingSubmission = await FormDispatchDuplicateSubmissionChecker.FindExistingAsync(db, link, ct);
+        if (existingSubmission is not null)
+        {
+            return Ok(new
+            {
+                message = "شما قبلاً این فرم را ثبت کرده‌اید",
+                alreadySubmitted = true,
+                trackingCode = existingSubmission.TrackingCode,
+            });
+        }
+
+        if (link.UsedAtUtc != null)
             return BadRequest(new { message = "لینک فرم نامعتبر یا منقضی است" });
 
         var expectedMobile = NormalizeMobile(link.ResponderMobileNumber);
@@ -145,7 +218,8 @@ public class PublicFormsController(
         var isDev = string.Equals(Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT"), "Development", StringComparison.OrdinalIgnoreCase);
         if (!isDev)
         {
-            await smsSender.SendSmsAsync(new Application.Contracts.SmsRequest(expectedMobile, $"کد تایید فرم: {code}"), ct);
+            var otpBody = await smsPatterns.RenderAsync("form.otp.access", SmsPatternVars.Dict(("code", code)), ct);
+            await smsSender.SendSmsAsync(new Application.Contracts.SmsRequest(expectedMobile, otpBody), ct);
         }
 
         return Ok(new { message = "کد تایید ارسال شد", otpCode = isDev ? code : null });
@@ -155,7 +229,21 @@ public class PublicFormsController(
     public async Task<IActionResult> VerifyAccessOtp([FromBody] PublicAccessOtpVerifyRequest req, CancellationToken ct)
     {
         var link = await db.FormDispatchLinks.FirstOrDefaultAsync(x => x.Code == req.Code, ct);
-        if (link is null || !link.IsActive || link.ExpiresAtUtc < DateTime.UtcNow || link.UsedAtUtc != null)
+        if (link is null || !link.IsActive || link.ExpiresAtUtc < DateTime.UtcNow)
+            return BadRequest(new { message = "لینک فرم نامعتبر یا منقضی است" });
+
+        var existingSubmission = await FormDispatchDuplicateSubmissionChecker.FindExistingAsync(db, link, ct);
+        if (existingSubmission is not null)
+        {
+            return Ok(new
+            {
+                message = "شما قبلاً این فرم را ثبت کرده‌اید",
+                alreadySubmitted = true,
+                trackingCode = existingSubmission.TrackingCode,
+            });
+        }
+
+        if (link.UsedAtUtc != null)
             return BadRequest(new { message = "لینک فرم نامعتبر یا منقضی است" });
 
         var expectedMobile = NormalizeMobile(link.ResponderMobileNumber);
@@ -184,8 +272,26 @@ public class PublicFormsController(
     [RequestSizeLimit(50_000_000)]
     public async Task<IActionResult> Submit([FromForm] PublicSubmitRequest req, CancellationToken ct)
     {
-        var link = await db.FormDispatchLinks.FirstOrDefaultAsync(x => x.Code == req.Code, ct);
-        if (link is null || !link.IsActive || link.ExpiresAtUtc < DateTime.UtcNow || link.UsedAtUtc != null)
+        var code = ResolveLinkCode(req.Code);
+        if (string.IsNullOrWhiteSpace(code))
+            return BadRequest(new { message = "کد لینک فرم نامعتبر است" });
+
+        var link = await db.FormDispatchLinks.FirstOrDefaultAsync(x => x.Code == code, ct);
+        if (link is null || !link.IsActive || link.ExpiresAtUtc < DateTime.UtcNow)
+            return BadRequest(new { message = "لینک فرم نامعتبر یا منقضی است" });
+
+        var existingSubmission = await FormDispatchDuplicateSubmissionChecker.FindExistingAsync(db, link, ct);
+        if (existingSubmission is not null)
+        {
+            return Ok(new
+            {
+                message = "شما قبلاً این فرم را ثبت کرده‌اید",
+                alreadySubmitted = true,
+                trackingCode = existingSubmission.TrackingCode,
+            });
+        }
+
+        if (link.UsedAtUtc != null)
             return BadRequest(new { message = "لینک فرم نامعتبر یا منقضی است" });
 
         var form = await db.Forms
@@ -202,27 +308,11 @@ public class PublicFormsController(
         if (requireOtp && link.OtpVerifiedAtUtc is null)
             return BadRequest(new { message = "ابتدا احراز هویت OTP انجام شود" });
 
-        var responder = await db.Responders.FirstOrDefaultAsync(x => x.Id == link.ResponderId, ct);
-        if (responder is null)
-        {
-            responder = new Responder
-            {
-                Id = link.ResponderId != Guid.Empty ? link.ResponderId : Guid.NewGuid(),
-                FullName = link.ResponderFullName,
-                MobileNumber = link.ResponderMobileNumber,
-                CreatedAtUtc = DateTime.UtcNow
-            };
-            db.Responders.Add(responder);
-        }
-        else
-        {
-            responder.FullName = link.ResponderFullName;
-            responder.MobileNumber = link.ResponderMobileNumber;
-        }
+        var (responder, responderError) = await ResolveResponderForSubmitAsync(link, ct);
+        if (responderError is not null)
+            return responderError;
 
-        var values = string.IsNullOrWhiteSpace(req.ValuesJson)
-            ? new Dictionary<string, string>()
-            : JsonSerializer.Deserialize<Dictionary<string, string>>(req.ValuesJson) ?? new Dictionary<string, string>();
+        var values = FormSubmissionValuesHelper.ParseValuesJson(req.ValuesJson);
 
         var responderFolder = link.ResponderId == Guid.Empty ? responder.Id.ToString() : link.ResponderId.ToString();
         var uploadRoot = Path.Combine(env.ContentRootPath, "Formupload", responderFolder);
@@ -251,12 +341,11 @@ public class PublicFormsController(
             values[ff.Id.ToString()] = $"/Formupload/{responderFolder}/{safeName}";
         }
 
-        var fieldValues = form.Fields.Select(f => new FormFieldValueDto(
-            f.Label,
-            PersianDigitHelper.PersianizeForFormStorage(
-                values.TryGetValue(f.Id.ToString(), out var v) ? v : "",
-                f.FieldType)
-        )).ToList();
+        var repeatableError = FormSubmissionValuesHelper.ValidateRepeatableFields(form, values);
+        if (repeatableError is not null)
+            return BadRequest(new { message = repeatableError });
+
+        var fieldValues = FormSubmissionValuesHelper.BuildStoredFieldValues(form, values);
 
         var responderId = link.ResponderId != Guid.Empty ? link.ResponderId : responder.Id;
         var submission = FormSubmissionFactory.Create(
@@ -281,30 +370,37 @@ public class PublicFormsController(
 
         await db.SaveChangesAsync(ct);
 
-        if (submission.WorkflowTemplateId is not null && submission.Status == FormSubmissionStatus.Pending)
+        try
         {
-            await db.Entry(submission).ReloadAsync(ct);
-            var (started, _) = await workflowProcessor.TryStartWorkflowAsync(submission, ct);
-            if (started)
+            if (submission.WorkflowTemplateId is not null && submission.Status == FormSubmissionStatus.Pending)
+            {
+                await db.Entry(submission).ReloadAsync(ct);
+                var (started, _) = await workflowProcessor.TryStartWorkflowAsync(submission, ct);
+                if (started)
+                {
+                    var steps = FormWorkflowProcessor.DeserializeSteps(submission.StepsJson);
+                    var firstStep = steps.FirstOrDefault(x => x.Status == "pending");
+                    if (firstStep is not null)
+                        await SendInitialApprovalSmsAsync(firstStep.UserId, form.Title, ct);
+                }
+            }
+            else if (submission.Status == FormSubmissionStatus.InProgress && submission.WorkflowStartedAtUtc is not null)
             {
                 var steps = FormWorkflowProcessor.DeserializeSteps(submission.StepsJson);
                 var firstStep = steps.FirstOrDefault(x => x.Status == "pending");
                 if (firstStep is not null)
                     await SendInitialApprovalSmsAsync(firstStep.UserId, form.Title, ct);
             }
-        }
-        else if (submission.Status == FormSubmissionStatus.InProgress && submission.WorkflowStartedAtUtc is not null)
-        {
-            var steps = FormWorkflowProcessor.DeserializeSteps(submission.StepsJson);
-            var firstStep = steps.FirstOrDefault(x => x.Status == "pending");
-            if (firstStep is not null)
-                await SendInitialApprovalSmsAsync(firstStep.UserId, form.Title, ct);
-        }
 
-        var responderForNotify = await db.Responders.AsNoTracking()
-            .FirstOrDefaultAsync(x => x.Id == responderId, ct);
-        await dispatchNotifier.NotifySenderAfterSubmitAsync(submission, form, link, responderForNotify, ct);
-        await dispatchNotifier.NotifyRegistrantTrackingCodeAsync(submission, form, link, responderForNotify, ct);
+            var responderForNotify = await db.Responders.AsNoTracking()
+                .FirstOrDefaultAsync(x => x.Id == responderId, ct);
+            await dispatchNotifier.NotifySenderAfterSubmitAsync(submission, form, link, responderForNotify, ct);
+            await dispatchNotifier.NotifyRegistrantTrackingCodeAsync(submission, form, link, responderForNotify, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Post-submit side effects failed for submission {SubmissionId}", submission.Id);
+        }
 
         return Ok(new { message = "فرم با موفقیت ثبت شد", trackingCode = submission.TrackingCode });
     }
@@ -315,17 +411,31 @@ public class PublicFormsController(
         var approver = await db.Users.FirstOrDefaultAsync(x => x.Id == approverUserId, ct);
         if (approver is null) return;
 
-        var msg =
-            $"یک درخواست جدید از فرم «{formTitle}» برای تایید شما ثبت شد.\n" +
-            $"لطفا به پنل مدیریت بخش تاییدیه‌ها مراجعه کنید.";
         var adminBase = await frontendUrls.ResolveAdminBaseUrlAsync(ct);
-        if (!string.IsNullOrWhiteSpace(adminBase))
-            msg += $"\nلینک مستقیم: {adminBase}/admin/approvals";
+        var adminLinkBlock = string.IsNullOrWhiteSpace(adminBase)
+            ? ""
+            : $"\nلینک مستقیم: {adminBase}/admin/approvals";
+        var msg = await smsPatterns.RenderAsync("form.approval.newRequest.panel", SmsPatternVars.Dict(
+            ("formTitle", formTitle),
+            ("adminLinkBlock", adminLinkBlock)
+        ), ct);
 
         await inbox.SendToUserAsync(approverUserId, "تأیید فرم", msg, ct);
         if (!smsSettings.ApprovalReferralSmsEnabled || string.IsNullOrWhiteSpace(approver.PhoneNumber)) return;
         await smsSender.SendSmsAsync(new PorslineClone.Application.Contracts.SmsRequest(approver.PhoneNumber, msg), ct);
     }
+
+    private static object BuildAlreadySubmittedAccessResponse(Form form, FormDispatchLink link, FormSubmission submission) =>
+        new
+        {
+            alreadySubmitted = true,
+            message = "شما قبلاً این فرم را ثبت کرده‌اید",
+            title = form.Title,
+            description = form.Description,
+            trackingCode = submission.TrackingCode,
+            submittedAtUtc = submission.SubmittedAtUtc,
+            Responder = new { link.ResponderId, FullName = link.ResponderFullName, MobileNumber = link.ResponderMobileNumber },
+        };
 
 }
 

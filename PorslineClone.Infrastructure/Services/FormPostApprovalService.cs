@@ -4,6 +4,7 @@ using PorslineClone.Application.Abstractions;
 using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
+using PorslineClone.Infrastructure.Services.SmsPatterns;
 
 namespace PorslineClone.Infrastructure.Services;
 
@@ -12,6 +13,7 @@ public class FormPostApprovalService(
     UserManager<AppUser> userManager,
     FormActionLinkService actionLinks,
     ISmsSender smsSender,
+    ISmsPatternService smsPatterns,
     IInboxMessageService inbox,
     IFrontendUrlResolver frontendUrls,
     FormDispatchSubmissionNotifier dispatchNotifier)
@@ -103,13 +105,16 @@ public class FormPostApprovalService(
                 ? "کارشناس"
                 : ResponderHonorific.FormatFullName($"{user.FirstName} {user.LastName}".Trim(), user.Gender);
 
-            var msg =
-                $"{staffName} گرامی،\n\n" +
-                $"فرم «{formTitle}» به نام {responderName} در تاریخ {dateStr} ساعت {timeStr} تأیید نهایی شد.\n" +
-                $"جهت {directionLabel} برای شما ارجاع شد.\n\n" +
-                "لینک فوری اقدام (بدون نیاز به ورود):\n" +
-                actionPath +
-                $"\n\nیا از پنل:\n{adminPath}";
+            var msg = await smsPatterns.RenderAsync("form.postapproval.assignee", SmsPatternVars.Dict(
+                ("staffName", staffName),
+                ("formTitle", formTitle),
+                ("responderName", responderName),
+                ("dateStr", dateStr),
+                ("timeStr", timeStr),
+                ("directionLabel", directionLabel),
+                ("actionPath", actionPath),
+                ("adminPath", adminPath)
+            ), ct);
 
             await inbox.SendToUserAsync(userId, "اقدام پس از تأیید فرم", msg, ct);
 

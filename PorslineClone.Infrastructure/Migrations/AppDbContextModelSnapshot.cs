@@ -1876,6 +1876,170 @@ namespace PorslineClone.Infrastructure.Migrations
                     b.ToTable("DocumentWorkflowTemplates");
                 });
 
+            modelBuilder.Entity("PorslineClone.Domain.Entities.ExamForm", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid?>("CreatedByUserId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime?>("DeletedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<int>("DurationMinutes")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int")
+                        .HasDefaultValue(60);
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("bit");
+
+                    b.Property<bool>("IsDeleted")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bit")
+                        .HasDefaultValue(false);
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(300)
+                        .HasColumnType("nvarchar(300)");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UpdatedAtUtc");
+
+                    b.ToTable("ExamForms");
+                });
+
+            modelBuilder.Entity("PorslineClone.Domain.Entities.ExamLink", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Code")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("nvarchar(32)");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid?>("CreatedByUserId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("ExamFormId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime?>("ExpiresAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("ParticipantMobile")
+                        .HasMaxLength(11)
+                        .HasColumnType("nvarchar(11)");
+
+                    b.Property<string>("ParticipantName")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<DateTime?>("StartedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("UsedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Code")
+                        .IsUnique();
+
+                    b.HasIndex("ExamFormId", "IsActive");
+
+                    b.ToTable("ExamLinks");
+                });
+
+            modelBuilder.Entity("PorslineClone.Domain.Entities.ExamQuestion", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int?>("CorrectAnswerIndex")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("ExamFormId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<bool>("IsRequired")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Label")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<string>("OptionsJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("QuestionType")
+                        .HasColumnType("int");
+
+                    b.Property<int>("SortOrder")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ExamFormId", "SortOrder");
+
+                    b.ToTable("ExamQuestions");
+                });
+
+            modelBuilder.Entity("PorslineClone.Domain.Entities.ExamSubmission", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("AnswersJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("ExamFormId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("ExamLinkId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<bool>("IsAutoSubmitted")
+                        .HasColumnType("bit");
+
+                    b.Property<DateTime>("SubmittedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ExamFormId");
+
+                    b.HasIndex("ExamLinkId")
+                        .IsUnique();
+
+                    b.ToTable("ExamSubmissions");
+                });
+
             modelBuilder.Entity("PorslineClone.Domain.Entities.Form", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1976,6 +2140,81 @@ namespace PorslineClone.Infrastructure.Migrations
                     b.HasIndex("FormSubmissionId", "AssigneeUserId", "IsActive");
 
                     b.ToTable("FormActionLinks");
+                });
+
+            modelBuilder.Entity("PorslineClone.Domain.Entities.FormDispatchGroupSendJob", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime?>("CompletedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid?>("CreatedByUserId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("CustomSmsBody")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ErrorMessage")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<int>("FailedCount")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("FormId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("GroupId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("HangfireJobId")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<bool>("OnlyIncompleteSubmissions")
+                        .HasColumnType("bit");
+
+                    b.Property<int>("ProcessedCount")
+                        .HasColumnType("int");
+
+                    b.Property<int>("SentCount")
+                        .HasColumnType("int");
+
+                    b.Property<bool>("SkipWorkflow")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("SmsMessageMode")
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("int");
+
+                    b.Property<int>("TotalCount")
+                        .HasColumnType("int");
+
+                    b.Property<Guid?>("WorkflowTemplateId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CreatedAtUtc");
+
+                    b.HasIndex("CreatedByUserId");
+
+                    b.HasIndex("FormId");
+
+                    b.HasIndex("GroupId");
+
+                    b.HasIndex("Status");
+
+                    b.ToTable("FormDispatchGroupSendJobs");
                 });
 
             modelBuilder.Entity("PorslineClone.Domain.Entities.FormDispatchLink", b =>
@@ -2083,6 +2322,9 @@ namespace PorslineClone.Infrastructure.Migrations
                         .HasMaxLength(500)
                         .HasColumnType("nvarchar(500)");
 
+                    b.Property<string>("NestedFieldsJson")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<string>("OptionsJson")
                         .HasMaxLength(5000)
                         .HasColumnType("nvarchar(max)");
@@ -2170,11 +2412,13 @@ namespace PorslineClone.Infrastructure.Migrations
                     b.Property<int>("CurrentStepOrder")
                         .HasColumnType("int");
 
+                    b.Property<DateTime?>("DeletedAtUtc")
+                        .HasColumnType("datetime2");
+
                     b.Property<Guid?>("DispatchLinkId")
                         .HasColumnType("uniqueidentifier");
 
                     b.Property<string>("FieldsJson")
-                        .HasMaxLength(20000)
                         .HasColumnType("nvarchar(max)");
 
                     b.Property<Guid>("FormId")
@@ -2182,6 +2426,11 @@ namespace PorslineClone.Infrastructure.Migrations
 
                     b.Property<bool>("IsArchived")
                         .HasColumnType("bit");
+
+                    b.Property<bool>("IsDeleted")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bit")
+                        .HasDefaultValue(false);
 
                     b.Property<string>("PostApprovalJson")
                         .HasColumnType("nvarchar(max)");
@@ -2241,7 +2490,7 @@ namespace PorslineClone.Infrastructure.Migrations
 
                     b.HasIndex("TrackingCode")
                         .IsUnique()
-                        .HasFilter("[TrackingCode] IS NOT NULL");
+                        .HasFilter("[TrackingCode] IS NOT NULL AND [IsDeleted] = 0");
 
                     b.HasIndex("WorkflowTemplateId")
                         .HasFilter("[WorkflowTemplateId] IS NOT NULL");
@@ -2290,6 +2539,72 @@ namespace PorslineClone.Infrastructure.Migrations
                     b.HasIndex("FormSubmissionId", "AssigneeUserId", "IsActive");
 
                     b.ToTable("FormSubmissionApprovalLinks");
+                });
+
+            modelBuilder.Entity("PorslineClone.Domain.Entities.FormSubmissionExcelExportJob", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime?>("CompletedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid?>("CreatedByUserId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ErrorMessage")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<string>("FileName")
+                        .HasMaxLength(260)
+                        .HasColumnType("nvarchar(260)");
+
+                    b.Property<string>("FilePath")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<Guid>("FormId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("GroupId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("HangfireJobId")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<int>("ProcessedCount")
+                        .HasColumnType("int");
+
+                    b.Property<string>("SelectedFieldsJson")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("int");
+
+                    b.Property<int>("TotalCount")
+                        .HasColumnType("int");
+
+                    b.Property<bool>("UngroupedOnly")
+                        .HasColumnType("bit");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CreatedAtUtc");
+
+                    b.HasIndex("CreatedByUserId");
+
+                    b.HasIndex("FormId");
+
+                    b.HasIndex("Status");
+
+                    b.ToTable("FormSubmissionExcelExportJobs");
                 });
 
             modelBuilder.Entity("PorslineClone.Domain.Entities.FormSubmissionWordDocument", b =>
@@ -2705,11 +3020,22 @@ namespace PorslineClone.Infrastructure.Migrations
                         },
                         new
                         {
+                            Id = new Guid("30000000-0000-0000-0000-000000000007"),
+                            Icon = "MessagesSquare",
+                            IconColor = "#14B8A6",
+                            Key = "settings.sms-patterns",
+                            Order = 2,
+                            ParentId = new Guid("30000000-0000-0000-0000-000000000002"),
+                            Route = "/admin/settings/sms-patterns",
+                            Title = "پترن پیامک"
+                        },
+                        new
+                        {
                             Id = new Guid("30000000-0000-0000-0000-000000000004"),
                             Icon = "ShieldCheck",
                             IconColor = "#EF4444",
                             Key = "settings.security",
-                            Order = 2,
+                            Order = 3,
                             ParentId = new Guid("30000000-0000-0000-0000-000000000002"),
                             Route = "/admin/settings/security",
                             Title = "تنظیمات امنیتی"
@@ -2720,7 +3046,7 @@ namespace PorslineClone.Infrastructure.Migrations
                             Icon = "Shield",
                             IconColor = "#2563EB",
                             Key = "settings.access",
-                            Order = 3,
+                            Order = 4,
                             ParentId = new Guid("30000000-0000-0000-0000-000000000002"),
                             Route = "/admin/access-level",
                             Title = "سطح دسترسی"
@@ -3320,6 +3646,11 @@ namespace PorslineClone.Infrastructure.Migrations
                         new
                         {
                             RoleId = new Guid("10000000-0000-0000-0000-000000000001"),
+                            MenuId = new Guid("30000000-0000-0000-0000-000000000007")
+                        },
+                        new
+                        {
+                            RoleId = new Guid("10000000-0000-0000-0000-000000000001"),
                             MenuId = new Guid("30000000-0000-0000-0000-000000000004")
                         },
                         new
@@ -3554,6 +3885,118 @@ namespace PorslineClone.Infrastructure.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("SiteSettings");
+                });
+
+            modelBuilder.Entity("PorslineClone.Domain.Entities.SmsLog", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("ErrorMessage")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<int?>("HttpStatusCode")
+                        .HasColumnType("int");
+
+                    b.Property<bool>("IsSuccess")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Message")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("MobileNumber")
+                        .IsRequired()
+                        .HasMaxLength(11)
+                        .HasColumnType("nvarchar(11)");
+
+                    b.Property<string>("Source")
+                        .HasMaxLength(120)
+                        .HasColumnType("nvarchar(120)");
+
+                    b.Property<string>("TechnicalDetail")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CreatedAtUtc");
+
+                    b.HasIndex("IsSuccess");
+
+                    b.HasIndex("MobileNumber");
+
+                    b.HasIndex("IsSuccess", "CreatedAtUtc");
+
+                    b.ToTable("SmsLogs");
+                });
+
+            modelBuilder.Entity("PorslineClone.Domain.Entities.SmsPattern", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Category")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("nvarchar(40)");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<string>("Icon")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("nvarchar(40)");
+
+                    b.Property<string>("IconColor")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Key")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("nvarchar(120)");
+
+                    b.Property<string>("PlaceholdersJson")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("SortOrder")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Template")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Category");
+
+                    b.HasIndex("Key")
+                        .IsUnique();
+
+                    b.HasIndex("SortOrder");
+
+                    b.ToTable("SmsPatterns");
                 });
 
             modelBuilder.Entity("PorslineClone.Domain.Entities.SmsSettings", b =>
@@ -4126,6 +4569,47 @@ namespace PorslineClone.Infrastructure.Migrations
                     b.Navigation("Version");
                 });
 
+            modelBuilder.Entity("PorslineClone.Domain.Entities.ExamLink", b =>
+                {
+                    b.HasOne("PorslineClone.Domain.Entities.ExamForm", "ExamForm")
+                        .WithMany()
+                        .HasForeignKey("ExamFormId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("ExamForm");
+                });
+
+            modelBuilder.Entity("PorslineClone.Domain.Entities.ExamQuestion", b =>
+                {
+                    b.HasOne("PorslineClone.Domain.Entities.ExamForm", "ExamForm")
+                        .WithMany("Questions")
+                        .HasForeignKey("ExamFormId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("ExamForm");
+                });
+
+            modelBuilder.Entity("PorslineClone.Domain.Entities.ExamSubmission", b =>
+                {
+                    b.HasOne("PorslineClone.Domain.Entities.ExamForm", "ExamForm")
+                        .WithMany()
+                        .HasForeignKey("ExamFormId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired();
+
+                    b.HasOne("PorslineClone.Domain.Entities.ExamLink", "ExamLink")
+                        .WithMany()
+                        .HasForeignKey("ExamLinkId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("ExamForm");
+
+                    b.Navigation("ExamLink");
+                });
+
             modelBuilder.Entity("PorslineClone.Domain.Entities.Form", b =>
                 {
                     b.HasOne("PorslineClone.Domain.Entities.FormWorkflowTemplate", "WorkflowTemplate")
@@ -4352,6 +4836,11 @@ namespace PorslineClone.Infrastructure.Migrations
             modelBuilder.Entity("PorslineClone.Domain.Entities.DocumentVersion", b =>
                 {
                     b.Navigation("TextIndex");
+                });
+
+            modelBuilder.Entity("PorslineClone.Domain.Entities.ExamForm", b =>
+                {
+                    b.Navigation("Questions");
                 });
 
             modelBuilder.Entity("PorslineClone.Domain.Entities.Form", b =>

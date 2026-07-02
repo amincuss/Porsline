@@ -214,11 +214,14 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
     [Authorize(Policy = "responders.add")]
     public async Task<IActionResult> Create([FromBody] CreateResponderDto dto, CancellationToken ct)
     {
-        var fullName = dto.FullName.Trim();
+        var fullName = ResolveFullName(dto.FullName, dto.FirstName, dto.LastName);
         var mobile = dto.MobileNumber.Trim();
         var nationalCode = dto.NationalCode.Trim();
 
         if (fullName.Length < 2) return BadRequest(new { message = "نام و نام خانوادگی نامعتبر است" });
+        var (firstName, lastName, _) = ResponderNameHelper.SplitFullName(fullName);
+        if (firstName.Length < 2) return BadRequest(new { message = "نام نامعتبر است" });
+        if (lastName.Length < 2) return BadRequest(new { message = "نام خانوادگی نامعتبر است" });
         if (!ResponderLookupHelper.IsValidNationalCode(nationalCode))
             return BadRequest(new { message = "کد ملی الزامی است" });
         if (!ResponderLookupHelper.IsValidMobile(mobile))
@@ -246,7 +249,7 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
         if (gender is null)
             return BadRequest(new { message = "جنسیت (آقای/خانم) الزامی است" });
 
-        var validGroups = await db.ResponderGroups.Where(x => groupIds.Contains(x.Id)).Select(x => x.Id).ToListAsync(ct);
+        var validGroups = await ResolveExistingGroupIdsAsync(groupIds, ct);
         if (validGroups.Count == 0)
             return BadRequest(new { message = "گروه انتخاب‌شده معتبر نیست" });
 
@@ -276,10 +279,13 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
             .FirstOrDefaultAsync(x => x.Id == id, ct);
         if (item is null || item.IsDeleted) return NotFound(new { message = "پاسخگو یافت نشد" });
 
-        var fullName = dto.FullName.Trim();
+        var fullName = ResolveFullName(dto.FullName, dto.FirstName, dto.LastName);
         var mobile = dto.MobileNumber.Trim();
         var nationalCode = dto.NationalCode.Trim();
         if (fullName.Length < 2) return BadRequest(new { message = "نام و نام خانوادگی نامعتبر است" });
+        var (firstName, lastName, _) = ResponderNameHelper.SplitFullName(fullName);
+        if (firstName.Length < 2) return BadRequest(new { message = "نام نامعتبر است" });
+        if (lastName.Length < 2) return BadRequest(new { message = "نام خانوادگی نامعتبر است" });
         if (!ResponderLookupHelper.IsValidNationalCode(nationalCode))
             return BadRequest(new { message = "کد ملی الزامی است" });
         if (!ResponderLookupHelper.IsValidMobile(mobile))
@@ -310,7 +316,7 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
         item.GroupMembers.Clear();
         if (groupIds.Count > 0)
         {
-            var validGroups = await db.ResponderGroups.Where(x => groupIds.Contains(x.Id)).Select(x => x.Id).ToListAsync(ct);
+            var validGroups = await ResolveExistingGroupIdsAsync(groupIds, ct);
             foreach (var gid in validGroups)
                 item.GroupMembers.Add(new ResponderGroupMember { ResponderId = item.Id, GroupId = gid });
         }
@@ -351,7 +357,7 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
         if (groupIds.Count == 0)
             return BadRequest(new { message = "انتخاب حداقل یک گروه الزامی است" });
 
-        var validGroups = await db.ResponderGroups.Where(x => groupIds.Contains(x.Id)).Select(x => x.Id).ToListAsync(ct);
+        var validGroups = await ResolveExistingGroupIdsAsync(groupIds, ct);
         if (validGroups.Count == 0)
             return BadRequest(new { message = "گروه انتخاب‌شده معتبر نیست" });
 
@@ -360,17 +366,32 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
 
         foreach (var r in dto.Rows)
         {
-            var name = (r.FullName ?? "").Trim();
+            var name = ResolveImportFullName(r);
             var mobile = (r.MobileNumber ?? "").Trim();
             var nationalCode = (r.NationalCode ?? "").Trim();
-            if (name.Length < 2 || !ResponderLookupHelper.IsValidMobile(mobile))
+
+            if (name.Length == 0 && mobile.Length == 0 && nationalCode.Length == 0
+                && string.IsNullOrWhiteSpace(r.Gender))
+                continue;
+
+            if (name.Length > 0 && name.Length < 2)
             {
-                invalidRows.Add(new { r.RowNumber, reason = "نام یا موبایل نامعتبر" });
+                invalidRows.Add(new { r.RowNumber, reason = "نام نامعتبر" });
                 continue;
             }
-            if (!ResponderLookupHelper.IsValidNationalCode(nationalCode))
+            if (mobile.Length > 0 && !ResponderLookupHelper.IsValidMobile(mobile))
+            {
+                invalidRows.Add(new { r.RowNumber, reason = "شماره موبایل نامعتبر" });
+                continue;
+            }
+            if (nationalCode.Length > 0 && !ResponderLookupHelper.IsValidNationalCode(nationalCode))
             {
                 invalidRows.Add(new { r.RowNumber, reason = "کد ملی نامعتبر" });
+                continue;
+            }
+            if (nationalCode.Length == 0 && !ResponderLookupHelper.IsValidMobile(mobile))
+            {
+                invalidRows.Add(new { r.RowNumber, reason = "حداقل کد ملی یا موبایل معتبر لازم است" });
                 continue;
             }
 
@@ -388,72 +409,53 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
             valid.Add((
                 name,
                 mobile,
-                ResponderLookupHelper.NormalizeNationalCode(nationalCode),
+                nationalCode.Length > 0 ? ResponderLookupHelper.NormalizeNationalCode(nationalCode) : "",
                 gender,
                 r.RowNumber));
         }
 
-        var duplicateNationalInFile = valid
-            .GroupBy(x => x.NationalCode)
-            .Where(g => g.Count() > 1)
-            .SelectMany(g => g.Select(x => new { x.Row, reason = "کد ملی تکراری در فایل" }))
-            .ToList();
-        if (duplicateNationalInFile.Count > 0)
-            invalidRows.AddRange(duplicateNationalInFile);
+        var duplicateRowNumbers = new HashSet<int>();
+        foreach (var dup in valid.Where(x => !string.IsNullOrEmpty(x.NationalCode)).GroupBy(x => x.NationalCode).Where(g => g.Count() > 1))
+        {
+            foreach (var x in dup)
+            {
+                duplicateRowNumbers.Add(x.Row);
+                invalidRows.Add(new { x.Row, reason = "کد ملی تکراری در فایل" });
+            }
+        }
+        foreach (var dup in valid.Where(x => ResponderLookupHelper.IsValidMobile(x.Mobile)).GroupBy(x => x.Mobile).Where(g => g.Count() > 1))
+        {
+            foreach (var x in dup)
+            {
+                duplicateRowNumbers.Add(x.Row);
+                invalidRows.Add(new { x.Row, reason = "موبایل تکراری در فایل" });
+            }
+        }
 
-        var uniqueValid = valid
-            .GroupBy(x => x.NationalCode)
-            .Where(g => g.Count() == 1)
-            .Select(g => g.First())
-            .ToList();
+        var uniqueValid = valid.Where(v => !duplicateRowNumbers.Contains(v.Row)).ToList();
 
         var inserted = 0;
         var updated = 0;
         foreach (var v in uniqueValid)
         {
-            var existing = await ActiveOnly(db.Responders)
-                .Include(x => x.GroupMembers)
-                .FirstOrDefaultAsync(x => x.NationalCode == v.NationalCode, ct)
-                ?? await ActiveOnly(db.Responders)
-                    .Include(x => x.GroupMembers)
-                    .FirstOrDefaultAsync(x => x.MobileNumber == v.Mobile, ct);
+            var existing = await FindImportResponderAsync(v.NationalCode, v.Mobile, ct);
 
             if (existing is not null)
             {
-                existing.FullName = v.Name;
-                existing.MobileNumber = v.Mobile;
-                existing.NationalCode = v.NationalCode;
-                if (v.Gender is not null)
-                    existing.Gender = v.Gender;
-                if (existing.IsDeleted)
-                {
-                    existing.IsDeleted = false;
-                    existing.DeletedAtUtc = null;
-                }
-                foreach (var gid in validGroups)
-                {
-                    if (existing.GroupMembers.All(m => m.GroupId != gid))
-                        existing.GroupMembers.Add(new ResponderGroupMember { ResponderId = existing.Id, GroupId = gid });
-                }
+                await ApplyImportRowAsync(existing, v, validGroups, ct);
                 updated++;
+            }
+            else if (!ResponderLookupHelper.IsValidMobile(v.Mobile))
+            {
+                invalidRows.Add(new { v.Row, reason = "برای ثبت جدید موبایل معتبر لازم است" });
+                continue;
             }
             else
             {
-                try
-                {
-                    await ResponderLookupHelper.EnsureNationalCodeUniqueAsync(db, null, v.NationalCode, ct);
-                    await ResponderLookupHelper.EnsureMobileUniqueAsync(db, null, v.Mobile, ct);
-                }
-                catch (InvalidOperationException ex)
-                {
-                    invalidRows.Add(new { v.Row, reason = ex.Message });
-                    continue;
-                }
-
                 var entity = new Responder
                 {
                     Id = Guid.NewGuid(),
-                    FullName = v.Name,
+                    FullName = v.Name.Length >= 2 ? v.Name : v.Mobile,
                     MobileNumber = v.Mobile,
                     NationalCode = v.NationalCode,
                     Gender = v.Gender,
@@ -465,9 +467,10 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
                 db.Responders.Add(entity);
                 inserted++;
             }
+
+            await db.SaveChangesAsync(ct);
         }
 
-        await db.SaveChangesAsync(ct);
         return Ok(new
         {
             message = "ایمپورت انجام شد",
@@ -478,11 +481,111 @@ public class AdminRespondersController(AppDbContext db) : ControllerBase
         });
     }
 
+    private async Task<Responder?> FindImportResponderAsync(string nationalCode, string mobile, CancellationToken ct)
+    {
+        if (!string.IsNullOrEmpty(nationalCode))
+        {
+            var byCode = await ActiveOnly(db.Responders)
+                .Include(x => x.GroupMembers)
+                .FirstOrDefaultAsync(x => x.NationalCode == nationalCode, ct);
+            if (byCode is not null)
+                return byCode;
+        }
+
+        if (ResponderLookupHelper.IsValidMobile(mobile))
+        {
+            return await ActiveOnly(db.Responders)
+                .Include(x => x.GroupMembers)
+                .FirstOrDefaultAsync(x => x.MobileNumber == mobile, ct);
+        }
+
+        return null;
+    }
+
+    private async Task ApplyImportRowAsync(
+        Responder existing,
+        (string Name, string Mobile, string NationalCode, UserGender? Gender, int Row) v,
+        List<Guid> validGroups,
+        CancellationToken ct)
+    {
+        if (v.Name.Length >= 2)
+            existing.FullName = v.Name;
+
+        if (ResponderLookupHelper.IsValidMobile(v.Mobile)
+            && v.Mobile != existing.MobileNumber
+            && !await ActiveOnly(db.Responders).AnyAsync(x => x.MobileNumber == v.Mobile && x.Id != existing.Id, ct))
+            existing.MobileNumber = v.Mobile;
+
+        if (!string.IsNullOrEmpty(v.NationalCode)
+            && v.NationalCode != existing.NationalCode
+            && !await ActiveOnly(db.Responders).AnyAsync(x => x.NationalCode == v.NationalCode && x.Id != existing.Id, ct))
+            existing.NationalCode = v.NationalCode;
+
+        if (v.Gender is not null)
+            existing.Gender = v.Gender;
+
+        foreach (var gid in validGroups)
+        {
+            if (existing.GroupMembers.All(m => m.GroupId != gid))
+                existing.GroupMembers.Add(new ResponderGroupMember { ResponderId = existing.Id, GroupId = gid });
+        }
+    }
+
+    private async Task<List<Guid>> ResolveExistingGroupIdsAsync(IReadOnlyList<Guid> groupIds, CancellationToken ct)
+    {
+        var distinct = groupIds.Where(x => x != Guid.Empty).Distinct().ToList();
+        if (distinct.Count == 0) return [];
+
+        var found = new List<Guid>(distinct.Count);
+        foreach (var id in distinct)
+        {
+            if (await db.ResponderGroups.AsNoTracking().AnyAsync(x => x.Id == id, ct))
+                found.Add(id);
+        }
+
+        return found;
+    }
+
+    private static string ResolveImportFullName(ImportResponderRowDto row) =>
+        ResolveFullName(row.FullName, row.FirstName, row.LastName);
+
+    private static string ResolveFullName(string? fullName, string? firstName, string? lastName)
+    {
+        var explicitFull = (fullName ?? "").Trim();
+        if (explicitFull.Length >= 2)
+            return explicitFull;
+
+        var first = (firstName ?? "").Trim();
+        var last = (lastName ?? "").Trim();
+        return $"{first} {last}".Trim();
+    }
+
 }
 
 public record ResponderGroupOptionDto(Guid Id, string Name);
 public record ResponderItemDto(Guid Id, string FullName, string MobileNumber, string NationalCode, UserGender? Gender, DateTime CreatedAtUtc, List<ResponderGroupOptionDto> Groups);
-public record CreateResponderDto(string FullName, string MobileNumber, string NationalCode, string Gender, List<Guid>? GroupIds = null);
-public record UpdateResponderDto(string FullName, string MobileNumber, string NationalCode, string? Gender = null, List<Guid>? GroupIds = null);
+public record CreateResponderDto(
+    string MobileNumber,
+    string NationalCode,
+    string Gender,
+    string? FullName = null,
+    string? FirstName = null,
+    string? LastName = null,
+    List<Guid>? GroupIds = null);
+public record UpdateResponderDto(
+    string MobileNumber,
+    string NationalCode,
+    string? FullName = null,
+    string? FirstName = null,
+    string? LastName = null,
+    string? Gender = null,
+    List<Guid>? GroupIds = null);
 public record ImportRespondersDto(List<ImportResponderRowDto> Rows, List<Guid>? GroupIds = null);
-public record ImportResponderRowDto(int RowNumber, string? FullName, string? MobileNumber, string? NationalCode = null, string? Gender = null);
+public record ImportResponderRowDto(
+    int RowNumber,
+    string? FullName,
+    string? FirstName,
+    string? LastName,
+    string? MobileNumber,
+    string? NationalCode = null,
+    string? Gender = null);

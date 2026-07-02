@@ -1,5 +1,4 @@
 using System.Text.Json;
-using Microsoft.EntityFrameworkCore;
 
 namespace PorslineClone.Api.Middleware;
 
@@ -33,21 +32,34 @@ public sealed class ApiExceptionHandlingMiddleware(RequestDelegate next, ILogger
 
     private string ResolveClientMessage(Exception ex)
     {
-        if (ex is DbUpdateException dbEx)
+        if (IsDatabaseSchemaMismatch(ex))
         {
-            var inner = dbEx.InnerException?.Message ?? dbEx.Message;
-            if (inner.Contains("SentByUserId", StringComparison.OrdinalIgnoreCase)
-                || inner.Contains("Gender", StringComparison.OrdinalIgnoreCase)
-                || inner.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase))
-            {
-                return "ساختار دیتابیس با نسخهٔ API هم‌خوان نیست. API را ری‌استارت کنید تا SchemaPatch اعمال شود، یا ستون‌های جدید را دستی اضافه کنید.";
-            }
+            return "ساختار دیتابیس با نسخهٔ API هم‌خوان نیست. API را ری‌استارت کنید تا SchemaPatch اعمال شود، یا ستون‌های جدید را دستی اضافه کنید.";
         }
 
         if (env.IsDevelopment())
             return ex.Message;
 
         return "خطای داخلی سرور. جزئیات در لاگ API ثبت شده است.";
+    }
+
+    private static bool IsDatabaseSchemaMismatch(Exception ex)
+    {
+        for (var current = ex; current is not null; current = current.InnerException)
+        {
+            var text = current.Message;
+            if (text.Contains("Invalid column name", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("SentByUserId", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("OnlyIncompleteSubmissions", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("NestedFieldsJson", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("IsDeleted", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("Gender", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
 

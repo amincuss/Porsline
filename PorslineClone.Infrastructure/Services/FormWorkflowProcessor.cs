@@ -5,6 +5,7 @@ using PorslineClone.Application.Abstractions;
 using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
+using PorslineClone.Infrastructure.Services.SmsPatterns;
 
 namespace PorslineClone.Infrastructure.Services;
 
@@ -13,6 +14,7 @@ public class FormWorkflowProcessor(
     UserManager<AppUser> userManager,
     FormSubmissionApprovalLinkService approvalLinks,
     ISmsSender smsSender,
+    ISmsPatternService smsPatterns,
     IInboxMessageService inbox,
     IFrontendUrlResolver frontendUrls,
     FormDispatchSubmissionNotifier dispatchNotifier,
@@ -235,13 +237,17 @@ public class FormWorkflowProcessor(
 
         var formTitle = submission.Form?.Title ?? "فرم";
         var msg = isReminder
-            ? $"یادآوری: پاسخ فرم «{formTitle}» همچنان منتظر تأیید شماست.\n" +
-              $"لینک تأیید: {linkPath}\n" +
-              $"یا پنل: {adminWorkflowRuns}"
-            : $"پاسخ جدید از فرم «{formTitle}» برای تأیید شما ارسال شد.\n" +
-              $"ارجاع‌دهنده: {sender}\n" +
-              $"لینک تأیید: {linkPath}\n" +
-              $"یا پنل: {adminWorkflowRuns}";
+            ? await smsPatterns.RenderAsync("form.approval.assignee.reminder", SmsPatternVars.Dict(
+                ("formTitle", formTitle),
+                ("linkPath", linkPath),
+                ("adminWorkflowRuns", adminWorkflowRuns)
+            ), ct)
+            : await smsPatterns.RenderAsync("form.approval.assignee.new", SmsPatternVars.Dict(
+                ("formTitle", formTitle),
+                ("sender", sender),
+                ("linkPath", linkPath),
+                ("adminWorkflowRuns", adminWorkflowRuns)
+            ), ct);
 
         var inboxTitle = isReminder ? "یادآوری تأیید فرم" : "فرم برای تأیید";
         await inbox.SendToUserAsync(userId, inboxTitle, msg, ct);

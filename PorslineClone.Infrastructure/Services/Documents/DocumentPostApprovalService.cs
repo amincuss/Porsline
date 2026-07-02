@@ -5,6 +5,7 @@ using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
 using PorslineClone.Infrastructure.Services;
+using PorslineClone.Infrastructure.Services.SmsPatterns;
 
 namespace PorslineClone.Infrastructure.Services.Documents;
 
@@ -12,6 +13,7 @@ public class DocumentPostApprovalService(
     AppDbContext db,
     UserManager<AppUser> userManager,
     ISmsSender smsSender,
+    ISmsPatternService smsPatterns,
     IInboxMessageService inbox,
     IFrontendUrlResolver frontendUrls)
 {
@@ -72,11 +74,12 @@ public class DocumentPostApprovalService(
                 ? "کارشناس"
                 : ResponderHonorific.FormatFullName($"{user.FirstName} {user.LastName}".Trim(), user.Gender);
 
-            var msg =
-                $"{staffName} گرامی،\n\n" +
-                $"سند «{document.Title}» تأیید نهایی شد.\n" +
-                $"جهت {directionLabel} برای شما ارجاع شد.\n\n" +
-                $"از پنل:\n{adminPath}";
+            var msg = await smsPatterns.RenderAsync("document.postapproval.assignee", SmsPatternVars.Dict(
+                ("staffName", staffName),
+                ("docTitle", document.Title),
+                ("directionLabel", directionLabel),
+                ("adminPath", adminPath)
+            ), ct);
 
             await inbox.SendToUserAsync(userId, "اقدام پس از تأیید سند", msg, ct);
 

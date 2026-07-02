@@ -94,7 +94,18 @@ public record DocumentWorkflowTemplateDetailDto(
 
 public record SaveFormWorkflowLinkRequest(string? WorkflowTemplateId, bool ConnectWorkflow);
 
-public record FormFieldValueDto(string Label, string Value);
+public record FormFieldValueDto(string Label, string Value, Guid? FieldId = null);
+
+public class NestedFormFieldDto
+{
+    public string? Id { get; set; }
+    public int FieldType { get; set; }
+    public string? Label { get; set; }
+    public string? Placeholder { get; set; }
+    public string? HelpText { get; set; }
+    public bool IsRequired { get; set; }
+    public List<string>? Options { get; set; }
+}
 
 public class ApprovalStepDto
 {

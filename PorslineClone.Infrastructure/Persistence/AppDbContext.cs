@@ -16,6 +16,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<SecuritySettings> SecuritySettings => Set<SecuritySettings>();
     public DbSet<LoginAttempt> LoginAttempts => Set<LoginAttempt>();
     public DbSet<SmsSettings> SmsSettings => Set<SmsSettings>();
+    public DbSet<SmsPattern> SmsPatterns => Set<SmsPattern>();
+    public DbSet<SmsLog> SmsLogs => Set<SmsLog>();
     public DbSet<SiteSettings> SiteSettings => Set<SiteSettings>();
     public DbSet<InboxMessage> InboxMessages => Set<InboxMessage>();
     public DbSet<Responder> Responders => Set<Responder>();
@@ -30,6 +32,16 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
     public DbSet<FormWordTemplate> FormWordTemplates => Set<FormWordTemplate>();
     public DbSet<FormSubmissionWordDocument> FormSubmissionWordDocuments => Set<FormSubmissionWordDocument>();
     public DbSet<FormWordBatchExportJob> FormWordBatchExportJobs => Set<FormWordBatchExportJob>();
+    public DbSet<FormSubmissionExcelExportJob> FormSubmissionExcelExportJobs => Set<FormSubmissionExcelExportJob>();
+    public DbSet<FormDispatchGroupSendJob> FormDispatchGroupSendJobs => Set<FormDispatchGroupSendJob>();
+    public DbSet<ExamForm> ExamForms => Set<ExamForm>();
+    public DbSet<ExamQuestion> ExamQuestions => Set<ExamQuestion>();
+    public DbSet<ExamLink> ExamLinks => Set<ExamLink>();
+    public DbSet<ExamDispatch> ExamDispatches => Set<ExamDispatch>();
+    public DbSet<ExamSubmission> ExamSubmissions => Set<ExamSubmission>();
+    public DbSet<ExamParticipantGroup> ExamParticipantGroups => Set<ExamParticipantGroup>();
+    public DbSet<ExamParticipant> ExamParticipants => Set<ExamParticipant>();
+    public DbSet<ExamParticipantGroupMember> ExamParticipantGroupMembers => Set<ExamParticipantGroupMember>();
     public DbSet<FormSubmission> FormSubmissions => Set<FormSubmission>();
     public DbSet<FormDispatchLink> FormDispatchLinks => Set<FormDispatchLink>();
     public DbSet<FormUserAccess> FormUserAccesses => Set<FormUserAccess>();
@@ -92,12 +104,15 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
                 .IsUnique()
                 .HasFilter("[PersonnelCode] IS NOT NULL AND [PersonnelCode] <> ''");
             entity.HasIndex(x => x.CreatedByUserId);
-            entity.HasIndex(x => x.NationalCode).IsUnique();
+            entity.HasIndex(x => x.NationalCode)
+                .IsUnique()
+                .HasFilter("[NationalCode] <> ''");
             entity.HasIndex(x => x.PhoneNumber).IsUnique();
             entity.HasOne(x => x.UserPosition)
                 .WithMany()
                 .HasForeignKey(x => x.UserPositionId)
                 .OnDelete(DeleteBehavior.SetNull);
+            entity.HasQueryFilter(x => !x.IsSoftDeleted);
         });
 
         builder.Entity<UserPosition>(entity =>
@@ -106,6 +121,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.IsDeleted).HasDefaultValue(false);
             entity.HasIndex(x => x.Name).IsUnique().HasFilter("[IsDeleted] = 0");
             entity.HasIndex(x => new { x.IsActive, x.SortOrder });
+            entity.HasQueryFilter(x => !x.IsDeleted);
         });
 
         builder.Entity<MenuItem>(entity =>
@@ -208,6 +224,34 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.PublicFormRequireOtp).HasDefaultValue(false);
         });
 
+        builder.Entity<SmsPattern>(entity =>
+        {
+            entity.Property(x => x.Key).HasMaxLength(120).IsRequired();
+            entity.Property(x => x.Title).HasMaxLength(200).IsRequired();
+            entity.Property(x => x.Category).HasMaxLength(40).IsRequired();
+            entity.Property(x => x.Icon).HasMaxLength(40).IsRequired();
+            entity.Property(x => x.IconColor).HasMaxLength(20);
+            entity.Property(x => x.Template).HasColumnType("nvarchar(max)").IsRequired();
+            entity.Property(x => x.PlaceholdersJson).HasColumnType("nvarchar(max)").IsRequired();
+            entity.Property(x => x.Description).HasMaxLength(500);
+            entity.HasIndex(x => x.Key).IsUnique();
+            entity.HasIndex(x => x.Category);
+            entity.HasIndex(x => x.SortOrder);
+        });
+
+        builder.Entity<SmsLog>(entity =>
+        {
+            entity.Property(x => x.MobileNumber).HasMaxLength(11).IsRequired();
+            entity.Property(x => x.Message).HasColumnType("nvarchar(max)").IsRequired();
+            entity.Property(x => x.ErrorMessage).HasMaxLength(500);
+            entity.Property(x => x.TechnicalDetail).HasColumnType("nvarchar(max)");
+            entity.Property(x => x.Source).HasMaxLength(120);
+            entity.HasIndex(x => x.CreatedAtUtc);
+            entity.HasIndex(x => x.IsSuccess);
+            entity.HasIndex(x => x.MobileNumber);
+            entity.HasIndex(x => new { x.IsSuccess, x.CreatedAtUtc });
+        });
+
         builder.Entity<SiteSettings>(entity =>
         {
             entity.HasKey(x => x.Id);
@@ -241,6 +285,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasIndex(x => x.NationalCode).IsUnique().HasFilter("[IsDeleted] = 0 AND [NationalCode] <> ''");
             entity.HasIndex(x => x.CreatedByUserId);
             entity.HasIndex(x => x.CreatedAtUtc);
+            entity.HasQueryFilter(x => !x.IsDeleted);
         });
 
         builder.Entity<ResponderGroup>(entity =>
@@ -250,6 +295,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.IsDeleted).HasDefaultValue(false);
             entity.HasIndex(x => x.Name).IsUnique().HasFilter("[IsDeleted] = 0");
             entity.HasIndex(x => x.CreatedAtUtc);
+            entity.HasQueryFilter(x => !x.IsDeleted);
         });
 
         builder.Entity<ResponderGroupMember>(entity =>
@@ -274,6 +320,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasIndex(x => x.CreatedByUserId);
             entity.HasIndex(x => x.Name).IsUnique().HasFilter("[IsDeleted] = 0");
             entity.HasIndex(x => x.CreatedAtUtc);
+            entity.HasQueryFilter(x => !x.IsDeleted);
         });
 
         builder.Entity<UserGroupMember>(entity =>
@@ -298,6 +345,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.IsDeleted).HasDefaultValue(false);
             entity.HasIndex(x => x.Name);
             entity.HasIndex(x => x.UpdatedAtUtc);
+            entity.HasQueryFilter(x => !x.IsDeleted);
         });
 
         builder.Entity<FormWordTemplate>(entity =>
@@ -314,6 +362,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.IsDeleted).HasDefaultValue(false);
             entity.HasIndex(x => x.FormId).IsUnique().HasFilter("[IsDeleted] = 0");
             entity.HasOne(x => x.Form).WithMany().HasForeignKey(x => x.FormId).OnDelete(DeleteBehavior.Cascade);
+            entity.HasQueryFilter(x => !x.IsDeleted);
         });
 
         builder.Entity<FormSubmissionWordDocument>(entity =>
@@ -339,6 +388,32 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasIndex(x => x.CreatedAtUtc);
         });
 
+        builder.Entity<FormSubmissionExcelExportJob>(entity =>
+        {
+            entity.Property(x => x.SelectedFieldsJson).HasColumnType("nvarchar(max)");
+            entity.Property(x => x.FilePath).HasMaxLength(500);
+            entity.Property(x => x.FileName).HasMaxLength(260);
+            entity.Property(x => x.ErrorMessage).HasMaxLength(2000);
+            entity.Property(x => x.HangfireJobId).HasMaxLength(64);
+            entity.HasIndex(x => x.Status);
+            entity.HasIndex(x => x.CreatedByUserId);
+            entity.HasIndex(x => x.CreatedAtUtc);
+            entity.HasIndex(x => x.FormId);
+        });
+
+        builder.Entity<FormDispatchGroupSendJob>(entity =>
+        {
+            entity.Property(x => x.SmsMessageMode).HasMaxLength(20);
+            entity.Property(x => x.CustomSmsBody).HasColumnType("nvarchar(max)");
+            entity.Property(x => x.ErrorMessage).HasMaxLength(2000);
+            entity.Property(x => x.HangfireJobId).HasMaxLength(64);
+            entity.HasIndex(x => x.Status);
+            entity.HasIndex(x => x.CreatedByUserId);
+            entity.HasIndex(x => x.CreatedAtUtc);
+            entity.HasIndex(x => x.FormId);
+            entity.HasIndex(x => x.GroupId);
+        });
+
         builder.Entity<Form>(entity =>
         {
             entity.Property(x => x.Title).HasMaxLength(200).IsRequired();
@@ -357,6 +432,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasIndex(x => new { x.UserId, x.IsDeleted });
             entity.HasIndex(x => x.WorkflowTemplateId)
                 .HasFilter("[WorkflowTemplateId] IS NOT NULL");
+            entity.HasQueryFilter(x => !x.IsDeleted);
         });
 
         builder.Entity<FormWorkflowTemplate>(entity =>
@@ -395,10 +471,12 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.SubmitterName).HasMaxLength(200);
             entity.Property(x => x.SubmitterEmail).HasMaxLength(300);
             entity.Property(x => x.TrackingCode).HasMaxLength(32);
-            entity.HasIndex(x => x.TrackingCode).IsUnique().HasFilter("[TrackingCode] IS NOT NULL");
+            entity.Property(x => x.IsDeleted).HasDefaultValue(false);
+            entity.HasIndex(x => x.TrackingCode).IsUnique().HasFilter("[TrackingCode] IS NOT NULL AND [IsDeleted] = 0");
+            entity.HasQueryFilter(x => !x.IsDeleted);
             entity.HasIndex(x => x.ResponderId);
             entity.HasIndex(x => x.DispatchLinkId);
-            entity.Property(x => x.FieldsJson).HasMaxLength(20000);
+            entity.Property(x => x.FieldsJson).HasColumnType("nvarchar(max)");
             entity.Property(x => x.StepsJson).HasMaxLength(20000);
             entity.Property(x => x.WorkflowName).HasMaxLength(200);
             entity.Property(x => x.PostApprovalJson).HasColumnType("nvarchar(max)");
@@ -448,6 +526,117 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.HasIndex(x => x.Code).IsUnique();
             entity.HasIndex(x => new { x.FormId, x.ResponderId, x.ExpiresAtUtc });
             entity.HasIndex(x => x.WorkflowTemplateId);
+        });
+
+        builder.Entity<ExamForm>(entity =>
+        {
+            entity.Property(x => x.Title).HasMaxLength(300).IsRequired();
+            entity.Property(x => x.Description).HasMaxLength(2000);
+            entity.Property(x => x.DurationMinutes).HasDefaultValue(60);
+            entity.Property(x => x.IsDeleted).HasDefaultValue(false);
+            entity.HasIndex(x => x.UpdatedAtUtc);
+            entity.HasQueryFilter(x => !x.IsDeleted);
+        });
+
+        builder.Entity<ExamQuestion>(entity =>
+        {
+            entity.Property(x => x.Label).HasMaxLength(2000).IsRequired();
+            entity.Property(x => x.OptionsJson).HasColumnType("nvarchar(max)");
+            entity.Property(x => x.QuestionType).HasConversion<int>();
+            entity.HasOne(x => x.ExamForm)
+                .WithMany(x => x.Questions)
+                .HasForeignKey(x => x.ExamFormId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasIndex(x => new { x.ExamFormId, x.SortOrder });
+        });
+
+        builder.Entity<ExamLink>(entity =>
+        {
+            entity.Property(x => x.Code).HasMaxLength(32).IsRequired();
+            entity.Property(x => x.ParticipantName).HasMaxLength(200);
+            entity.Property(x => x.ParticipantMobile).HasMaxLength(11);
+            entity.HasIndex(x => x.Code).IsUnique();
+            entity.HasIndex(x => new { x.ExamFormId, x.IsActive });
+            entity.HasIndex(x => x.ExamDispatchId);
+            entity.HasIndex(x => x.ExamParticipantId);
+            entity.HasOne(x => x.ExamForm)
+                .WithMany()
+                .HasForeignKey(x => x.ExamFormId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(x => x.ExamDispatch)
+                .WithMany(x => x.Links)
+                .HasForeignKey(x => x.ExamDispatchId)
+                .OnDelete(DeleteBehavior.NoAction);
+            entity.HasOne(x => x.ExamParticipant)
+                .WithMany()
+                .HasForeignKey(x => x.ExamParticipantId)
+                .OnDelete(DeleteBehavior.NoAction);
+        });
+
+        builder.Entity<ExamDispatch>(entity =>
+        {
+            entity.Property(x => x.GroupIdsJson).HasColumnType("nvarchar(max)").IsRequired();
+            entity.HasIndex(x => x.ExamFormId);
+            entity.HasIndex(x => x.CreatedAtUtc);
+            entity.HasOne(x => x.ExamForm)
+                .WithMany()
+                .HasForeignKey(x => x.ExamFormId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ExamSubmission>(entity =>
+        {
+            entity.Property(x => x.AnswersJson).HasColumnType("nvarchar(max)");
+            entity.HasIndex(x => x.ExamLinkId).IsUnique();
+            entity.HasOne(x => x.ExamLink)
+                .WithMany()
+                .HasForeignKey(x => x.ExamLinkId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(x => x.ExamForm)
+                .WithMany()
+                .HasForeignKey(x => x.ExamFormId)
+                .OnDelete(DeleteBehavior.NoAction);
+        });
+
+        builder.Entity<ExamParticipantGroup>(entity =>
+        {
+            entity.Property(x => x.Name).HasMaxLength(150).IsRequired();
+            entity.Property(x => x.IsActive).HasDefaultValue(true);
+            entity.Property(x => x.IsDeleted).HasDefaultValue(false);
+            entity.HasIndex(x => x.Name).IsUnique().HasFilter("[IsDeleted] = 0");
+            entity.HasIndex(x => x.CreatedAtUtc);
+            entity.HasQueryFilter(x => !x.IsDeleted);
+        });
+
+        builder.Entity<ExamParticipant>(entity =>
+        {
+            entity.Property(x => x.FirstName).HasMaxLength(100).IsRequired();
+            entity.Property(x => x.LastName).HasMaxLength(100).IsRequired();
+            entity.Property(x => x.MobileNumber).HasMaxLength(11).IsRequired();
+            entity.Property(x => x.NationalCode).HasMaxLength(50).IsRequired();
+            entity.Property(x => x.PersonnelCode).HasMaxLength(30);
+            entity.Property(x => x.IsActive).HasDefaultValue(true);
+            entity.Property(x => x.IsDeleted).HasDefaultValue(false);
+            entity.HasIndex(x => x.MobileNumber).IsUnique().HasFilter("[IsDeleted] = 0");
+            entity.HasIndex(x => x.NationalCode).IsUnique().HasFilter("[IsDeleted] = 0 AND [NationalCode] <> ''");
+            entity.HasIndex(x => x.PersonnelCode).IsUnique()
+                .HasFilter("[IsDeleted] = 0 AND [PersonnelCode] IS NOT NULL AND [PersonnelCode] <> ''");
+            entity.HasIndex(x => x.CreatedByUserId);
+            entity.HasIndex(x => x.CreatedAtUtc);
+            entity.HasQueryFilter(x => !x.IsDeleted);
+        });
+
+        builder.Entity<ExamParticipantGroupMember>(entity =>
+        {
+            entity.HasKey(x => new { x.ParticipantId, x.GroupId });
+            entity.HasOne(x => x.Participant)
+                .WithMany(x => x.GroupMembers)
+                .HasForeignKey(x => x.ParticipantId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(x => x.Group)
+                .WithMany(x => x.Members)
+                .HasForeignKey(x => x.GroupId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<FormUserAccess>(entity =>
@@ -542,6 +731,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             entity.Property(x => x.IsDeleted).HasDefaultValue(false);
             entity.HasIndex(x => x.Name).IsUnique().HasFilter("[IsDeleted] = 0");
             entity.HasIndex(x => new { x.IsActive, x.CreatedAtUtc });
+            entity.HasQueryFilter(x => !x.IsDeleted);
             // NO ACTION: جلوگیری از multiple cascade paths در SQL Server (Template→Versions=CASCADE)
             entity.HasOne(x => x.ActiveVersion)
                 .WithMany()
@@ -561,6 +751,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
                 .HasForeignKey(x => x.TemplateId)
                 .OnDelete(DeleteBehavior.Cascade);
             entity.HasIndex(x => new { x.TemplateId, x.VersionNumber }).IsUnique();
+            entity.HasQueryFilter(x => !x.IsDeleted);
         });
 
         builder.Entity<ContractDocumentTemplateField>(entity =>
@@ -1035,6 +1226,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
         var menuUsers    = new Guid("30000000-0000-0000-0000-000000000001");
         var menuSettings = new Guid("30000000-0000-0000-0000-000000000002");
         var menuSms      = new Guid("30000000-0000-0000-0000-000000000003");
+        var menuSmsPatterns = new Guid("30000000-0000-0000-0000-000000000007");
         var menuSecurity = new Guid("30000000-0000-0000-0000-000000000004");
         var menuAccess   = new Guid("30000000-0000-0000-0000-000000000005");
 
@@ -1043,8 +1235,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             new MenuItem { Id = menuUsers,    Key = "users",             Title = "مدیریت کاربران",   Icon = "Users",          IconColor = "#0EA5E9", Route = "/admin/users",              Order = 1 },
             new MenuItem { Id = menuSettings, Key = "settings",          Title = "تنظیمات سایت",     Icon = "Settings",       IconColor = "#F59E0B",                                      Order = 2 },
             new MenuItem { Id = menuSms,      Key = "settings.sms",      Title = "تنظیمات پیامک",    Icon = "MessageSquare",  IconColor = "#8B5CF6", Route = "/admin/settings/sms",      Order = 1, ParentId = menuSettings },
-            new MenuItem { Id = menuSecurity, Key = "settings.security", Title = "تنظیمات امنیتی",   Icon = "ShieldCheck",    IconColor = "#EF4444", Route = "/admin/settings/security", Order = 2, ParentId = menuSettings },
-            new MenuItem { Id = menuAccess,   Key = "settings.access",   Title = "سطح دسترسی",       Icon = "Shield",         IconColor = "#2563EB", Route = "/admin/access-level",      Order = 3, ParentId = menuSettings }
+            new MenuItem { Id = menuSmsPatterns, Key = "settings.sms-patterns", Title = "پترن پیامک", Icon = "MessagesSquare", IconColor = "#14B8A6", Route = "/admin/settings/sms-patterns", Order = 2, ParentId = menuSettings },
+            new MenuItem { Id = menuSecurity, Key = "settings.security", Title = "تنظیمات امنیتی",   Icon = "ShieldCheck",    IconColor = "#EF4444", Route = "/admin/settings/security", Order = 3, ParentId = menuSettings },
+            new MenuItem { Id = menuAccess,   Key = "settings.access",   Title = "سطح دسترسی",       Icon = "Shield",         IconColor = "#2563EB", Route = "/admin/access-level",      Order = 4, ParentId = menuSettings }
         );
 
         builder.Entity<RoleMenu>().HasData(
@@ -1052,6 +1245,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : IdentityDbCo
             new RoleMenu { RoleId = adminRoleId,  MenuId = menuUsers    },
             new RoleMenu { RoleId = adminRoleId,  MenuId = menuSettings },
             new RoleMenu { RoleId = adminRoleId,  MenuId = menuSms      },
+            new RoleMenu { RoleId = adminRoleId,  MenuId = menuSmsPatterns },
             new RoleMenu { RoleId = adminRoleId,  MenuId = menuSecurity },
             new RoleMenu { RoleId = adminRoleId,  MenuId = menuAccess   },
             new RoleMenu { RoleId = expertRoleId, MenuId = menuForms    },

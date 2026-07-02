@@ -23,7 +23,9 @@ public enum FieldType
     /// <summary>عکس پرسنلی — حداکثر یکی در فرم؛ در نسخه اداری گوشه بالا راست</summary>
     PersonalPhoto = 18,
     /// <summary>مقدار ثابت — فقط طراحی؛ کلید placeholder و مقدار برای Word</summary>
-    FixedConstant = 19
+    FixedConstant = 19,
+    /// <summary>بلوک تکرارشونده — فیلدهای تو در تو؛ پاسخ به‌صورت JSON آرایه</summary>
+    Repeatable = 20
 }
 
 public class Form
@@ -70,6 +72,8 @@ public class FormField
     public string? DefaultValue { get; set; }
     /// <summary>فیلد با مقدار پیش‌فرض قابل ویرایش توسط پاسخ‌دهنده نیست</summary>
     public bool IsReadOnly { get; set; }
+    /// <summary>فیلدهای تو در تو برای نوع Repeatable — JSON</summary>
+    public string? NestedFieldsJson { get; set; }
 }
 
 /// <summary>قالب گردش تأیید فرم (با نام یکتا)</summary>
@@ -129,6 +133,8 @@ public class FormSubmission
     public string? WorkflowRunsHistoryJson { get; set; }
     /// <summary>رد قطعی در انتظار اقدام ارسال‌کننده یا تأیید مجدد</summary>
     public string? WorkflowRejectionJson { get; set; }
+    public bool IsDeleted { get; set; }
+    public DateTime? DeletedAtUtc { get; set; }
 }
 
 /// <summary>لینک سریع اقدام پس از تأیید کامل پاسخ فرم (بدون OTP)</summary>

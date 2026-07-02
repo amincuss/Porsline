@@ -5,6 +5,7 @@ using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
 using PorslineClone.Infrastructure.Services;
+using PorslineClone.Infrastructure.Services.SmsPatterns;
 
 namespace PorslineClone.Infrastructure.Services.Documents;
 
@@ -13,6 +14,7 @@ public class DocumentWorkflowProcessor(
     UserManager<AppUser> userManager,
     DocumentApprovalLinkService approvalLinks,
     ISmsSender smsSender,
+    ISmsPatternService smsPatterns,
     IInboxMessageService inbox,
     IFrontendUrlResolver frontendUrls,
     DocumentPostApprovalService postApproval)
@@ -228,13 +230,17 @@ public class DocumentWorkflowProcessor(
 
         var docTitle = document.Title;
         var msg = isReminder
-            ? $"یادآوری: سند «{docTitle}» همچنان منتظر تأیید شماست.\n" +
-              $"لینک تأیید (بدون نیاز به ورود):\n{linkPath}\n" +
-              $"یا پنل: {adminWorkflowRuns}"
-            : $"سند «{docTitle}» برای تأیید شما ارسال شد.\n" +
-              $"ارجاع‌دهنده: {sender}\n" +
-              $"لینک تأیید (بدون نیاز به ورود):\n{linkPath}\n" +
-              $"یا پنل: {adminWorkflowRuns}";
+            ? await smsPatterns.RenderAsync("document.approval.assignee.reminder", SmsPatternVars.Dict(
+                ("docTitle", docTitle),
+                ("linkPath", linkPath),
+                ("adminWorkflowRuns", adminWorkflowRuns)
+            ), ct)
+            : await smsPatterns.RenderAsync("document.approval.assignee.new", SmsPatternVars.Dict(
+                ("docTitle", docTitle),
+                ("sender", sender),
+                ("linkPath", linkPath),
+                ("adminWorkflowRuns", adminWorkflowRuns)
+            ), ct);
 
         var inboxTitle = isReminder ? "یادآوری تأیید سند" : "سند برای تأیید";
         await inbox.SendToUserAsync(userId, inboxTitle, msg, ct);
@@ -282,10 +288,14 @@ public class DocumentWorkflowProcessor(
         var refPart = string.IsNullOrWhiteSpace(document.ReferenceNumber)
             ? ""
             : $" (شماره ارجاع: {document.ReferenceNumber})";
-        var msg =
-            $"سند «{document.Title}»{refPart}:\n" +
-            $"{approverLabel} در تاریخ {dateStr} ساعت {timeStr} تأیید کرد.\n" +
-            statusTail;
+        var msg = await smsPatterns.RenderAsync("document.owner.step.approved", SmsPatternVars.Dict(
+            ("docTitle", document.Title),
+            ("refPart", refPart),
+            ("approverLabel", approverLabel),
+            ("dateStr", dateStr),
+            ("timeStr", timeStr),
+            ("statusTail", statusTail)
+        ), ct);
 
         await inbox.SendToUserAsync(document.OwnerUserId, "به‌روزرسانی گردش سند", msg, ct);
         if (!smsSettings.DocumentOwnerStepApprovalNotifySmsEnabled || string.IsNullOrWhiteSpace(owner.PhoneNumber))
@@ -304,7 +314,10 @@ public class DocumentWorkflowProcessor(
         var refPart = string.IsNullOrWhiteSpace(document.ReferenceNumber)
             ? ""
             : $" (شماره ارجاع: {document.ReferenceNumber})";
-        var msg = $"سند «{document.Title}»{refPart} در تمام مراحل تأیید شد و گردش به پایان رسید.";
+        var msg = await smsPatterns.RenderAsync("document.workflow.completed.owner", SmsPatternVars.Dict(
+            ("docTitle", document.Title),
+            ("refPart", refPart)
+        ), ct);
 
         await inbox.SendToUserAsync(document.OwnerUserId, "تأیید نهایی سند", msg, ct);
         if (!smsSettings.DocumentWorkflowCompletedOwnerSmsEnabled || string.IsNullOrWhiteSpace(owner.PhoneNumber))
@@ -328,9 +341,12 @@ public class DocumentWorkflowProcessor(
             ? ""
             : $" (شماره ارجاع: {document.ReferenceNumber})";
         var note = string.IsNullOrWhiteSpace(comment) ? "" : $"\nتوضیح: {comment.Trim()}";
-        var msg =
-            $"سند «{document.Title}»{refPart} در گردش تأیید رد شد.\n" +
-            $"ردکننده: {approverName}{note}";
+        var msg = await smsPatterns.RenderAsync("document.workflow.rejected.owner", SmsPatternVars.Dict(
+            ("docTitle", document.Title),
+            ("refPart", refPart),
+            ("approverName", approverName),
+            ("note", note)
+        ), ct);
 
         await inbox.SendToUserAsync(document.OwnerUserId, "رد گردش سند", msg, ct);
         if (!smsSettings.DocumentWorkflowRejectedOwnerSmsEnabled || string.IsNullOrWhiteSpace(owner.PhoneNumber))

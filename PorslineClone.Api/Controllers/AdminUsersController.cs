@@ -9,6 +9,7 @@ using PorslineClone.Application.Contracts;
 using PorslineClone.Application.Users;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Services;
+using PorslineClone.Infrastructure.Services.SmsPatterns;
 
 namespace PorslineClone.Api.Controllers;
 
@@ -18,6 +19,7 @@ public class AdminUsersController(
     UserManager<AppUser> userManager,
     RoleManager<AppRole> roleManager,
     ISmsSender smsSender,
+    ISmsPatternService smsPatterns,
     IInboxMessageService inbox,
     Infrastructure.Persistence.AppDbContext db,
     IFrontendUrlResolver frontendUrls,
@@ -123,10 +125,13 @@ public class AdminUsersController(
         var (dateStr, timeStr) = SmsDateTimeFormatter.FormatUtcNowTehran();
         var baseUrl = await frontendUrls.ResolveAdminBaseUrlAsync(cancellationToken);
         var loginUrl = string.IsNullOrWhiteSpace(baseUrl) ? "/login" : $"{baseUrl}/login";
-        var welcomeText =
-            $"کارشناس محترم {firstName} {lastName}،\n" +
-            $"کاربری شما در تاریخ {dateStr} ساعت {timeStr} ساخته شد.\n" +
-            $"جهت استفاده از پنل به لینک زیر مراجعه نمایید:\n{loginUrl}";
+        var welcomeText = await smsPatterns.RenderAsync("user.welcome.create", SmsPatternVars.Dict(
+            ("firstName", firstName),
+            ("lastName", lastName),
+            ("dateStr", dateStr),
+            ("timeStr", timeStr),
+            ("loginUrl", loginUrl)
+        ), cancellationToken);
 
         await inbox.SendToUserAsync(user.Id, "خوش‌آمدگویی", welcomeText, cancellationToken);
 
@@ -358,10 +363,318 @@ public class AdminUsersController(
                 if (!string.IsNullOrWhiteSpace(c.PersonnelCode))
                     existingPersonnelSet.Add(c.PersonnelCode);
 
-                var welcomeText =
-                    $"کارشناس محترم {c.FirstName} {c.LastName}،\n" +
-                    $"کاربری شما در تاریخ {dateStr} ساعت {timeStr} ساخته شد.\n" +
-                    $"جهت استفاده از پنل به لینک زیر مراجعه نمایید:\n{loginUrl}";
+                var welcomeText = await smsPatterns.RenderAsync("user.welcome.create", SmsPatternVars.Dict(
+                    ("firstName", c.FirstName),
+                    ("lastName", c.LastName),
+                    ("dateStr", dateStr),
+                    ("timeStr", timeStr),
+                    ("loginUrl", loginUrl)
+                ), cancellationToken);
+                createdUsers.Add((user, welcomeText));
+                inserted++;
+            }
+
+            await db.SaveChangesAsync(cancellationToken);
+            await tx.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await tx.RollbackAsync(cancellationToken);
+            throw;
+        }
+
+        foreach (var (user, welcomeText) in createdUsers)
+        {
+            await inbox.SendToUserAsync(user.Id, "خوش‌آمدگویی", welcomeText, cancellationToken);
+            if (!smsSettings.UserCreateSmsEnabled) continue;
+            var sent = await smsSender.SendSmsAsync(new SmsRequest(user.PhoneNumber!, welcomeText), cancellationToken);
+            if (sent) smsSent++;
+            else smsFailed++;
+        }
+
+        return Ok(new
+        {
+            message = inserted > 0 ? $"{inserted} کاربر ایمپورت شد" : "هیچ کاربر جدیدی ایجاد نشد",
+            inserted,
+            skippedExisting,
+            invalidCount = invalidRows.Count,
+            invalidRows,
+            smsSent,
+            smsFailed,
+            smsEnabled = smsSettings.UserCreateSmsEnabled,
+        });
+    }
+
+    [HttpPost("grouping")]
+    [Authorize(Policy = "users.add")]
+    public async Task<IActionResult> CreateForGrouping([FromBody] CreateGroupingUserDto dto, CancellationToken cancellationToken)
+    {
+        if (dto.GroupId == Guid.Empty)
+            return BadRequest(new { message = "گروه نامعتبر است" });
+
+        var groupExists = await db.UserGroups.AnyAsync(x => x.Id == dto.GroupId && !x.IsDeleted, cancellationToken);
+        if (!groupExists)
+            return BadRequest(new { message = "گروه انتخاب‌شده معتبر نیست" });
+
+        var mobileNumber = UserFieldNormalizer.NormalizeMobile(dto.MobileNumber);
+        if (!UserFieldNormalizer.IsValidMobile(mobileNumber))
+            return BadRequest(new { message = "شماره موبایل معتبر نیست (۰۹ و ۹ رقم)" });
+
+        if (await userManager.Users.AnyAsync(x => x.PhoneNumber == mobileNumber && !x.IsSoftDeleted, cancellationToken))
+            return BadRequest(new { message = "این شماره موبایل قبلا ثبت شده است" });
+
+        var (firstName, lastName, nationalCode, fieldError) = ResolveGroupingUserFields(
+            dto.FirstName, dto.LastName, dto.NationalCode);
+        if (fieldError is not null)
+            return BadRequest(new { message = fieldError });
+
+        if (!string.IsNullOrEmpty(nationalCode)
+            && await userManager.Users.AnyAsync(x => x.NationalCode == nationalCode && !x.IsSoftDeleted, cancellationToken))
+            return BadRequest(new { message = "این کد ملی قبلا ثبت شده است" });
+
+        var personnelCode = dto.PersonnelCode?.Trim();
+        if (string.IsNullOrWhiteSpace(personnelCode)) personnelCode = null;
+        if (!string.IsNullOrWhiteSpace(personnelCode)
+            && await userManager.Users.AnyAsync(x => x.PersonnelCode == personnelCode && !x.IsSoftDeleted, cancellationToken))
+            return BadRequest(new { message = "این کد پرسنلی قبلا ثبت شده است" });
+
+        var generatedPassword = PasswordGenerator.Generate();
+        var user = new AppUser
+        {
+            Id = Guid.NewGuid(),
+            UserName = mobileNumber,
+            PhoneNumber = mobileNumber,
+            FirstName = firstName,
+            LastName = lastName,
+            NationalCode = nationalCode,
+            PersonnelCode = personnelCode,
+            Gender = null,
+            CreatedByUserId = CurrentUserGuid,
+            CreatedAtUtc = DateTime.UtcNow,
+            IsActive = true,
+            PhoneNumberConfirmed = true,
+            SignatureDisplayDegree = UserSignatureDisplaySize.DefaultDegree,
+        };
+
+        var createResult = await userManager.CreateAsync(user, generatedPassword);
+        if (!createResult.Succeeded)
+            return BadRequest(new
+            {
+                message = "ایجاد کاربر ناموفق بود",
+                errors = createResult.Errors.Select(x => x.Description).ToList()
+            });
+
+        db.UserGroupMembers.Add(new UserGroupMember { UserId = user.Id, GroupId = dto.GroupId });
+        await db.SaveChangesAsync(cancellationToken);
+
+        var smsSettings = await db.SmsSettings.FirstOrDefaultAsync(cancellationToken) ?? new SmsSettings();
+        var (dateStr, timeStr) = SmsDateTimeFormatter.FormatUtcNowTehran();
+        var baseUrl = await frontendUrls.ResolveAdminBaseUrlAsync(cancellationToken);
+        var loginUrl = string.IsNullOrWhiteSpace(baseUrl) ? "/login" : $"{baseUrl}/login";
+        var welcomeText = await smsPatterns.RenderAsync("user.welcome.create", SmsPatternVars.Dict(
+            ("firstName", firstName),
+            ("lastName", lastName),
+            ("dateStr", dateStr),
+            ("timeStr", timeStr),
+            ("loginUrl", loginUrl)
+        ), cancellationToken);
+
+        await inbox.SendToUserAsync(user.Id, "خوش‌آمدگویی", welcomeText, cancellationToken);
+
+        bool smsSent = false;
+        if (smsSettings.UserCreateSmsEnabled)
+            smsSent = await smsSender.SendSmsAsync(new SmsRequest(mobileNumber, welcomeText), cancellationToken);
+
+        return Ok(new
+        {
+            id = user.Id,
+            message = smsSettings.UserCreateSmsEnabled
+                ? smsSent ? "کاربر ساخته شد و پیامک خوش‌آمدگویی ارسال شد" : "کاربر ساخته شد؛ ارسال پیامک ناموفق"
+                : "کاربر با موفقیت ساخته شد",
+            smsSent,
+            smsEnabled = smsSettings.UserCreateSmsEnabled,
+        });
+    }
+
+    [HttpPost("import-grouping")]
+    [Authorize]
+    public async Task<IActionResult> ImportGrouping([FromBody] ImportGroupingUsersDto dto, CancellationToken cancellationToken)
+    {
+        if (!User.HasClaim("permission", "users.import") && !User.HasClaim("permission", "users.add"))
+            return Forbid();
+
+        if (dto.GroupId == Guid.Empty)
+            return BadRequest(new { message = "گروه نامعتبر است" });
+
+        var groupExists = await db.UserGroups.AnyAsync(x => x.Id == dto.GroupId && !x.IsDeleted, cancellationToken);
+        if (!groupExists)
+            return BadRequest(new { message = "گروه انتخاب‌شده معتبر نیست" });
+
+        var invalidRows = new List<object>();
+        var candidates = new List<GroupingImportCandidate>();
+
+        foreach (var r in dto.Rows)
+        {
+            var mobile = UserFieldNormalizer.NormalizeMobile(r.MobileNumber);
+            if (!UserFieldNormalizer.IsValidMobile(mobile))
+            {
+                invalidRows.Add(new { r.RowNumber, reason = "شماره موبایل نامعتبر یا خالی" });
+                continue;
+            }
+
+            var (firstName, lastName, nationalCode, fieldError) = ResolveGroupingUserFields(
+                r.FirstName, r.LastName, r.NationalCode);
+            if (fieldError is not null)
+            {
+                invalidRows.Add(new { r.RowNumber, reason = fieldError });
+                continue;
+            }
+
+            var personnelCode = (r.PersonnelCode ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(personnelCode)) personnelCode = null;
+
+            candidates.Add(new GroupingImportCandidate(
+                r.RowNumber, firstName, lastName, mobile, nationalCode, personnelCode));
+        }
+
+        foreach (var dup in candidates.GroupBy(x => x.Mobile).Where(g => g.Count() > 1))
+            foreach (var x in dup)
+                invalidRows.Add(new { x.RowNumber, reason = "موبایل تکراری در فایل" });
+
+        foreach (var dup in candidates.Where(x => !string.IsNullOrEmpty(x.NationalCode)).GroupBy(x => x.NationalCode).Where(g => g.Count() > 1))
+            foreach (var x in dup)
+                invalidRows.Add(new { x.RowNumber, reason = "کد ملی تکراری در فایل" });
+
+        var uniqueCandidates = candidates
+            .Where(c => candidates.Count(x => x.Mobile == c.Mobile) == 1)
+            .Where(c => string.IsNullOrEmpty(c.NationalCode) || candidates.Count(x => x.NationalCode == c.NationalCode) == 1)
+            .ToList();
+
+        if (uniqueCandidates.Count == 0)
+        {
+            return Ok(new
+            {
+                message = "ردیف معتبری برای ایمپورت نبود",
+                inserted = 0,
+                skippedExisting = 0,
+                invalidCount = invalidRows.Count,
+                invalidRows,
+                smsSent = 0,
+                smsFailed = 0,
+            });
+        }
+
+        var mobiles = uniqueCandidates.Select(x => x.Mobile).ToList();
+        var nationalCodes = uniqueCandidates
+            .Where(x => !string.IsNullOrEmpty(x.NationalCode))
+            .Select(x => x.NationalCode)
+            .ToList();
+        var personnelCodes = uniqueCandidates
+            .Where(x => !string.IsNullOrWhiteSpace(x.PersonnelCode))
+            .Select(x => x.PersonnelCode!)
+            .Distinct()
+            .ToList();
+
+        var existingMobiles = await userManager.Users
+            .Where(x => !x.IsSoftDeleted && x.PhoneNumber != null && mobiles.Contains(x.PhoneNumber))
+            .Select(x => x.PhoneNumber!)
+            .ToListAsync(cancellationToken);
+        var existingNationalCodes = nationalCodes.Count == 0
+            ? new List<string>()
+            : await userManager.Users
+                .Where(x => !x.IsSoftDeleted && nationalCodes.Contains(x.NationalCode))
+                .Select(x => x.NationalCode)
+                .ToListAsync(cancellationToken);
+        var existingPersonnelCodes = personnelCodes.Count == 0
+            ? new List<string>()
+            : await userManager.Users
+                .Where(x => !x.IsSoftDeleted && x.PersonnelCode != null && personnelCodes.Contains(x.PersonnelCode))
+                .Select(x => x.PersonnelCode!)
+                .ToListAsync(cancellationToken);
+
+        var existingMobileSet = existingMobiles.ToHashSet(StringComparer.Ordinal);
+        var existingNationalSet = existingNationalCodes.ToHashSet(StringComparer.Ordinal);
+        var existingPersonnelSet = existingPersonnelCodes.ToHashSet(StringComparer.Ordinal);
+
+        var smsSettings = await db.SmsSettings.FirstOrDefaultAsync(cancellationToken) ?? new SmsSettings();
+        var (dateStr, timeStr) = SmsDateTimeFormatter.FormatUtcNowTehran();
+        var baseUrl = await frontendUrls.ResolveAdminBaseUrlAsync(cancellationToken);
+        var loginUrl = string.IsNullOrWhiteSpace(baseUrl) ? "/login" : $"{baseUrl}/login";
+
+        var inserted = 0;
+        var skippedExisting = 0;
+        var smsSent = 0;
+        var smsFailed = 0;
+        var createdUsers = new List<(AppUser User, string WelcomeText)>();
+
+        await using var tx = await db.Database.BeginTransactionAsync(cancellationToken);
+        try
+        {
+            foreach (var c in uniqueCandidates)
+            {
+                if (existingMobileSet.Contains(c.Mobile))
+                {
+                    invalidRows.Add(new { c.RowNumber, reason = "موبایل قبلاً ثبت شده" });
+                    skippedExisting++;
+                    continue;
+                }
+                if (!string.IsNullOrEmpty(c.NationalCode) && existingNationalSet.Contains(c.NationalCode))
+                {
+                    invalidRows.Add(new { c.RowNumber, reason = "کد ملی قبلاً ثبت شده" });
+                    skippedExisting++;
+                    continue;
+                }
+                if (!string.IsNullOrWhiteSpace(c.PersonnelCode) && existingPersonnelSet.Contains(c.PersonnelCode))
+                {
+                    invalidRows.Add(new { c.RowNumber, reason = "کد پرسنلی قبلاً ثبت شده" });
+                    skippedExisting++;
+                    continue;
+                }
+
+                var generatedPassword = PasswordGenerator.Generate();
+                var user = new AppUser
+                {
+                    Id = Guid.NewGuid(),
+                    UserName = c.Mobile,
+                    PhoneNumber = c.Mobile,
+                    FirstName = c.FirstName,
+                    LastName = c.LastName,
+                    NationalCode = c.NationalCode,
+                    PersonnelCode = c.PersonnelCode,
+                    Gender = null,
+                    CreatedByUserId = CurrentUserGuid,
+                    CreatedAtUtc = DateTime.UtcNow,
+                    IsActive = true,
+                    PhoneNumberConfirmed = true,
+                    SignatureDisplayDegree = UserSignatureDisplaySize.DefaultDegree,
+                };
+
+                var createResult = await userManager.CreateAsync(user, generatedPassword);
+                if (!createResult.Succeeded)
+                {
+                    invalidRows.Add(new
+                    {
+                        c.RowNumber,
+                        reason = string.Join(" | ", createResult.Errors.Select(e => e.Description)),
+                    });
+                    continue;
+                }
+
+                db.UserGroupMembers.Add(new UserGroupMember { UserId = user.Id, GroupId = dto.GroupId });
+
+                existingMobileSet.Add(c.Mobile);
+                if (!string.IsNullOrEmpty(c.NationalCode))
+                    existingNationalSet.Add(c.NationalCode);
+                if (!string.IsNullOrWhiteSpace(c.PersonnelCode))
+                    existingPersonnelSet.Add(c.PersonnelCode);
+
+                var welcomeText = await smsPatterns.RenderAsync("user.welcome.create", SmsPatternVars.Dict(
+                    ("firstName", c.FirstName),
+                    ("lastName", c.LastName),
+                    ("dateStr", dateStr),
+                    ("timeStr", timeStr),
+                    ("loginUrl", loginUrl)
+                ), cancellationToken);
                 createdUsers.Add((user, welcomeText));
                 inserted++;
             }
@@ -966,6 +1279,24 @@ public class AdminUsersController(
         };
     }
 
+    private static (string FirstName, string LastName, string NationalCode, string? Error) ResolveGroupingUserFields(
+        string? firstNameRaw,
+        string? lastNameRaw,
+        string? nationalCodeRaw)
+    {
+        var firstName = (firstNameRaw ?? "").Trim();
+        var lastName = (lastNameRaw ?? "").Trim();
+        var nationalCode = UserFieldNormalizer.NormalizeNationalCode(nationalCodeRaw);
+
+        if (firstName.Length < 2) firstName = "کاربر";
+        if (lastName.Length < 2) lastName = "نامشخص";
+
+        if (!string.IsNullOrWhiteSpace(nationalCodeRaw) && !UserFieldNormalizer.IsValidNationalCode(nationalCode))
+            return ("", "", "", "کد ملی نامعتبر است (۱۰ رقم)");
+
+        return (firstName, lastName, nationalCode, null);
+    }
+
     private sealed record ImportUserCandidate(
         int RowNumber,
         string FirstName,
@@ -975,6 +1306,14 @@ public class AdminUsersController(
         string? PersonnelCode,
         UserGender Gender,
         Guid? PositionId);
+
+    private sealed record GroupingImportCandidate(
+        int RowNumber,
+        string FirstName,
+        string LastName,
+        string Mobile,
+        string NationalCode,
+        string? PersonnelCode);
 }
 
 public record UserGroupOptionDto(Guid UserId, Guid Id, string Name);

@@ -996,15 +996,32 @@ public static class DatabaseSchemaPatcher
             IF COL_LENGTH('dbo.FormSubmissions', 'TrackingCode') IS NULL
                 ALTER TABLE [dbo].[FormSubmissions] ADD [TrackingCode] nvarchar(32) NULL;
 
+            IF COL_LENGTH('dbo.FormSubmissions', 'IsDeleted') IS NULL
+                ALTER TABLE [dbo].[FormSubmissions] ADD [IsDeleted] bit NOT NULL
+                    CONSTRAINT [DF_FormSubmissions_IsDeleted] DEFAULT (0);
+
+            IF COL_LENGTH('dbo.FormSubmissions', 'DeletedAtUtc') IS NULL
+                ALTER TABLE [dbo].[FormSubmissions] ADD [DeletedAtUtc] datetime2 NULL;
+
             IF OBJECT_ID(N'[dbo].[FormSubmissions]', N'U') IS NOT NULL
                AND COL_LENGTH('dbo.FormSubmissions', 'TrackingCode') IS NOT NULL
+               AND COL_LENGTH('dbo.FormSubmissions', 'IsDeleted') IS NOT NULL
+               AND EXISTS (
+                    SELECT 1 FROM sys.indexes
+                    WHERE name = N'IX_FormSubmissions_TrackingCode'
+                      AND object_id = OBJECT_ID(N'[dbo].[FormSubmissions]'))
+                DROP INDEX [IX_FormSubmissions_TrackingCode] ON [dbo].[FormSubmissions];
+
+            IF OBJECT_ID(N'[dbo].[FormSubmissions]', N'U') IS NOT NULL
+               AND COL_LENGTH('dbo.FormSubmissions', 'TrackingCode') IS NOT NULL
+               AND COL_LENGTH('dbo.FormSubmissions', 'IsDeleted') IS NOT NULL
                AND NOT EXISTS (
                     SELECT 1 FROM sys.indexes
                     WHERE name = N'IX_FormSubmissions_TrackingCode'
                       AND object_id = OBJECT_ID(N'[dbo].[FormSubmissions]'))
                 CREATE UNIQUE NONCLUSTERED INDEX [IX_FormSubmissions_TrackingCode]
                     ON [dbo].[FormSubmissions]([TrackingCode])
-                    WHERE [TrackingCode] IS NOT NULL;
+                    WHERE ([TrackingCode] IS NOT NULL AND [IsDeleted] = 0);
 
             IF OBJECT_ID(N'[dbo].[FormDispatchLinks]', N'U') IS NOT NULL
                AND COL_LENGTH('dbo.FormDispatchLinks', 'WorkflowTemplateId') IS NULL
@@ -1274,6 +1291,12 @@ public static class DatabaseSchemaPatcher
             IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Responders_NationalCode' AND object_id = OBJECT_ID(N'dbo.Responders'))
                 CREATE UNIQUE INDEX [IX_Responders_NationalCode] ON [dbo].[Responders]([NationalCode])
                     WHERE [IsDeleted] = 0 AND [NationalCode] <> N'';
+
+            IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_AspNetUsers_NationalCode' AND object_id = OBJECT_ID(N'dbo.AspNetUsers'))
+                DROP INDEX [IX_AspNetUsers_NationalCode] ON [dbo].[AspNetUsers];
+            IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_AspNetUsers_NationalCode' AND object_id = OBJECT_ID(N'dbo.AspNetUsers'))
+                CREATE UNIQUE INDEX [IX_AspNetUsers_NationalCode] ON [dbo].[AspNetUsers]([NationalCode])
+                    WHERE [NationalCode] <> N'';
             """, ct);
 
         await ExecuteScriptAsync(db,
@@ -1595,6 +1618,9 @@ public static class DatabaseSchemaPatcher
                 ALTER TABLE [dbo].[FormFields] ADD [IsReadOnly] bit NOT NULL
                     CONSTRAINT [DF_FormFields_IsReadOnly] DEFAULT (0);
 
+            IF COL_LENGTH('dbo.FormFields', 'NestedFieldsJson') IS NULL
+                ALTER TABLE [dbo].[FormFields] ADD [NestedFieldsJson] nvarchar(max) NULL;
+
             IF OBJECT_ID(N'[dbo].[FormWordTemplates]', N'U') IS NOT NULL
             BEGIN
                 IF COL_LENGTH('dbo.FormWordTemplates', 'SignaturePlaceholderKey') IS NULL
@@ -1640,6 +1666,350 @@ public static class DatabaseSchemaPatcher
                     WHERE [MigrationId] = N'20260531120000_AddFormWordBatchExportJobs')
                 INSERT INTO [dbo].[__EFMigrationsHistory] ([MigrationId], [ProductVersion])
                 VALUES (N'20260531120000_AddFormWordBatchExportJobs', N'10.0.0');
+
+            IF OBJECT_ID(N'[dbo].[FormSubmissionExcelExportJobs]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[FormSubmissionExcelExportJobs] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [GroupId] uniqueidentifier NULL,
+                    [UngroupedOnly] bit NOT NULL CONSTRAINT [DF_FormSubmissionExcelExportJobs_UngroupedOnly] DEFAULT (0),
+                    [FormId] uniqueidentifier NOT NULL,
+                    [SelectedFieldsJson] nvarchar(max) NOT NULL,
+                    [Status] int NOT NULL,
+                    [TotalCount] int NOT NULL,
+                    [ProcessedCount] int NOT NULL,
+                    [FilePath] nvarchar(500) NULL,
+                    [FileName] nvarchar(260) NULL,
+                    [ErrorMessage] nvarchar(2000) NULL,
+                    [CreatedByUserId] uniqueidentifier NULL,
+                    [HangfireJobId] nvarchar(64) NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    [CompletedAtUtc] datetime2 NULL,
+                    CONSTRAINT [PK_FormSubmissionExcelExportJobs] PRIMARY KEY ([Id])
+                );
+                CREATE INDEX [IX_FormSubmissionExcelExportJobs_CreatedAtUtc] ON [dbo].[FormSubmissionExcelExportJobs]([CreatedAtUtc]);
+                CREATE INDEX [IX_FormSubmissionExcelExportJobs_CreatedByUserId] ON [dbo].[FormSubmissionExcelExportJobs]([CreatedByUserId]);
+                CREATE INDEX [IX_FormSubmissionExcelExportJobs_Status] ON [dbo].[FormSubmissionExcelExportJobs]([Status]);
+                CREATE INDEX [IX_FormSubmissionExcelExportJobs_FormId] ON [dbo].[FormSubmissionExcelExportJobs]([FormId]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[FormSubmissionExcelExportJobs]', N'U') IS NOT NULL
+               AND NOT EXISTS (
+                    SELECT 1 FROM [dbo].[__EFMigrationsHistory]
+                    WHERE [MigrationId] = N'20260528120000_AddFormSubmissionExcelExportJobs')
+                INSERT INTO [dbo].[__EFMigrationsHistory] ([MigrationId], [ProductVersion])
+                VALUES (N'20260528120000_AddFormSubmissionExcelExportJobs', N'10.0.0');
+
+            IF OBJECT_ID(N'[dbo].[FormDispatchGroupSendJobs]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[FormDispatchGroupSendJobs] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [FormId] uniqueidentifier NOT NULL,
+                    [GroupId] uniqueidentifier NOT NULL,
+                    [WorkflowTemplateId] uniqueidentifier NULL,
+                    [SkipWorkflow] bit NOT NULL CONSTRAINT [DF_FormDispatchGroupSendJobs_SkipWorkflow] DEFAULT (0),
+                    [OnlyIncompleteSubmissions] bit NOT NULL CONSTRAINT [DF_FormDispatchGroupSendJobs_OnlyIncompleteSubmissions] DEFAULT (0),
+                    [SmsMessageMode] nvarchar(20) NULL,
+                    [CustomSmsBody] nvarchar(max) NULL,
+                    [Status] int NOT NULL CONSTRAINT [DF_FormDispatchGroupSendJobs_Status] DEFAULT (0),
+                    [TotalCount] int NOT NULL CONSTRAINT [DF_FormDispatchGroupSendJobs_TotalCount] DEFAULT (0),
+                    [ProcessedCount] int NOT NULL CONSTRAINT [DF_FormDispatchGroupSendJobs_ProcessedCount] DEFAULT (0),
+                    [SentCount] int NOT NULL CONSTRAINT [DF_FormDispatchGroupSendJobs_SentCount] DEFAULT (0),
+                    [FailedCount] int NOT NULL CONSTRAINT [DF_FormDispatchGroupSendJobs_FailedCount] DEFAULT (0),
+                    [ErrorMessage] nvarchar(2000) NULL,
+                    [CreatedByUserId] uniqueidentifier NULL,
+                    [HangfireJobId] nvarchar(64) NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    [CompletedAtUtc] datetime2 NULL,
+                    CONSTRAINT [PK_FormDispatchGroupSendJobs] PRIMARY KEY ([Id])
+                );
+                CREATE INDEX [IX_FormDispatchGroupSendJobs_CreatedAtUtc] ON [dbo].[FormDispatchGroupSendJobs]([CreatedAtUtc]);
+                CREATE INDEX [IX_FormDispatchGroupSendJobs_CreatedByUserId] ON [dbo].[FormDispatchGroupSendJobs]([CreatedByUserId]);
+                CREATE INDEX [IX_FormDispatchGroupSendJobs_Status] ON [dbo].[FormDispatchGroupSendJobs]([Status]);
+                CREATE INDEX [IX_FormDispatchGroupSendJobs_FormId] ON [dbo].[FormDispatchGroupSendJobs]([FormId]);
+                CREATE INDEX [IX_FormDispatchGroupSendJobs_GroupId] ON [dbo].[FormDispatchGroupSendJobs]([GroupId]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[FormDispatchGroupSendJobs]', N'U') IS NOT NULL
+               AND NOT EXISTS (
+                    SELECT 1 FROM sys.columns
+                    WHERE object_id = OBJECT_ID(N'[dbo].[FormDispatchGroupSendJobs]')
+                      AND name = N'OnlyIncompleteSubmissions')
+                ALTER TABLE [dbo].[FormDispatchGroupSendJobs]
+                    ADD [OnlyIncompleteSubmissions] bit NOT NULL
+                    CONSTRAINT [DF_FormDispatchGroupSendJobs_OnlyIncompleteSubmissions] DEFAULT (0);
+
+            IF OBJECT_ID(N'[dbo].[FormDispatchGroupSendJobs]', N'U') IS NOT NULL
+               AND NOT EXISTS (
+                    SELECT 1 FROM [dbo].[__EFMigrationsHistory]
+                    WHERE [MigrationId] = N'20260608120000_AddFormDispatchGroupSendJobs')
+                INSERT INTO [dbo].[__EFMigrationsHistory] ([MigrationId], [ProductVersion])
+                VALUES (N'20260608120000_AddFormDispatchGroupSendJobs', N'10.0.0');
+
+            IF OBJECT_ID(N'[dbo].[ExamForms]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[ExamForms] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [Title] nvarchar(300) NOT NULL,
+                    [Description] nvarchar(2000) NULL,
+                    [DurationMinutes] int NOT NULL CONSTRAINT [DF_ExamForms_DurationMinutes] DEFAULT (60),
+                    [IsActive] bit NOT NULL CONSTRAINT [DF_ExamForms_IsActive] DEFAULT (1),
+                    [CreatedByUserId] uniqueidentifier NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    [UpdatedAtUtc] datetime2 NOT NULL,
+                    [IsDeleted] bit NOT NULL CONSTRAINT [DF_ExamForms_IsDeleted] DEFAULT (0),
+                    [DeletedAtUtc] datetime2 NULL,
+                    CONSTRAINT [PK_ExamForms] PRIMARY KEY ([Id])
+                );
+                CREATE INDEX [IX_ExamForms_UpdatedAtUtc] ON [dbo].[ExamForms]([UpdatedAtUtc] DESC);
+            END
+
+            IF OBJECT_ID(N'[dbo].[ExamForms]', N'U') IS NOT NULL
+               AND COL_LENGTH(N'dbo.ExamForms', N'WindowStartAtUtc') IS NULL
+                ALTER TABLE [dbo].[ExamForms] ADD [WindowStartAtUtc] datetime2 NULL;
+
+            IF OBJECT_ID(N'[dbo].[ExamForms]', N'U') IS NOT NULL
+               AND COL_LENGTH(N'dbo.ExamForms', N'WindowEndAtUtc') IS NULL
+                ALTER TABLE [dbo].[ExamForms] ADD [WindowEndAtUtc] datetime2 NULL;
+
+            IF OBJECT_ID(N'[dbo].[ExamQuestions]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[ExamQuestions] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [ExamFormId] uniqueidentifier NOT NULL,
+                    [QuestionType] int NOT NULL,
+                    [Label] nvarchar(2000) NOT NULL,
+                    [OptionsJson] nvarchar(max) NULL,
+                    [CorrectAnswerIndex] int NULL,
+                    [IsRequired] bit NOT NULL CONSTRAINT [DF_ExamQuestions_IsRequired] DEFAULT (1),
+                    [SortOrder] int NOT NULL,
+                    CONSTRAINT [PK_ExamQuestions] PRIMARY KEY ([Id]),
+                    CONSTRAINT [FK_ExamQuestions_ExamForms] FOREIGN KEY ([ExamFormId]) REFERENCES [dbo].[ExamForms]([Id]) ON DELETE CASCADE
+                );
+                CREATE INDEX [IX_ExamQuestions_ExamFormId_SortOrder] ON [dbo].[ExamQuestions]([ExamFormId], [SortOrder]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[ExamQuestions]', N'U') IS NOT NULL
+               AND COL_LENGTH(N'dbo.ExamQuestions', N'CorrectAnswerIndex') IS NULL
+                ALTER TABLE [dbo].[ExamQuestions] ADD [CorrectAnswerIndex] int NULL;
+
+            IF OBJECT_ID(N'[dbo].[ExamLinks]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[ExamLinks] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [ExamFormId] uniqueidentifier NOT NULL,
+                    [Code] nvarchar(32) NOT NULL,
+                    [ParticipantName] nvarchar(200) NULL,
+                    [ParticipantMobile] nvarchar(11) NULL,
+                    [StartedAtUtc] datetime2 NULL,
+                    [ExpiresAtUtc] datetime2 NULL,
+                    [IsActive] bit NOT NULL CONSTRAINT [DF_ExamLinks_IsActive] DEFAULT (1),
+                    [UsedAtUtc] datetime2 NULL,
+                    [CreatedByUserId] uniqueidentifier NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    CONSTRAINT [PK_ExamLinks] PRIMARY KEY ([Id]),
+                    CONSTRAINT [FK_ExamLinks_ExamForms] FOREIGN KEY ([ExamFormId]) REFERENCES [dbo].[ExamForms]([Id]) ON DELETE CASCADE
+                );
+                CREATE UNIQUE INDEX [IX_ExamLinks_Code] ON [dbo].[ExamLinks]([Code]);
+                CREATE INDEX [IX_ExamLinks_ExamFormId_IsActive] ON [dbo].[ExamLinks]([ExamFormId], [IsActive]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[ExamLinks]', N'U') IS NOT NULL AND COL_LENGTH(N'dbo.ExamLinks', N'ExamDispatchId') IS NULL
+                ALTER TABLE [dbo].[ExamLinks] ADD [ExamDispatchId] uniqueidentifier NULL;
+            IF OBJECT_ID(N'[dbo].[ExamLinks]', N'U') IS NOT NULL AND COL_LENGTH(N'dbo.ExamLinks', N'ExamParticipantId') IS NULL
+                ALTER TABLE [dbo].[ExamLinks] ADD [ExamParticipantId] uniqueidentifier NULL;
+            IF OBJECT_ID(N'[dbo].[ExamLinks]', N'U') IS NOT NULL AND COL_LENGTH(N'dbo.ExamLinks', N'WindowStartAtUtc') IS NULL
+                ALTER TABLE [dbo].[ExamLinks] ADD [WindowStartAtUtc] datetime2 NULL;
+            IF OBJECT_ID(N'[dbo].[ExamLinks]', N'U') IS NOT NULL AND COL_LENGTH(N'dbo.ExamLinks', N'WindowEndAtUtc') IS NULL
+                ALTER TABLE [dbo].[ExamLinks] ADD [WindowEndAtUtc] datetime2 NULL;
+
+            IF OBJECT_ID(N'[dbo].[ExamDispatches]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[ExamDispatches] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [ExamFormId] uniqueidentifier NOT NULL,
+                    [WindowStartAtUtc] datetime2 NOT NULL,
+                    [WindowEndAtUtc] datetime2 NOT NULL,
+                    [GroupIdsJson] nvarchar(max) NOT NULL,
+                    [TotalParticipants] int NOT NULL CONSTRAINT [DF_ExamDispatches_TotalParticipants] DEFAULT (0),
+                    [SentCount] int NOT NULL CONSTRAINT [DF_ExamDispatches_SentCount] DEFAULT (0),
+                    [FailedCount] int NOT NULL CONSTRAINT [DF_ExamDispatches_FailedCount] DEFAULT (0),
+                    [CreatedByUserId] uniqueidentifier NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    CONSTRAINT [PK_ExamDispatches] PRIMARY KEY ([Id]),
+                    CONSTRAINT [FK_ExamDispatches_ExamForms] FOREIGN KEY ([ExamFormId]) REFERENCES [dbo].[ExamForms]([Id]) ON DELETE CASCADE
+                );
+                CREATE INDEX [IX_ExamDispatches_ExamFormId] ON [dbo].[ExamDispatches]([ExamFormId]);
+                CREATE INDEX [IX_ExamDispatches_CreatedAtUtc] ON [dbo].[ExamDispatches]([CreatedAtUtc] DESC);
+            END
+
+            IF OBJECT_ID(N'[dbo].[ExamLinks]', N'U') IS NOT NULL
+               AND OBJECT_ID(N'[dbo].[ExamDispatches]', N'U') IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = N'FK_ExamLinks_ExamDispatches')
+                ALTER TABLE [dbo].[ExamLinks] ADD CONSTRAINT [FK_ExamLinks_ExamDispatches]
+                    FOREIGN KEY ([ExamDispatchId]) REFERENCES [dbo].[ExamDispatches]([Id]);
+
+            IF OBJECT_ID(N'[dbo].[ExamLinks]', N'U') IS NOT NULL
+               AND OBJECT_ID(N'[dbo].[ExamParticipants]', N'U') IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = N'FK_ExamLinks_ExamParticipants')
+                ALTER TABLE [dbo].[ExamLinks] ADD CONSTRAINT [FK_ExamLinks_ExamParticipants]
+                    FOREIGN KEY ([ExamParticipantId]) REFERENCES [dbo].[ExamParticipants]([Id]);
+
+            IF NOT EXISTS (
+                    SELECT 1 FROM [dbo].[__EFMigrationsHistory]
+                    WHERE [MigrationId] = N'20260608140000_AddExamDispatch')
+                INSERT INTO [dbo].[__EFMigrationsHistory] ([MigrationId], [ProductVersion])
+                VALUES (N'20260608140000_AddExamDispatch', N'10.0.0');
+
+            IF OBJECT_ID(N'[dbo].[ExamDispatches]', N'U') IS NOT NULL
+               AND COL_LENGTH(N'dbo.ExamDispatches', N'PassingCorrectCount') IS NULL
+                ALTER TABLE [dbo].[ExamDispatches] ADD [PassingCorrectCount] int NOT NULL CONSTRAINT [DF_ExamDispatches_PassingCorrectCount] DEFAULT (1);
+
+            IF OBJECT_ID(N'[dbo].[ExamSubmissions]', N'U') IS NOT NULL
+               AND COL_LENGTH(N'dbo.ExamSubmissions', N'CorrectCount') IS NULL
+                ALTER TABLE [dbo].[ExamSubmissions] ADD [CorrectCount] int NULL;
+            IF OBJECT_ID(N'[dbo].[ExamSubmissions]', N'U') IS NOT NULL
+               AND COL_LENGTH(N'dbo.ExamSubmissions', N'ScorableQuestionCount') IS NULL
+                ALTER TABLE [dbo].[ExamSubmissions] ADD [ScorableQuestionCount] int NULL;
+            IF OBJECT_ID(N'[dbo].[ExamSubmissions]', N'U') IS NOT NULL
+               AND COL_LENGTH(N'dbo.ExamSubmissions', N'PassingCorrectCount') IS NULL
+                ALTER TABLE [dbo].[ExamSubmissions] ADD [PassingCorrectCount] int NULL;
+            IF OBJECT_ID(N'[dbo].[ExamSubmissions]', N'U') IS NOT NULL
+               AND COL_LENGTH(N'dbo.ExamSubmissions', N'IsPassed') IS NULL
+                ALTER TABLE [dbo].[ExamSubmissions] ADD [IsPassed] bit NULL;
+
+            IF NOT EXISTS (
+                    SELECT 1 FROM [dbo].[__EFMigrationsHistory]
+                    WHERE [MigrationId] = N'20260608150000_AddExamPassingScore')
+                INSERT INTO [dbo].[__EFMigrationsHistory] ([MigrationId], [ProductVersion])
+                VALUES (N'20260608150000_AddExamPassingScore', N'10.0.0');
+
+            IF OBJECT_ID(N'[dbo].[ExamSubmissions]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[ExamSubmissions] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [ExamLinkId] uniqueidentifier NOT NULL,
+                    [ExamFormId] uniqueidentifier NOT NULL,
+                    [AnswersJson] nvarchar(max) NULL,
+                    [SubmittedAtUtc] datetime2 NOT NULL,
+                    [IsAutoSubmitted] bit NOT NULL CONSTRAINT [DF_ExamSubmissions_IsAutoSubmitted] DEFAULT (0),
+                    CONSTRAINT [PK_ExamSubmissions] PRIMARY KEY ([Id]),
+                    CONSTRAINT [FK_ExamSubmissions_ExamLinks] FOREIGN KEY ([ExamLinkId]) REFERENCES [dbo].[ExamLinks]([Id]) ON DELETE CASCADE,
+                    CONSTRAINT [FK_ExamSubmissions_ExamForms] FOREIGN KEY ([ExamFormId]) REFERENCES [dbo].[ExamForms]([Id])
+                );
+                CREATE UNIQUE INDEX [IX_ExamSubmissions_ExamLinkId] ON [dbo].[ExamSubmissions]([ExamLinkId]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[ExamParticipantGroups]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[ExamParticipantGroups] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [Name] nvarchar(150) NOT NULL,
+                    [CreatedByUserId] uniqueidentifier NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    [IsActive] bit NOT NULL CONSTRAINT [DF_ExamParticipantGroups_IsActive] DEFAULT (1),
+                    [IsDeleted] bit NOT NULL CONSTRAINT [DF_ExamParticipantGroups_IsDeleted] DEFAULT (0),
+                    [DeletedAtUtc] datetime2 NULL,
+                    CONSTRAINT [PK_ExamParticipantGroups] PRIMARY KEY ([Id])
+                );
+                CREATE UNIQUE INDEX [IX_ExamParticipantGroups_Name] ON [dbo].[ExamParticipantGroups]([Name]) WHERE [IsDeleted] = 0;
+                CREATE INDEX [IX_ExamParticipantGroups_CreatedAtUtc] ON [dbo].[ExamParticipantGroups]([CreatedAtUtc]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[ExamParticipants]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[ExamParticipants] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [FirstName] nvarchar(100) NOT NULL,
+                    [LastName] nvarchar(100) NOT NULL,
+                    [MobileNumber] nvarchar(11) NOT NULL,
+                    [NationalCode] nvarchar(50) NOT NULL CONSTRAINT [DF_ExamParticipants_NationalCode] DEFAULT (''),
+                    [PersonnelCode] nvarchar(30) NULL,
+                    [IsActive] bit NOT NULL CONSTRAINT [DF_ExamParticipants_IsActive] DEFAULT (1),
+                    [IsDeleted] bit NOT NULL CONSTRAINT [DF_ExamParticipants_IsDeleted] DEFAULT (0),
+                    [DeletedAtUtc] datetime2 NULL,
+                    [CreatedByUserId] uniqueidentifier NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    CONSTRAINT [PK_ExamParticipants] PRIMARY KEY ([Id])
+                );
+                CREATE UNIQUE INDEX [IX_ExamParticipants_MobileNumber] ON [dbo].[ExamParticipants]([MobileNumber]) WHERE [IsDeleted] = 0;
+                CREATE UNIQUE INDEX [IX_ExamParticipants_NationalCode] ON [dbo].[ExamParticipants]([NationalCode]) WHERE [IsDeleted] = 0 AND [NationalCode] <> N'';
+                CREATE UNIQUE INDEX [IX_ExamParticipants_PersonnelCode] ON [dbo].[ExamParticipants]([PersonnelCode]) WHERE [IsDeleted] = 0 AND [PersonnelCode] IS NOT NULL AND [PersonnelCode] <> N'';
+                CREATE INDEX [IX_ExamParticipants_CreatedAtUtc] ON [dbo].[ExamParticipants]([CreatedAtUtc]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[ExamParticipantGroupMembers]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[ExamParticipantGroupMembers] (
+                    [ParticipantId] uniqueidentifier NOT NULL,
+                    [GroupId] uniqueidentifier NOT NULL,
+                    CONSTRAINT [PK_ExamParticipantGroupMembers] PRIMARY KEY ([ParticipantId], [GroupId]),
+                    CONSTRAINT [FK_ExamParticipantGroupMembers_Participants] FOREIGN KEY ([ParticipantId]) REFERENCES [dbo].[ExamParticipants]([Id]) ON DELETE CASCADE,
+                    CONSTRAINT [FK_ExamParticipantGroupMembers_Groups] FOREIGN KEY ([GroupId]) REFERENCES [dbo].[ExamParticipantGroups]([Id]) ON DELETE CASCADE
+                );
+            END
+
+            IF NOT EXISTS (
+                    SELECT 1 FROM [dbo].[__EFMigrationsHistory]
+                    WHERE [MigrationId] = N'20260608130000_AddExamModule')
+                INSERT INTO [dbo].[__EFMigrationsHistory] ([MigrationId], [ProductVersion])
+                VALUES (N'20260608130000_AddExamModule', N'10.0.0');
+
+            IF OBJECT_ID(N'[dbo].[SmsPatterns]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[SmsPatterns] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [Key] nvarchar(120) NOT NULL,
+                    [Title] nvarchar(200) NOT NULL,
+                    [Category] nvarchar(40) NOT NULL,
+                    [Icon] nvarchar(40) NOT NULL,
+                    [IconColor] nvarchar(20) NULL,
+                    [Template] nvarchar(max) NOT NULL,
+                    [PlaceholdersJson] nvarchar(max) NOT NULL,
+                    [Description] nvarchar(500) NULL,
+                    [SortOrder] int NOT NULL,
+                    [IsActive] bit NOT NULL CONSTRAINT [DF_SmsPatterns_IsActive] DEFAULT (1),
+                    [UpdatedAtUtc] datetime2 NOT NULL,
+                    CONSTRAINT [PK_SmsPatterns] PRIMARY KEY ([Id])
+                );
+                CREATE UNIQUE INDEX [IX_SmsPatterns_Key] ON [dbo].[SmsPatterns]([Key]);
+                CREATE INDEX [IX_SmsPatterns_Category] ON [dbo].[SmsPatterns]([Category]);
+                CREATE INDEX [IX_SmsPatterns_SortOrder] ON [dbo].[SmsPatterns]([SortOrder]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[SmsPatterns]', N'U') IS NOT NULL
+               AND NOT EXISTS (
+                    SELECT 1 FROM [dbo].[__EFMigrationsHistory]
+                    WHERE [MigrationId] = N'20260528130000_AddSmsPatterns')
+                INSERT INTO [dbo].[__EFMigrationsHistory] ([MigrationId], [ProductVersion])
+                VALUES (N'20260528130000_AddSmsPatterns', N'10.0.0');
+
+            IF OBJECT_ID(N'[dbo].[SmsLogs]', N'U') IS NULL
+            BEGIN
+                CREATE TABLE [dbo].[SmsLogs] (
+                    [Id] uniqueidentifier NOT NULL,
+                    [MobileNumber] nvarchar(11) NOT NULL,
+                    [Message] nvarchar(max) NOT NULL,
+                    [IsSuccess] bit NOT NULL,
+                    [ErrorMessage] nvarchar(500) NULL,
+                    [TechnicalDetail] nvarchar(max) NULL,
+                    [Source] nvarchar(120) NULL,
+                    [HttpStatusCode] int NULL,
+                    [CreatedAtUtc] datetime2 NOT NULL,
+                    CONSTRAINT [PK_SmsLogs] PRIMARY KEY ([Id])
+                );
+                CREATE INDEX [IX_SmsLogs_CreatedAtUtc] ON [dbo].[SmsLogs]([CreatedAtUtc]);
+                CREATE INDEX [IX_SmsLogs_IsSuccess] ON [dbo].[SmsLogs]([IsSuccess]);
+                CREATE INDEX [IX_SmsLogs_MobileNumber] ON [dbo].[SmsLogs]([MobileNumber]);
+                CREATE INDEX [IX_SmsLogs_IsSuccess_CreatedAtUtc] ON [dbo].[SmsLogs]([IsSuccess], [CreatedAtUtc]);
+            END
+
+            IF OBJECT_ID(N'[dbo].[SmsLogs]', N'U') IS NOT NULL
+               AND NOT EXISTS (
+                    SELECT 1 FROM [dbo].[__EFMigrationsHistory]
+                    WHERE [MigrationId] = N'20260608120000_AddSmsLogs')
+                INSERT INTO [dbo].[__EFMigrationsHistory] ([MigrationId], [ProductVersion])
+                VALUES (N'20260608120000_AddSmsLogs', N'10.0.0');
 
             IF OBJECT_ID(N'[dbo].[DocumentWorkflowTemplates]', N'U') IS NULL
             BEGIN
@@ -1795,8 +2165,82 @@ public static class DatabaseSchemaPatcher
             """, ct);
 
         await BackfillFormFieldGroupFieldCountsAsync(db, logger, ct);
+        await EnsureFormSubmissionSoftDeleteSchemaAsync(db, ct);
 
         logger.LogInformation("Database schema patch completed.");
+    }
+
+    public static async Task EnsureFormFieldsRepeatableSchemaAsync(AppDbContext db, CancellationToken ct = default)
+    {
+        await ExecuteScriptAsync(db,
+            """
+            IF OBJECT_ID(N'[dbo].[FormFields]', N'U') IS NOT NULL
+               AND COL_LENGTH('dbo.FormFields', 'NestedFieldsJson') IS NULL
+                ALTER TABLE [dbo].[FormFields] ADD [NestedFieldsJson] nvarchar(max) NULL;
+            """, ct);
+    }
+
+    /// <summary>ستون‌های لازم برای sidebar فرم کاربران و استعلام گروه.</summary>
+    public static async Task EnsureUserFormsSidebarSchemaAsync(AppDbContext db, CancellationToken ct = default)
+    {
+        await EnsureFormSubmissionSoftDeleteSchemaAsync(db, ct);
+        await ExecuteScriptAsync(db,
+            """
+            IF OBJECT_ID(N'[dbo].[FormDispatchLinks]', N'U') IS NOT NULL
+               AND COL_LENGTH('dbo.FormDispatchLinks', 'SentByUserId') IS NULL
+                ALTER TABLE [dbo].[FormDispatchLinks] ADD [SentByUserId] uniqueidentifier NULL;
+
+            IF OBJECT_ID(N'[dbo].[FormDispatchGroupSendJobs]', N'U') IS NOT NULL
+               AND COL_LENGTH('dbo.FormDispatchGroupSendJobs', 'OnlyIncompleteSubmissions') IS NULL
+                ALTER TABLE [dbo].[FormDispatchGroupSendJobs]
+                    ADD [OnlyIncompleteSubmissions] bit NOT NULL
+                    CONSTRAINT [DF_FormDispatchGroupSendJobs_OnlyIncompleteSubmissions] DEFAULT (0);
+
+            IF OBJECT_ID(N'[dbo].[FormSubmissions]', N'U') IS NOT NULL
+               AND COL_LENGTH('dbo.FormSubmissions', 'FieldsJson') IS NOT NULL
+                ALTER TABLE [dbo].[FormSubmissions] ALTER COLUMN [FieldsJson] nvarchar(max) NULL;
+            """, ct);
+    }
+
+    public static async Task EnsureFormSubmissionSoftDeleteSchemaAsync(AppDbContext db, CancellationToken ct = default)
+    {
+        await ExecuteScriptAsync(db,
+            """
+            IF OBJECT_ID(N'[dbo].[FormSubmissions]', N'U') IS NOT NULL
+            BEGIN
+                IF COL_LENGTH('dbo.FormSubmissions', 'IsDeleted') IS NULL
+                BEGIN
+                    ALTER TABLE [dbo].[FormSubmissions] ADD [IsDeleted] bit NOT NULL
+                        CONSTRAINT [DF_FormSubmissions_IsDeleted] DEFAULT (0);
+                END;
+
+                IF COL_LENGTH('dbo.FormSubmissions', 'DeletedAtUtc') IS NULL
+                BEGIN
+                    ALTER TABLE [dbo].[FormSubmissions] ADD [DeletedAtUtc] datetime2 NULL;
+                END;
+
+                IF EXISTS (
+                    SELECT 1 FROM sys.indexes
+                    WHERE name = N'IX_FormSubmissions_TrackingCode'
+                      AND object_id = OBJECT_ID(N'[dbo].[FormSubmissions]')
+                )
+                BEGIN
+                    DROP INDEX [IX_FormSubmissions_TrackingCode] ON [dbo].[FormSubmissions];
+                END;
+
+                IF COL_LENGTH('dbo.FormSubmissions', 'TrackingCode') IS NOT NULL
+                   AND COL_LENGTH('dbo.FormSubmissions', 'IsDeleted') IS NOT NULL
+                   AND NOT EXISTS (
+                        SELECT 1 FROM sys.indexes
+                        WHERE name = N'IX_FormSubmissions_TrackingCode'
+                          AND object_id = OBJECT_ID(N'[dbo].[FormSubmissions]'))
+                BEGIN
+                    CREATE UNIQUE NONCLUSTERED INDEX [IX_FormSubmissions_TrackingCode]
+                        ON [dbo].[FormSubmissions]([TrackingCode])
+                        WHERE ([TrackingCode] IS NOT NULL AND [IsDeleted] = 0);
+                END;
+            END;
+            """, ct);
     }
 
     private static async Task BackfillFormFieldGroupFieldCountsAsync(

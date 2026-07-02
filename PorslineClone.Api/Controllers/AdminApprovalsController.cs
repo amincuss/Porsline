@@ -11,6 +11,7 @@ using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
 using PorslineClone.Infrastructure.Services;
+using PorslineClone.Infrastructure.Services.SmsPatterns;
 
 namespace PorslineClone.Api.Controllers;
 
@@ -21,6 +22,7 @@ public class AdminApprovalsController(
     AppDbContext db,
     UserManager<AppUser> userManager,
     ISmsSender smsSender,
+    ISmsPatternService smsPatterns,
     IInboxMessageService inbox,
     IWebHostEnvironment env,
     IFrontendUrlResolver frontendUrls,
@@ -250,12 +252,15 @@ public class AdminApprovalsController(
         var senderName = !string.IsNullOrWhiteSpace(approverDisplayName) ? approverDisplayName : fallbackApproverName;
         if (string.IsNullOrWhiteSpace(senderName)) senderName = "کاربر قبلی";
 
-        var msg =
-            $"درخواست فرم «{formTitle}» توسط {senderName} تایید شد و برای شما ارجاع گردید.\n" +
-            $"لطفا برای بررسی به پنل مدیریت بخش تاییدیه‌ها مراجعه کنید.";
         var adminBase = await frontendUrls.ResolveAdminBaseUrlAsync(ct);
-        if (!string.IsNullOrWhiteSpace(adminBase))
-            msg += $"\nلینک مستقیم: {adminBase}/admin/approvals";
+        var adminLinkBlock = string.IsNullOrWhiteSpace(adminBase)
+            ? ""
+            : $"\nلینک مستقیم: {adminBase}/admin/approvals";
+        var msg = await smsPatterns.RenderAsync("form.approval.referred.chain", SmsPatternVars.Dict(
+            ("formTitle", formTitle),
+            ("senderName", senderName),
+            ("adminLinkBlock", adminLinkBlock)
+        ), ct);
 
         await inbox.SendToUserAsync(nextUserId, "ارجاع تأیید فرم", msg, ct);
         if (!smsSettings.ApprovalReferralSmsEnabled || string.IsNullOrWhiteSpace(nextUser.PhoneNumber)) return;

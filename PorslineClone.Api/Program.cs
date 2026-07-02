@@ -62,6 +62,7 @@ builder.Services.AddSwaggerGen(options =>
         return $"{type.Namespace}.{type.Name}";
     });
 });
+builder.Services.AddMemoryCache();
 builder.Services.AddInfrastructure(builder.Configuration);
 builder.Services.AddScoped<IRuleEvaluationService, RuleEvaluationService>();
 
@@ -73,6 +74,8 @@ builder.Services.AddHangfire(config => config
 builder.Services.AddHangfireServer();
 builder.Services.AddScoped<IContractIndexEnqueue, HangfireContractIndexEnqueue>();
 builder.Services.AddScoped<IFormWordBatchExportEnqueue, HangfireFormWordBatchExportEnqueue>();
+builder.Services.AddScoped<IFormSubmissionExcelExportEnqueue, HangfireFormSubmissionExcelExportEnqueue>();
+builder.Services.AddScoped<IFormDispatchGroupSendEnqueue, HangfireFormDispatchGroupSendEnqueue>();
 
 var jwt = builder.Configuration.GetSection(JwtOptions.SectionName).Get<JwtOptions>() ?? new JwtOptions();
 var key = Encoding.UTF8.GetBytes(jwt.Key);
@@ -110,6 +113,14 @@ builder.Services.AddAuthorization(options =>
         ctx.User.HasClaim("permission", "settings.read") || ctx.User.HasClaim("permission", "settings.crud")));
     options.AddPolicy("settings.update", p => p.RequireAssertion(ctx =>
         ctx.User.HasClaim("permission", "settings.update") || ctx.User.HasClaim("permission", "settings.crud")));
+    options.AddPolicy("settings.sms.logs.read", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "settings.sms.logs.read")
+        || ctx.User.HasClaim("permission", "settings.read")
+        || ctx.User.HasClaim("permission", "settings.crud")));
+    options.AddPolicy("settings.sms.test", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "settings.sms.test")
+        || ctx.User.HasClaim("permission", "settings.update")
+        || ctx.User.HasClaim("permission", "settings.crud")));
     options.AddPolicy("roles.read", p => p.RequireClaim("permission", "roles.read"));
     options.AddPolicy("roles.update", p => p.RequireClaim("permission", "roles.update"));
     options.AddPolicy("forms.read", p => p.RequireAssertion(ctx =>
@@ -120,6 +131,14 @@ builder.Services.AddAuthorization(options =>
         ctx.User.HasClaim("permission", "forms.update") || ctx.User.HasClaim("permission", "forms.crud")));
     options.AddPolicy("forms.delete", p => p.RequireAssertion(ctx =>
         ctx.User.HasClaim("permission", "forms.delete") || ctx.User.HasClaim("permission", "forms.crud")));
+    options.AddPolicy("exams.read", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "exams.read") || ctx.User.HasClaim("permission", "forms.read") || ctx.User.HasClaim("permission", "forms.crud")));
+    options.AddPolicy("exams.add", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "exams.add") || ctx.User.HasClaim("permission", "forms.add") || ctx.User.HasClaim("permission", "forms.crud")));
+    options.AddPolicy("exams.update", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "exams.update") || ctx.User.HasClaim("permission", "forms.update") || ctx.User.HasClaim("permission", "forms.crud")));
+    options.AddPolicy("exams.delete", p => p.RequireAssertion(ctx =>
+        ctx.User.HasClaim("permission", "exams.delete") || ctx.User.HasClaim("permission", "forms.delete") || ctx.User.HasClaim("permission", "forms.crud")));
     options.AddPolicy("forms.rules.read", p => p.RequireAssertion(ctx =>
         ctx.User.HasClaim("permission", "forms.rules.read") || ctx.User.HasClaim("permission", "forms.read") || ctx.User.HasClaim("permission", "forms.crud")));
     options.AddPolicy("forms.rules.update", p => p.RequireAssertion(ctx =>
@@ -227,7 +246,7 @@ app.UseApiExceptionHandling();
 app.UseSwagger();
 app.UseSwaggerUI(options =>
 {
-    options.SwaggerEndpoint("/swagger/v1/swagger.json", "PorslineClone API v1");
+    options.SwaggerEndpoint("/swagger/v1/swagger.json", "Formiq API v1");
     options.RoutePrefix = "swagger";
 });
 
@@ -293,6 +312,8 @@ if (dbStartup.RunMigrations || dbStartup.RunSeed || dbStartup.ApplySchemaPatch)
         try
         {
             await DatabaseSchemaPatcher.ApplySecuritySettingsColumnsAsync(db);
+            await DatabaseSchemaPatcher.EnsureFormSubmissionSoftDeleteSchemaAsync(db);
+            await DatabaseSchemaPatcher.EnsureFormFieldsRepeatableSchemaAsync(db);
             logger.LogInformation("SecuritySettings schema columns verified.");
         }
         catch (Exception ex)
@@ -323,6 +344,17 @@ if (dbStartup.RunMigrations || dbStartup.RunSeed || dbStartup.ApplySchemaPatch)
         try
         {
             await DatabaseSchemaPatcher.ApplyAsync(db, logger);
+            try
+            {
+                await scope.ServiceProvider.GetRequiredService<ISmsPatternService>().EnsureSeededAsync();
+                await DbSeeder.EnsureSmsPatternsMenuAsync(db);
+                await DbSeeder.EnsureSmsLogsMenuAsync(db);
+                await DbSeeder.EnsureSmsTestMenuAsync(db);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "SmsPattern seed skipped or failed.");
+            }
         }
         catch (Exception ex)
         {
@@ -362,6 +394,19 @@ app.UseStaticFiles(new StaticFileOptions
     FileProvider = new PhysicalFileProvider(userSignaturesRoot),
     RequestPath = "/UserSignatures"
 });
+
+try
+{
+    using var schemaScope = app.Services.CreateScope();
+    var schemaDb = schemaScope.ServiceProvider.GetRequiredService<AppDbContext>();
+    await DatabaseSchemaPatcher.EnsureFormFieldsRepeatableSchemaAsync(schemaDb);
+    await DatabaseSchemaPatcher.EnsureUserFormsSidebarSchemaAsync(schemaDb);
+}
+catch (Exception ex)
+{
+    var schemaLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("DatabaseStartup");
+    schemaLogger.LogWarning(ex, "Critical form schema patch skipped or failed.");
+}
 
 app.Run();
 

@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using PorslineClone.Application.Auth;
 using PorslineClone.Application.Abstractions;
 using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
@@ -9,14 +10,14 @@ namespace PorslineClone.Api.Controllers;
 
 [ApiController]
 [Route("api/auth")]
-public class AuthController(IAuthService authService, IWebHostEnvironment env, AppDbContext db) : ControllerBase
+public class AuthController(IAuthService authService, AppDbContext db) : ControllerBase
 {
     /// <summary>تنظیم روش ورود — عمومی، بدون احراز هویت</summary>
     [HttpGet("login-config")]
     public async Task<IActionResult> LoginConfig(CancellationToken cancellationToken)
     {
         var settings = await db.SecuritySettings.FirstOrDefaultAsync(cancellationToken) ?? new SecuritySettings();
-        return Ok(new LoginConfigDto(settings.LoginMethod.ToString()));
+        return Ok(new LoginConfigDto(settings.LoginMethod.ToString(), AuthOtpDefaults.LifetimeSeconds));
     }
 
     [HttpPost("login/password")]
@@ -33,18 +34,16 @@ public class AuthController(IAuthService authService, IWebHostEnvironment env, A
     public async Task<IActionResult> SendOtp([FromBody] OtpRequestDto request, CancellationToken cancellationToken)
     {
         var ip = HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-        var sendResult = await authService.SendOtpAsync(request.MobileNumber, ip, cancellationToken);
-
-        if (env.IsDevelopment())
+        var result = await authService.SendOtpAsync(request.MobileNumber, ip, cancellationToken);
+        return Ok(new
         {
-            return Ok(new
-            {
-                message = "اگر شماره معتبر باشد، کد تایید ارسال می‌شود",
-                otpCode = sendResult.OtpCode
-            });
-        }
-
-        return Ok(new { message = "اگر شماره معتبر باشد، کد تایید ارسال می‌شود" });
+            message = result.OtpCode is not null
+                ? "کد تایید (حالت توسعه — پیامک ارسال نشد)"
+                : "اگر شماره معتبر باشد، کد تایید ارسال می‌شود",
+            expiresAtUtc = result.ExpiresAtUtc,
+            otpLifetimeSeconds = AuthOtpDefaults.LifetimeSeconds,
+            otpCode = result.OtpCode,
+        });
     }
 
     [HttpPost("otp/verify")]

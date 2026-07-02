@@ -12,7 +12,9 @@ using PorslineClone.Infrastructure.Services;
 using PorslineClone.Api.Http;
 using PorslineClone.Api.HangfireJobs;
 using PorslineClone.Application.FormWordTemplates;
+using PorslineClone.Application.FormSubmissions;
 using PorslineClone.Infrastructure.Services.FormWordTemplates;
+using PorslineClone.Infrastructure.Services.FormSubmissions;
 
 namespace PorslineClone.Api.Controllers;
 
@@ -27,7 +29,11 @@ public class AdminUserFormsController(
     FormWorkflowRejectionService rejectionService,
     FormWordTemplateService wordTemplateService,
     FormWordBatchExportService wordBatchExportService,
-    IFormWordBatchExportEnqueue wordBatchExportEnqueue) : ControllerBase
+    IFormWordBatchExportEnqueue wordBatchExportEnqueue,
+    FormSubmissionExcelExportService excelExportService,
+    IFormSubmissionExcelExportEnqueue excelExportEnqueue,
+    ResponderGroupSmsInquiryService smsInquiry,
+    UserFormsGroupSidebarService groupSidebar) : ControllerBase
 {
     private async Task<FormSubmission?> GetAuthorizedSubmissionAsync(Guid id, CancellationToken ct)
     {
@@ -59,42 +65,116 @@ public class AdminUserFormsController(
         Guid.TryParse(currentUserId, out var currentUserGuid);
         var isAdmin = User.IsInRole("Admin");
 
-        var q = AuthorizedSubmissionsQuery(currentUserId, currentUserGuid, isAdmin);
+        var sidebarItems = await groupSidebar.BuildAsync(ct);
+        var groups = sidebarItems.Select(x => new
+        {
+            id = x.Id,
+            name = x.Name,
+            submissionCount = x.SubmissionCount,
+            pendingFormCount = x.PendingCount,
+            dispatchedCount = x.DispatchedCount,
+            memberCount = x.MemberCount,
+            registeredMemberCount = x.RegisteredMemberCount,
+            notRegisteredMemberCount = x.NotRegisteredMemberCount,
+            primaryFormId = x.PrimaryFormId,
+            primaryFormTitle = x.PrimaryFormTitle,
+            duplicateResponderCount = x.DuplicateResponderCount,
+            duplicateSubmissionCount = x.DuplicateSubmissionCount,
+        }).ToList();
 
-        var countRows = await (
+        var ungroupedCount = 0;
+        try
+        {
+            var q = AuthorizedSubmissionsQuery(currentUserId, currentUserGuid, isAdmin);
+            ungroupedCount = await q.CountAsync(
+                x => x.ResponderId == null
+                    || !db.ResponderGroupMembers.Any(m => m.ResponderId == x.ResponderId),
+                ct);
+        }
+        catch
+        {
+            ungroupedCount = 0;
+        }
+
+        return Ok(new { groups, ungroupedCount });
+    }
+
+    [HttpGet("groups/{groupId:guid}/duplicate-submissions")]
+    [Authorize(Policy = "responders.read")]
+    public async Task<IActionResult> DuplicateSubmissions(
+        Guid groupId,
+        [FromQuery] Guid? formId = null,
+        CancellationToken ct = default)
+    {
+        var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        Guid.TryParse(currentUserId, out var currentUserGuid);
+        var isAdmin = User.IsInRole("Admin");
+
+        var effectiveFormId = await smsInquiry.ResolveEffectiveFormIdForGroupFilterAsync(
+            groupId, ungroupedOnly: false, formId, ct);
+        if (effectiveFormId is not Guid fid || fid == Guid.Empty)
+            return Ok(new { duplicateResponderCount = 0, duplicateSubmissionCount = 0, items = Array.Empty<object>() });
+
+        var q = AuthorizedSubmissionsQuery(currentUserId, currentUserGuid, isAdmin);
+        q = ResponderGroupSubmissionFilter.Apply(db, q, groupId, ungroupedOnly: false, effectiveFormId);
+        q = q.Where(x => x.ResponderId != null);
+
+        var rows = await (
             from s in q
-            where s.ResponderId != null
-            join m in db.ResponderGroupMembers.AsNoTracking() on s.ResponderId equals m.ResponderId
-            join g in db.ResponderGroups.AsNoTracking() on m.GroupId equals g.Id
-            where !g.IsDeleted && g.IsActive
-            group s by m.GroupId into grp
-            select new { GroupId = grp.Key, Count = grp.Count() }
+            join r in db.Responders.AsNoTracking() on s.ResponderId equals r.Id
+            orderby s.SubmittedAtUtc descending
+            select new
+            {
+                s.Id,
+                s.ResponderId,
+                ResponderIdValue = s.ResponderId!.Value,
+                ResponderName = r.FullName,
+                ResponderMobile = r.MobileNumber,
+                s.SubmitterName,
+                s.SubmitterEmail,
+                s.TrackingCode,
+                s.SubmittedAtUtc,
+                s.Status,
+            }
         ).ToListAsync(ct);
 
-        var countByGroup = countRows.ToDictionary(x => x.GroupId, x => x.Count);
-
-        var groups = await db.ResponderGroups.AsNoTracking()
-            .Where(x => !x.IsDeleted && x.IsActive)
-            .OrderBy(x => x.Name)
-            .Select(x => new { x.Id, x.Name })
-            .ToListAsync(ct);
-
-        var items = groups
-            .Select(g => new
+        var items = rows
+            .GroupBy(x => x.ResponderIdValue)
+            .Where(g => g.Count() > 1)
+            .Select(g =>
             {
-                g.Id,
-                g.Name,
-                submissionCount = countByGroup.GetValueOrDefault(g.Id),
+                var list = g.OrderByDescending(x => x.SubmittedAtUtc).ToList();
+                var first = list[0];
+                return new
+                {
+                    responderId = g.Key,
+                    fullName = first.ResponderName?.Trim()
+                        ?? first.SubmitterName?.Trim()
+                        ?? "بدون نام",
+                    mobileNumber = first.ResponderMobile?.Trim()
+                        ?? first.SubmitterEmail?.Trim()
+                        ?? "",
+                    submissionCount = list.Count,
+                    submissions = list.Select(x => new
+                    {
+                        x.Id,
+                        x.SubmittedAtUtc,
+                        x.TrackingCode,
+                        submitterName = x.SubmitterName,
+                        approvalStatus = ToClientStatus(x.Status),
+                    }).ToList(),
+                };
             })
-            .Where(x => x.submissionCount > 0)
+            .OrderBy(x => x.fullName)
             .ToList();
 
-        var inAnyGroup = db.ResponderGroupMembers.AsNoTracking().Select(m => m.ResponderId);
-        var ungroupedCount = await q.CountAsync(
-            x => x.ResponderId == null || !inAnyGroup.Contains(x.ResponderId.Value),
-            ct);
-
-        return Ok(new { groups = items, ungroupedCount });
+        return Ok(new
+        {
+            duplicateResponderCount = items.Count,
+            duplicateSubmissionCount = items.Sum(x => x.submissionCount - 1),
+            formId = fid,
+            items,
+        });
     }
 
     [HttpGet]
@@ -103,10 +183,12 @@ public class AdminUserFormsController(
         [FromQuery] int page = 1,
         [FromQuery] int pageSize = 10,
         [FromQuery] string? search = null,
+        [FromQuery] string? fieldKey = null,
         [FromQuery] string? sortBy = "submitted_desc",
         [FromQuery] string? status = null,
         [FromQuery] Guid? groupId = null,
         [FromQuery] bool ungroupedOnly = false,
+        [FromQuery] Guid? formId = null,
         CancellationToken ct = default)
     {
         page = Math.Max(1, page);
@@ -117,17 +199,23 @@ public class AdminUserFormsController(
 
         var q = AuthorizedSubmissionsQuery(currentUserId, currentUserGuid, isAdmin);
 
-        if (!string.IsNullOrWhiteSpace(search))
+        var useFieldKeyFilter = !string.IsNullOrWhiteSpace(fieldKey)
+            && !string.Equals(fieldKey.Trim(), FormSubmissionFieldSearchHelper.AllFieldsKey, StringComparison.OrdinalIgnoreCase);
+
+        if (!string.IsNullOrWhiteSpace(search) && !useFieldKeyFilter)
         {
             var s = search.Trim();
             q = q.Where(x =>
                 (x.SubmitterName ?? "").Contains(s) ||
                 (x.SubmitterEmail ?? "").Contains(s) ||
                 (x.TrackingCode ?? "").Contains(s) ||
-                x.Form!.Title.Contains(s));
+                x.Form!.Title.Contains(s) ||
+                (x.FieldsJson != null && x.FieldsJson.Contains(s)));
         }
 
-        q = ApplyResponderGroupFilter(db, q, groupId, ungroupedOnly);
+        var effectiveFormId = await smsInquiry.ResolveEffectiveFormIdForGroupFilterAsync(
+            groupId, ungroupedOnly, formId, ct);
+        q = ResponderGroupSubmissionFilter.Apply(db, q, groupId, ungroupedOnly, effectiveFormId);
 
         if (!string.IsNullOrWhiteSpace(status))
         {
@@ -143,19 +231,28 @@ public class AdminUserFormsController(
             };
         }
 
-        q = sortBy switch
-        {
-            "submitted_asc" => q.OrderBy(x => x.SubmittedAtUtc),
-            "name_asc" => q.OrderBy(x => x.SubmitterName),
-            "name_desc" => q.OrderByDescending(x => x.SubmitterName),
-            _ => q.OrderByDescending(x => x.SubmittedAtUtc)
-        };
-
         if (page == 1)
             await ProcessDueScheduledWorkflowStartsAsync(ct);
 
-        var total = await q.CountAsync(ct);
-        var data = await q.Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(ct);
+        List<FormSubmission> data;
+        int total;
+
+        if (useFieldKeyFilter)
+        {
+            var allRows = await q.Include(x => x.Form).ToListAsync(ct);
+            var filtered = allRows
+                .Where(x => FormSubmissionFieldSearchHelper.Matches(x, search, fieldKey))
+                .ToList();
+            filtered = ApplySubmissionSort(filtered, sortBy);
+            total = filtered.Count;
+            data = filtered.Skip((page - 1) * pageSize).Take(pageSize).ToList();
+        }
+        else
+        {
+            q = ApplySubmissionSortQuery(q, sortBy);
+            total = await q.CountAsync(ct);
+            data = await q.Skip((page - 1) * pageSize).Take(pageSize).ToListAsync(ct);
+        }
 
         var dispatchLinkIds = data
             .Where(x => x.DispatchLinkId is not null)
@@ -246,11 +343,12 @@ public class AdminUserFormsController(
             ? new List<FormFieldValueDto>()
             : (JsonSerializer.Deserialize<List<FormFieldValueDto>>(submission.FieldsJson) ?? new List<FormFieldValueDto>());
 
-        var fieldTypesByLabel = await db.FormFields.AsNoTracking()
+        var formFieldList = await db.FormFields.AsNoTracking()
             .Where(ff => ff.FormId == submission.FormId)
-            .GroupBy(ff => ff.Label)
-            .Select(g => new { Label = g.Key, FieldType = (int)g.First().FieldType })
-            .ToDictionaryAsync(x => x.Label, x => x.FieldType, ct);
+            .Select(ff => new { ff.Id, ff.Label, ff.FieldType, ff.NestedFieldsJson })
+            .ToListAsync(ct);
+
+        var formFieldById = formFieldList.ToDictionary(x => x.Id);
 
         var uploadPaths = FormSubmissionUploadHelper.ListUploadPaths(values);
         var fileValues = uploadPaths
@@ -319,14 +417,29 @@ public class AdminUserFormsController(
             ApprovalStatus = ToClientStatus(submission.Status),
             SuggestedWorkflowTemplateId = submission.Form.WorkflowTemplateId,
             SuggestedWorkflowName = submission.Form.WorkflowName,
-            Fields = values.Select(v => new
+            Fields = values.Select(v =>
             {
-                v.Label,
-                v.Value,
-                FieldType = fieldTypesByLabel.GetValueOrDefault(v.Label, 0),
-                IsFile = FormSubmissionUploadHelper.IsUploadPath(v.Value),
-                File = fileValues.FirstOrDefault(f =>
-                    f.Url == FormSubmissionUploadHelper.NormalizeRelativePath(v.Value))
+                var meta = v.FieldId is Guid fid && formFieldById.TryGetValue(fid, out var byId)
+                    ? byId
+                    : formFieldList.FirstOrDefault(x => string.Equals(x.Label, v.Label, StringComparison.Ordinal));
+                var fieldType = meta is not null ? (int)meta.FieldType : 0;
+                List<NestedFormFieldDto>? nestedFields = null;
+                if (meta?.FieldType == FieldType.Repeatable && !string.IsNullOrWhiteSpace(meta.NestedFieldsJson))
+                {
+                    nestedFields = JsonSerializer.Deserialize<List<NestedFormFieldDto>>(meta.NestedFieldsJson);
+                }
+
+                return new
+                {
+                    v.Label,
+                    v.Value,
+                    FieldId = v.FieldId ?? meta?.Id,
+                    FieldType = fieldType,
+                    NestedFields = nestedFields,
+                    IsFile = FormSubmissionUploadHelper.IsUploadPath(v.Value),
+                    File = fileValues.FirstOrDefault(f =>
+                        f.Url == FormSubmissionUploadHelper.NormalizeRelativePath(v.Value))
+                };
             }),
             Files = fileValues,
             Steps = steps.Select(s => new
@@ -448,7 +561,9 @@ public class AdminUserFormsController(
             Guid.TryParse(currentUserId, out var currentUserGuid);
             var isAdmin = User.IsInRole("Admin");
             var q = AuthorizedSubmissionsQuery(currentUserId, currentUserGuid, isAdmin);
-            q = ApplyResponderGroupFilter(db, q, req.GroupId, req.UngroupedOnly);
+            var effectiveFormId = await smsInquiry.ResolveEffectiveFormIdForGroupFilterAsync(
+                req.GroupId, req.UngroupedOnly, null, ct);
+            q = ResponderGroupSubmissionFilter.Apply(db, q, req.GroupId, req.UngroupedOnly, effectiveFormId);
             submissionIds = await q.Select(x => x.Id).ToListAsync(ct);
         }
         else
@@ -628,6 +743,24 @@ public class AdminUserFormsController(
         _ => 140,
     };
 
+    private static IQueryable<FormSubmission> ApplySubmissionSortQuery(IQueryable<FormSubmission> q, string? sortBy) =>
+        sortBy switch
+        {
+            "submitted_asc" => q.OrderBy(x => x.SubmittedAtUtc),
+            "name_asc" => q.OrderBy(x => x.SubmitterName),
+            "name_desc" => q.OrderByDescending(x => x.SubmitterName),
+            _ => q.OrderByDescending(x => x.SubmittedAtUtc),
+        };
+
+    private static List<FormSubmission> ApplySubmissionSort(List<FormSubmission> rows, string? sortBy) =>
+        sortBy switch
+        {
+            "submitted_asc" => rows.OrderBy(x => x.SubmittedAtUtc).ToList(),
+            "name_asc" => rows.OrderBy(x => x.SubmitterName).ToList(),
+            "name_desc" => rows.OrderByDescending(x => x.SubmitterName).ToList(),
+            _ => rows.OrderByDescending(x => x.SubmittedAtUtc).ToList(),
+        };
+
     private static string ToClientStatus(FormSubmissionStatus status) => status switch
     {
         FormSubmissionStatus.Pending => "pending",
@@ -708,10 +841,19 @@ public class AdminUserFormsController(
         var approvalLinks = await db.FormSubmissionApprovalLinks
             .Where(x => x.FormSubmissionId == id)
             .ToListAsync(ct);
-        if (approvalLinks.Count > 0)
-            db.FormSubmissionApprovalLinks.RemoveRange(approvalLinks);
+        foreach (var approvalLink in approvalLinks)
+            approvalLink.IsActive = false;
 
-        db.FormSubmissions.Remove(submission);
+        submission.IsDeleted = true;
+        submission.DeletedAtUtc = DateTime.UtcNow;
+
+        if (submission.DispatchLinkId is Guid linkId)
+        {
+            var dispatchLink = await db.FormDispatchLinks.FirstOrDefaultAsync(x => x.Id == linkId, ct);
+            if (dispatchLink is not null)
+                dispatchLink.UsedAtUtc = null;
+        }
+
         await db.SaveChangesAsync(ct);
         return Ok(new { message = "پاسخ فرم حذف شد" });
     }
@@ -764,8 +906,10 @@ public class AdminUserFormsController(
         var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
         Guid.TryParse(currentUserId, out var currentUserGuid);
         var isAdmin = User.IsInRole("Admin");
+        var effectiveFormId = await smsInquiry.ResolveEffectiveFormIdForGroupFilterAsync(
+            groupId, ungroupedOnly, formId, ct);
         var data = await wordTemplateService.GetGroupedSubmissionsAsync(
-            formId, groupId, ungroupedOnly, currentUserId, isAdmin, currentUserGuid, ct);
+            effectiveFormId, groupId, ungroupedOnly, currentUserId, isAdmin, currentUserGuid, ct);
         return Ok(data);
     }
 
@@ -776,7 +920,9 @@ public class AdminUserFormsController(
     {
         var q = db.FormSubmissions
             .Include(x => x.Form)
-            .Where(x => x.Form != null && !x.Form.IsDeleted);
+            .Where(x => x.Form != null && !x.Form.IsDeleted)
+            .Where(x => x.ResponderId == null
+                || db.Responders.Any(r => r.Id == x.ResponderId.Value));
 
         if (!isAdmin && currentUserGuid != Guid.Empty)
         {
@@ -790,28 +936,93 @@ public class AdminUserFormsController(
         return q;
     }
 
-    private static IQueryable<FormSubmission> ApplyResponderGroupFilter(
-        AppDbContext db,
-        IQueryable<FormSubmission> q,
-        Guid? groupId,
-        bool ungroupedOnly)
+    [HttpGet("excel-export/options")]
+    [Authorize(Policy = "responders.read")]
+    public async Task<IActionResult> GetExcelExportOptions(
+        [FromQuery] Guid? groupId = null,
+        [FromQuery] bool ungroupedOnly = false,
+        CancellationToken ct = default)
     {
-        if (ungroupedOnly)
+        try
         {
-            var inAnyGroup = db.ResponderGroupMembers.Select(m => m.ResponderId);
-            return q.Where(x =>
-                x.ResponderId == null || !inAnyGroup.Contains(x.ResponderId.Value));
-        }
+            var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+            Guid.TryParse(currentUserId, out var currentUserGuid);
+            var isAdmin = User.IsInRole("Admin");
 
-        if (groupId is { } gid && gid != Guid.Empty)
+            var options = await excelExportService.GetOptionsAsync(
+                () => AuthorizedSubmissionsQuery(currentUserId, currentUserGuid, isAdmin),
+                groupId,
+                ungroupedOnly,
+                ct);
+
+            return Ok(options);
+        }
+        catch (InvalidOperationException ex)
         {
-            var memberIds = db.ResponderGroupMembers
-                .Where(m => m.GroupId == gid)
-                .Select(m => m.ResponderId);
-            return q.Where(x => x.ResponderId != null && memberIds.Contains(x.ResponderId.Value));
+            return BadRequest(new { message = ex.Message });
         }
+    }
 
-        return q;
+    [HttpPost("excel-export-jobs")]
+    [Authorize(Policy = "responders.read")]
+    public async Task<IActionResult> StartExcelExportJob(
+        [FromBody] StartFormSubmissionExcelExportRequest req,
+        CancellationToken ct)
+    {
+        try
+        {
+            if (req.SelectedFieldKeys is null || req.SelectedFieldKeys.Count == 0)
+                return BadRequest(new { message = "حداقل یک فیلد برای خروجی انتخاب کنید" });
+
+            var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+            Guid.TryParse(currentUserId, out var currentUserGuid);
+            var isAdmin = User.IsInRole("Admin");
+            Guid? userId = Guid.TryParse(currentUserId, out var uid) ? uid : null;
+
+            var job = await excelExportService.CreateQueuedJobAsync(
+                req.GroupId,
+                req.UngroupedOnly,
+                req.FormId,
+                req.SelectedFieldKeys,
+                userId,
+                () => AuthorizedSubmissionsQuery(currentUserId, currentUserGuid, isAdmin),
+                ct);
+
+            var hangfireId = excelExportEnqueue.Enqueue(job.Id);
+            await excelExportService.SetHangfireJobIdAsync(job.Id, hangfireId, ct);
+
+            return Ok(new StartFormSubmissionExcelExportResponse(
+                job.Id,
+                "خروجی Excel در پس‌زمینه شروع شد — پس از اتمام پیام دانلود نمایش داده می‌شود"));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
+
+    [HttpGet("excel-export-jobs/{jobId:guid}")]
+    [Authorize(Policy = "responders.read")]
+    public async Task<IActionResult> GetExcelExportJobStatus(Guid jobId, CancellationToken ct)
+    {
+        var status = await excelExportService.GetStatusAsync(jobId, ct);
+        return status is null ? NotFound(new { message = "کار یافت نشد" }) : Ok(status);
+    }
+
+    [HttpGet("excel-export-jobs/{jobId:guid}/download")]
+    [Authorize(Policy = "responders.read")]
+    public IActionResult DownloadExcelExportJob(Guid jobId)
+    {
+        var full = excelExportService.ResolveFileFullPath(jobId);
+        if (full is null || !System.IO.File.Exists(full))
+            return NotFound(new { message = "فایل Excel یافت نشد" });
+
+        var fileName = Path.GetFileName(full);
+        ContentDispositionHelper.SetAttachment(Response, fileName);
+        return PhysicalFile(
+            full,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            fileName);
     }
 
     [HttpPost("word-export-jobs")]

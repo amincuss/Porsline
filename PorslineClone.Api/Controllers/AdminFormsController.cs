@@ -10,6 +10,7 @@ using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
 using PorslineClone.Infrastructure.Services;
+using PorslineClone.Infrastructure.Services.SmsPatterns;
 using PorslineClone.Api.RuleEngine;
 
 namespace PorslineClone.Api.Controllers;
@@ -22,6 +23,7 @@ public class AdminFormsController(
     IRuleEvaluationService ruleEvaluationService,
     IWebHostEnvironment env,
     ISmsSender smsSender,
+    ISmsPatternService smsPatterns,
     IInboxMessageService inbox,
     IFrontendUrlResolver frontendUrls,
     FormDispatchSubmissionNotifier formDispatchNotifier) : ControllerBase
@@ -161,6 +163,9 @@ public class AdminFormsController(
                 f.UploadMaxSizeMb,
                 f.DefaultValue,
                 f.IsReadOnly,
+                NestedFields = f.NestedFieldsJson != null
+                    ? JsonSerializer.Deserialize<List<NestedFormFieldDto>>(f.NestedFieldsJson)
+                    : null,
                 f.RowId,
                 f.ColIndex,
                 f.RowColCount
@@ -252,6 +257,9 @@ public class AdminFormsController(
                 UploadMaxSizeMb = f.UploadMaxSizeMb is > 0 and <= 100 ? f.UploadMaxSizeMb : null,
                 DefaultValue = string.IsNullOrWhiteSpace(f.DefaultValue) ? null : f.DefaultValue.Trim(),
                 IsReadOnly = f.IsReadOnly,
+                NestedFieldsJson = f.NestedFields is { Count: > 0 }
+                    ? JsonSerializer.Serialize(f.NestedFields)
+                    : null,
             });
         }
 
@@ -512,9 +520,7 @@ public class AdminFormsController(
             .FirstOrDefaultAsync(f => f.Id == id && !f.IsDeleted, ct);
         if (form is null) return NotFound(new { message = "فرم یافت نشد" });
 
-        var values = string.IsNullOrWhiteSpace(req.ValuesJson)
-            ? new Dictionary<string, string>()
-            : JsonSerializer.Deserialize<Dictionary<string, string>>(req.ValuesJson) ?? new Dictionary<string, string>();
+        var values = FormSubmissionValuesHelper.ParseValuesJson(req.ValuesJson);
 
         var responderId = (req.ResponderId ?? User.FindFirstValue(ClaimTypes.NameIdentifier) ?? "unknown").Trim();
         responderId = Regex.Replace(responderId, @"[^\w\-]", "_");
@@ -552,12 +558,11 @@ public class AdminFormsController(
             values[ff.Id.ToString()] = $"/Formupload/{responderId}/{safeName}";
         }
 
-        var fieldValues = form.Fields.Select(f => new FormFieldValueDto(
-            f.Label,
-            PersianDigitHelper.PersianizeForFormStorage(
-                values.TryGetValue(f.Id.ToString(), out var v) ? v : "",
-                f.FieldType)
-        )).ToList();
+        var repeatableError = FormSubmissionValuesHelper.ValidateRepeatableFields(form, values);
+        if (repeatableError is not null)
+            return BadRequest(new { message = repeatableError });
+
+        var fieldValues = FormSubmissionValuesHelper.BuildStoredFieldValues(form, values);
 
         var submission = FormSubmissionFactory.Create(form, fieldValues, req.SubmitterName, req.SubmitterEmail, null, null);
         submission.TrackingCode = await FormTrackingCodeGenerator.GenerateUniqueAsync(db, ct);
@@ -594,12 +599,14 @@ public class AdminFormsController(
         var approver = await db.Users.FirstOrDefaultAsync(x => x.Id == approverUserId, ct);
         if (approver is null) return;
 
-        var msg =
-            $"یک درخواست جدید از فرم «{formTitle}» برای تایید شما ثبت شد.\n" +
-            $"لطفا به پنل مدیریت بخش تاییدیه‌ها مراجعه کنید.";
         var adminBase = await frontendUrls.ResolveAdminBaseUrlAsync(ct);
-        if (!string.IsNullOrWhiteSpace(adminBase))
-            msg += $"\nلینک مستقیم: {adminBase}/admin/approvals";
+        var adminLinkBlock = string.IsNullOrWhiteSpace(adminBase)
+            ? ""
+            : $"\nلینک مستقیم: {adminBase}/admin/approvals";
+        var msg = await smsPatterns.RenderAsync("form.approval.newRequest.panel", SmsPatternVars.Dict(
+            ("formTitle", formTitle),
+            ("adminLinkBlock", adminLinkBlock)
+        ), ct);
 
         await inbox.SendToUserAsync(approverUserId, "تأیید فرم", msg, ct);
         if (!smsSettings.ApprovalReferralSmsEnabled || string.IsNullOrWhiteSpace(approver.PhoneNumber)) return;
@@ -635,6 +642,7 @@ public class SaveFieldPayload
     public int? UploadMaxSizeMb { get; set; }
     public string? DefaultValue { get; set; }
     public bool IsReadOnly { get; set; }
+    public List<NestedFormFieldDto>? NestedFields { get; set; }
 }
 
 public class SaveConditionPayload

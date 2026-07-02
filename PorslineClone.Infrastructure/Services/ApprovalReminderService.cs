@@ -5,6 +5,7 @@ using PorslineClone.Application.Contracts;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
 using PorslineClone.Infrastructure.Services.Documents;
+using PorslineClone.Infrastructure.Services.SmsPatterns;
 
 namespace PorslineClone.Infrastructure.Services;
 
@@ -13,6 +14,7 @@ public class ApprovalReminderService(
     AppDbContext db,
     UserManager<AppUser> userManager,
     ISmsSender smsSender,
+    ISmsPatternService smsPatterns,
     IInboxMessageService inbox,
     IFrontendUrlResolver frontendUrls)
 {
@@ -155,10 +157,11 @@ public class ApprovalReminderService(
         var subject = string.IsNullOrWhiteSpace(contract.SubjectPersonName)
             ? contract.Title
             : contract.SubjectPersonName;
-        var msg =
-            $"یادآوری: قرارداد شماره «{contract.ContractNumber}» با موضوع «{subject}» هنوز توسط شما امضا/تأیید نشده است.\n" +
-            $"اعتبار گردش کار به پایان رسیده و از مهلت مقرر تأخیر دارید.\n" +
-            $"لینک سریع امضا و تأیید:\n{linkPath}";
+        var msg = await smsPatterns.RenderAsync("contract.reminder.workflowValidity", SmsPatternVars.Dict(
+            ("contractNumber", contract.ContractNumber),
+            ("subject", subject),
+            ("linkPath", linkPath)
+        ), ct);
 
         await inbox.SendToUserAsync(link.AssigneeUserId, "یادآوری تأخیر اعتبار گردش قرارداد", msg, ct);
         return await smsSender.SendSmsAsync(new SmsRequest(user.PhoneNumber, msg), ct);
@@ -216,10 +219,11 @@ public class ApprovalReminderService(
             : $"{publicBase.TrimEnd('/')}/approve/contract?c={link.Code}";
 
         var deadlineLabel = ApprovalDeadlineHelper.FormatDeadlineFa(deadline);
-        var msg =
-            $"تأخیر در تأیید: مهلت ({deadlineLabel}) برای قرارداد «{contract.ContractNumber}» به پایان رسیده و هنوز تأیید شما ثبت نشده است.\n" +
-            $"لطفاً هرچه سریع‌تر بررسی کنید.\n" +
-            $"لینک تأیید (بدون نیاز به ورود):\n{linkPath}";
+        var msg = await smsPatterns.RenderAsync("contract.reminder.deadline", SmsPatternVars.Dict(
+            ("deadlineLabel", deadlineLabel),
+            ("contractNumber", contract.ContractNumber),
+            ("linkPath", linkPath)
+        ), ct);
 
         await inbox.SendToUserAsync(link.AssigneeUserId, "یادآوری تأخیر تأیید قرارداد", msg, ct);
         return await smsSender.SendSmsAsync(new SmsRequest(user.PhoneNumber, msg), ct);
@@ -246,10 +250,12 @@ public class ApprovalReminderService(
 
         var formTitle = submission.Form?.Title ?? "فرم";
         var deadlineLabel = ApprovalDeadlineHelper.FormatDeadlineFa(deadline);
-        var msg =
-            $"تأخیر در تأیید: مهلت ({deadlineLabel}) برای پاسخ فرم «{formTitle}» به پایان رسیده و هنوز تأیید شما ثبت نشده است.\n" +
-            $"لینک تأیید: {linkPath}\n" +
-            $"یا پنل: {adminApprovals}";
+        var msg = await smsPatterns.RenderAsync("form.reminder.deadline", SmsPatternVars.Dict(
+            ("deadlineLabel", deadlineLabel),
+            ("formTitle", formTitle),
+            ("linkPath", linkPath),
+            ("adminApprovals", adminApprovals)
+        ), ct);
 
         await inbox.SendToUserAsync(link.AssigneeUserId, "یادآوری تأخیر تأیید فرم", msg, ct);
         return await smsSender.SendSmsAsync(new SmsRequest(user.PhoneNumber, msg), ct);
@@ -329,10 +335,13 @@ public class ApprovalReminderService(
         var refPart = string.IsNullOrWhiteSpace(document.ReferenceNumber)
             ? ""
             : $" ({document.ReferenceNumber})";
-        var msg =
-            $"تأخیر در تأیید: مهلت ({deadlineLabel}) برای سند «{document.Title}»{refPart} به پایان رسیده و هنوز تأیید شما ثبت نشده است.\n" +
-            $"لینک تأیید (بدون نیاز به ورود):\n{linkPath}\n" +
-            $"یا پنل: {adminWorkflowRuns}";
+        var msg = await smsPatterns.RenderAsync("document.reminder.deadline", SmsPatternVars.Dict(
+            ("deadlineLabel", deadlineLabel),
+            ("docTitle", document.Title),
+            ("refPart", refPart),
+            ("linkPath", linkPath),
+            ("adminWorkflowRuns", adminWorkflowRuns)
+        ), ct);
 
         await inbox.SendToUserAsync(link.AssigneeUserId, "یادآوری تأخیر تأیید سند", msg, ct);
         return await smsSender.SendSmsAsync(new SmsRequest(user.PhoneNumber, msg), ct);

@@ -10,6 +10,7 @@ using PorslineClone.Application.ContractTemplates;
 using PorslineClone.Domain.Entities;
 using PorslineClone.Infrastructure.Persistence;
 using PorslineClone.Infrastructure.Services.ContractTemplates;
+using PorslineClone.Infrastructure.Services.SmsPatterns;
 
 namespace PorslineClone.Infrastructure.Services;
 
@@ -26,6 +27,7 @@ public class ContractWorkflowProcessor(
     ContractApprovalLinkService approvalLinks,
     ContractPostApprovalService postApproval,
     ISmsSender smsSender,
+    ISmsPatternService smsPatterns,
     IInboxMessageService inbox,
     IFrontendUrlResolver frontendUrls,
     IHostEnvironment hostEnvironment)
@@ -470,13 +472,14 @@ public class ContractWorkflowProcessor(
                 ? $"/approve/contract?c={code}"
                 : $"{publicBase.TrimEnd('/')}/approve/contract?c={code}";
 
-            var msg =
-                $"{name}\n" +
-                $"قرارداد «{contract.ContractNumber}» با **رد کامل قطعی** پایان یافت و بایگانی شد.\n" +
-                $"مرحله رد: {rejectedStep.Order} — {rejectedStep.UserName}{commentLine}\n" +
-                $"مشاهده نتیجه (لینک فوری):\n{linkPath}";
-
-            msg = msg.Replace("**", "", StringComparison.Ordinal);
+            var msg = await smsPatterns.RenderAsync("contract.rejection.full.final", SmsPatternVars.Dict(
+                ("recipientName", name),
+                ("contractNumber", contract.ContractNumber),
+                ("stepOrder", rejectedStep.Order.ToString()),
+                ("stepUserName", rejectedStep.UserName ?? ""),
+                ("commentLine", commentLine),
+                ("linkPath", linkPath)
+            ), ct);
 
             await inbox.SendToUserAsync(user.Id, "رد قطعی قرارداد", msg, ct);
             await smsSender.SendSmsAsync(new SmsRequest(user.PhoneNumber, msg), ct);
@@ -509,10 +512,13 @@ public class ContractWorkflowProcessor(
             ? $"/approve/contract?c={approveLinkCode}"
             : $"{publicBase.TrimEnd('/')}/approve/contract?c={approveLinkCode}";
 
-        var msg =
-            $"قرارداد «{contract.ContractNumber}» توسط {rejecterName} رد شد ({typeLabel}).\n" +
-            $"{target} باید اصلاحیه را انجام دهید.\n" +
-            $"لینک اصلاح قرارداد:\n{amendPath}";
+        var msg = await smsPatterns.RenderAsync("contract.amendment.assignee", SmsPatternVars.Dict(
+            ("contractNumber", contract.ContractNumber),
+            ("rejecterName", rejecterName),
+            ("rejectionTypeLabel", typeLabel),
+            ("targetRole", target),
+            ("amendPath", amendPath)
+        ), ct);
 
         await inbox.SendToUserAsync(amendment.AssigneeUserId, "اصلاحیه قرارداد", msg, ct);
         await smsSender.SendSmsAsync(new SmsRequest(assignee.PhoneNumber, msg), ct);
@@ -534,11 +540,11 @@ public class ContractWorkflowProcessor(
         var versionLine = state.AmendedVersionNumber is not null
             ? $"نسخه اصلاح‌شده (v{state.AmendedVersionNumber}) آماده بررسی است.\n"
             : "";
-        var msg =
-            $"قرارداد «{contract.ContractNumber}» — اصلاحیه ({typeLabel}) ارسال شد.\n" +
-            versionLine +
-            "لطفاً نسخه اصلاح‌شده را بررسی و تأیید یا رد کنید.\n" +
-            "لینک تأیید در پیامک ارجاع بعدی ارسال می‌شود.";
+        var msg = await smsPatterns.RenderAsync("contract.amendment.return.rejecter", SmsPatternVars.Dict(
+            ("contractNumber", contract.ContractNumber),
+            ("rejectionTypeLabel", typeLabel),
+            ("versionLine", versionLine)
+        ), ct);
 
         var title = state.AmendedVersionNumber is not null ? "نسخه اصلاح‌شده — تأیید مجدد" : "بازگشت برای تأیید مجدد";
         await inbox.SendToUserAsync(rejecterStep.UserId, title, msg, ct);
@@ -561,11 +567,16 @@ public class ContractWorkflowProcessor(
         if (creator is null || string.IsNullOrWhiteSpace(creator.PhoneNumber)) return;
 
         var typeLabel = ContractAmendmentHelper.RejectionTypeLabel(amendment.RejectionType);
-        var msg =
-            $"قرارداد «{contract.ContractNumber}» در مرحله {rejectedStep.Order} توسط {rejecterName} رد شد.\n" +
-            $"نوع: {typeLabel}\n" +
-            (rejectedStep.Comment is { Length: > 0 } c ? $"یادداشت: {c}\n" : "") +
-            "اصلاحیه در جریان است.";
+        var commentBlock = rejectedStep.Comment is { Length: > 0 } c
+            ? $"\nیادداشت: {c}"
+            : "";
+        var msg = await smsPatterns.RenderAsync("contract.rejection.notify.creator", SmsPatternVars.Dict(
+            ("contractNumber", contract.ContractNumber),
+            ("stepOrder", rejectedStep.Order.ToString()),
+            ("rejecterName", rejecterName),
+            ("rejectionTypeLabel", typeLabel),
+            ("commentBlock", commentBlock)
+        ), ct);
 
         await inbox.SendToUserAsync(contract.CreatedByUserId, "رد قرارداد", msg, ct);
         await smsSender.SendSmsAsync(new SmsRequest(creator.PhoneNumber, msg), ct);
@@ -896,11 +907,15 @@ public class ContractWorkflowProcessor(
             : $"{publicBase.TrimEnd('/')}/approve/contract?c={code}";
 
         var msg = isReminder
-            ? $"یادآوری: قرارداد شماره «{contract.ContractNumber}» همچنان منتظر تأیید شماست.\n" +
-              $"لینک تأیید (بدون نیاز به ورود):\n{linkPath}"
-            : $"قرارداد شماره «{contract.ContractNumber}» برای تأیید شما ارسال شد.\n" +
-              $"ارجاع‌دهنده: {sender}\n" +
-              $"لینک تأیید (بدون نیاز به ورود):\n{linkPath}";
+            ? await smsPatterns.RenderAsync("contract.approval.assignee.reminder", SmsPatternVars.Dict(
+                ("contractNumber", contract.ContractNumber),
+                ("linkPath", linkPath)
+            ), ct)
+            : await smsPatterns.RenderAsync("contract.approval.assignee.new", SmsPatternVars.Dict(
+                ("contractNumber", contract.ContractNumber),
+                ("sender", sender),
+                ("linkPath", linkPath)
+            ), ct);
 
         var inboxTitle = isReminder ? "یادآوری تأیید قرارداد" : "قرارداد برای تأیید";
         await inbox.SendToUserAsync(userId, inboxTitle, msg, ct);
@@ -948,10 +963,14 @@ public class ContractWorkflowProcessor(
             statusTail = "گردش تأیید این قرارداد به پایان رسید.";
         }
 
-        var msg =
-            $"قرارداد شماره «{contract.ContractNumber}» با موضوع «{subject}»:\n" +
-            $"{approverLabel} در تاریخ {dateStr} ساعت {timeStr} تأیید کرد.\n" +
-            statusTail;
+        var msg = await smsPatterns.RenderAsync("contract.creator.step.approved", SmsPatternVars.Dict(
+            ("contractNumber", contract.ContractNumber),
+            ("subject", subject),
+            ("approverLabel", approverLabel),
+            ("dateStr", dateStr),
+            ("timeStr", timeStr),
+            ("statusTail", statusTail)
+        ), ct);
 
         await inbox.SendToUserAsync(contract.CreatedByUserId, "به‌روزرسانی قرارداد", msg, ct);
         if (!smsSettings.ContractCreatorApprovalNotifySmsEnabled || string.IsNullOrWhiteSpace(creator.PhoneNumber)) return;
@@ -984,8 +1003,11 @@ public class ContractWorkflowProcessor(
 
         var (dateStr, timeStr) = SmsDateTimeFormatter.FormatUtcNowTehran();
 
-        var msg =
-            $"قرارداد شما با شماره سند «{contract.ContractNumber}» در تاریخ {dateStr} ساعت {timeStr} تأیید شد.";
+        var msg = await smsPatterns.RenderAsync("contract.party.final.approved", SmsPatternVars.Dict(
+            ("contractNumber", contract.ContractNumber),
+            ("dateStr", dateStr),
+            ("timeStr", timeStr)
+        ), ct);
         await inbox.SendToMobileAsync(phone, "تأیید نهایی قرارداد", msg, ct);
         await smsSender.SendSmsAsync(new SmsRequest(phone, msg), ct);
     }

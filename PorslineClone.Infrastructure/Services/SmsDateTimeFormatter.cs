@@ -5,7 +5,8 @@ namespace PorslineClone.Infrastructure.Services;
 /// <summary>تاریخ و ساعت شمسی تهران با ارقام فارسی — برای متن پیامک.</summary>
 public static class SmsDateTimeFormatter
 {
-    private static readonly TimeZoneInfo TehranZone = TimeZoneInfo.FindSystemTimeZoneById("Iran Standard Time");
+    private static readonly TimeZoneInfo TehranZone = TimeZoneInfo.FindSystemTimeZoneById(
+        OperatingSystem.IsWindows() ? "Iran Standard Time" : "Asia/Tehran");
     private static readonly PersianCalendar Persian = new();
 
     public static (string Date, string Time) FormatUtcNowTehran() => FormatUtcTehran(DateTime.UtcNow);

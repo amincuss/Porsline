@@ -26,7 +26,7 @@ public class AdminFormAccessController(AppDbContext db) : ControllerBase
         page = Math.Max(1, page);
         pageSize = Math.Clamp(pageSize, 1, 50);
 
-        var q = db.Users.Where(x => !x.IsSoftDeleted).AsQueryable();
+        var q = db.Users.SelectableUsers().AsQueryable();
         if (!string.IsNullOrWhiteSpace(search))
         {
             var s = search.Trim();
@@ -106,7 +106,7 @@ public class AdminFormAccessController(AppDbContext db) : ControllerBase
     [Authorize(Policy = "forms.access.update")]
     public async Task<IActionResult> SetUserFormAccess(Guid userId, [FromBody] SetUserFormAccessDto dto, CancellationToken ct)
     {
-        var userExists = await db.Users.AnyAsync(x => x.Id == userId && !x.IsSoftDeleted, ct);
+        var userExists = await db.Users.SelectableUsers().AnyAsync(x => x.Id == userId, ct);
         if (!userExists) return NotFound(new { message = "کاربر یافت نشد" });
 
         var form = await ScopeFormsForAccess(db.Forms).FirstOrDefaultAsync(x => x.Id == dto.FormId && !x.IsDeleted, ct);

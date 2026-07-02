@@ -6,14 +6,14 @@ namespace PorslineClone.Infrastructure.Services;
 
 public static class ResponderLookupHelper
 {
-    private static readonly System.Text.RegularExpressions.Regex MobileRx =
-        new(@"^09\d{9}$", System.Text.RegularExpressions.RegexOptions.Compiled);
-
     public static bool IsValidNationalCode(string? code) =>
         !string.IsNullOrWhiteSpace(code);
 
+    public static string NormalizeMobile(string? mobile) =>
+        FormSubmissionMobileHelper.NormalizeMobile(mobile);
+
     public static bool IsValidMobile(string? mobile) =>
-        !string.IsNullOrWhiteSpace(mobile) && MobileRx.IsMatch(mobile.Trim());
+        FormSubmissionMobileHelper.IsValidMobile(mobile);
 
     public static string NormalizeNationalCode(string code) => code.Trim();
 
@@ -40,9 +40,9 @@ public static class ResponderLookupHelper
     {
         var code = NormalizeNationalCode(nationalCode);
         var name = fullName.Trim();
-        var mob = mobile.Trim();
+        var mob = NormalizeMobile(mobile);
 
-        var existing = await db.Responders.FirstOrDefaultAsync(x => x.NationalCode == code, ct);
+        var existing = await ActiveOnly(db).FirstOrDefaultAsync(x => x.NationalCode == code, ct);
         if (existing is not null)
             return await UpdateExistingForDispatchAsync(db, existing, name, mob, gender, ct);
 
@@ -87,10 +87,8 @@ public static class ResponderLookupHelper
         CancellationToken ct)
     {
         if (existing.IsDeleted)
-        {
-            existing.IsDeleted = false;
-            existing.DeletedAtUtc = null;
-        }
+            throw new InvalidOperationException("پاسخگو یافت نشد");
+
         if (name.Length >= 2)
             existing.FullName = name;
         if (gender is not null)
@@ -98,8 +96,8 @@ public static class ResponderLookupHelper
 
         if (IsValidMobile(mobile))
         {
-            var mobileTaken = await ActiveOnly(db).AnyAsync(
-                x => x.MobileNumber == mobile && x.Id != existing.Id,
+            var mobileTaken = await db.Responders.IgnoreQueryFilters().AnyAsync(
+                x => !x.IsDeleted && x.MobileNumber == mobile && x.Id != existing.Id,
                 ct);
             if (!mobileTaken)
                 existing.MobileNumber = mobile;
@@ -131,7 +129,7 @@ public static class ResponderLookupHelper
     {
         if (!IsValidMobile(mobile))
             return;
-        var mob = mobile.Trim();
+        var mob = NormalizeMobile(mobile);
         var q = ActiveOnly(db).Where(x => x.MobileNumber == mob);
         if (excludeId is Guid id)
             q = q.Where(x => x.Id != id);
